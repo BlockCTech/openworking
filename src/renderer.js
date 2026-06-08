@@ -515,11 +515,10 @@ const PLAN_TEXT_MIN_LENGTH = 200
 // Render a text-only plan (no file on disk) in the document-viewer panel.
 function openInlinePlan(text) {
   if (!text) return
-  state.document = {
+  showDocument({
     requestedPath: INLINE_PLAN_PATH, path: "", name: "Plan", relativePath: "Plan",
     content: text, loading: false, error: "", truncated: false, renderMode: "markdown"
-  }
-  render()
+  })
 }
 
 function maybeAutoOpenPlan() {
@@ -881,11 +880,8 @@ function renderUpdatePill() {
 }
 
 function renderSidebar() {
-  if (state.sidebarCollapsed) {
-    return ""
-  }
   return `
-    <aside class="sidebar">
+    <aside class="sidebar"${state.sidebarCollapsed ? ' aria-hidden="true" inert' : ""}>
       <div class="side-top">
         ${renderUpdatePill()}
         <button class="side-collapse-btn" data-action="toggleSidebar" title="Collapse sidebar">${icon("sidebarToggle")}</button>
@@ -1046,13 +1042,11 @@ function renderHeader(title, subtitle) {
   const fileTitle = state.rightSidebarOpen ? "Close files" : "Open current folder"
   return `
     <div class="main-head">
+      <button class="head-icon-btn head-sidebar-btn" data-action="toggleSidebar" title="Show sidebar" aria-label="Show sidebar">
+        ${icon("sidebarToggle")}
+      </button>
       <div class="head-copy"><div class="head-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div><div class="head-path" title="${escapeHtml(subtitle || "")}">${escapeHtml(subtitle || "")}</div></div>
       <div class="head-actions">
-        ${state.sidebarCollapsed ? `
-          <button class="head-icon-btn" data-action="toggleSidebar" title="Show sidebar" aria-label="Show sidebar">
-            ${icon("sidebarToggle")}
-          </button>
-        ` : ""}
         <button class="status-pill ${label}" data-action="toggleDiagnostics"><span class="status-dot"></span>${escapeHtml(label)}</button>
         <button class="head-icon-btn ${state.rightSidebarOpen ? "active" : ""}" data-action="toggleRightSidebar" title="${fileTitle}" aria-label="${fileTitle}">
           ${icon("sidebarRight")}
@@ -1265,8 +1259,12 @@ function renderDocumentViewer() {
     body = `<div class="doc-state error">${escapeHtml(doc.error)}</div>`
   } else if (tab === "diff") {
     body = renderUnifiedDiff(doc.diff, path)
+  } else if (doc.previewMode === "pdf") {
+    body = `${renderArtifactExternalAction(doc)}<iframe class="doc-pdf" src="${escapeHtml(doc.url || "")}" title="${escapeHtml(doc.name || "PDF preview")}"></iframe>`
+  } else if (doc.previewMode === "external") {
+    body = renderArtifactShell(doc)
   } else if ((doc.renderMode || (isMarkdownFilePath(path) ? "markdown" : "code")) === "markdown") {
-    body = `<div class="doc-content assistant-text">${renderMarkdown(doc.content)}</div>${doc.truncated ? `<small class="doc-truncated">File truncated.</small>` : ""}`
+    body = `${renderArtifactExternalAction(doc)}<div class="doc-content assistant-text">${renderMarkdown(doc.content)}</div>${doc.truncated ? `<small class="doc-truncated">File truncated.</small>` : ""}`
   } else {
     body = `<pre class="doc-code"><code class="hljs">${highlightCode(doc.content, path)}</code></pre>${doc.truncated ? `<small class="doc-truncated">File truncated.</small>` : ""}`
   }
@@ -1289,6 +1287,34 @@ function renderDocumentViewer() {
   `
 }
 
+function artifactTypeLabel(doc) {
+  const extension = String(doc.extension || fileExtension(doc.path || doc.requestedPath || "")).replace(/^\./, "").toUpperCase()
+  if (extension) return extension
+  return doc.mime || "Artifact"
+}
+
+function renderArtifactExternalAction(doc) {
+  if (!doc.artifact || !doc.path || doc.loading || doc.error) return ""
+  return `
+    <div class="doc-artifact-actions">
+      <span>${escapeHtml(artifactTypeLabel(doc))} artifact preview</span>
+      <button class="secondary-btn" data-action="openExternalArtifact" data-artifact-path="${escapeHtml(doc.path)}">${icon("arrowUp")}Open externally</button>
+    </div>
+  `
+}
+
+function renderArtifactShell(doc) {
+  return `
+    <div class="doc-artifact-shell">
+      ${icon("doc")}
+      <strong>${escapeHtml(doc.name || filename(doc.path))}</strong>
+      <span>${escapeHtml(artifactTypeLabel(doc))} preview is available as file metadata in this panel.</span>
+      <small>${escapeHtml(doc.path || "")}</small>
+      <button class="secondary-btn" data-action="openExternalArtifact" data-artifact-path="${escapeHtml(doc.path || "")}">${icon("arrowUp")}Open externally</button>
+    </div>
+  `
+}
+
 // Finds the most recent diff produced for `filePath` across the active thread's
 // messages, so opening a file can default to its Diff tab. Reuses collectMessageDiffs.
 function findDiffForPath(filePath) {
@@ -1307,8 +1333,7 @@ async function openDocument(filePath, { diff = null, tab = null } = {}) {
   const renderMode = isMarkdownFilePath(filePath) ? "markdown" : "code"
   const resolvedDiff = diff || findDiffForPath(filePath)
   const resolvedTab = tab || (resolvedDiff ? "diff" : "code")
-  state.document = { requestedPath: filePath, path: filePath, name: filename(filePath), relativePath: "", content: "", loading: true, error: "", renderMode, diff: resolvedDiff, tab: resolvedTab }
-  render()
+  showDocument({ requestedPath: filePath, path: filePath, name: filename(filePath), relativePath: "", content: "", loading: true, error: "", renderMode, diff: resolvedDiff, tab: resolvedTab })
   try {
     const doc = await window.openworking.files.read(filePath)
     if (state.document?.requestedPath !== filePath) return
@@ -1327,15 +1352,95 @@ function switchDocumentTab(tab) {
   render()
 }
 
-function closeDocument() {
-  state.document = null
+function appElement() {
+  return document.querySelector(".app")
+}
+
+function afterTransitionOrTimeout(element, callback, timeout = 240) {
+  if (!element) {
+    callback()
+    return
+  }
+  let done = false
+  const finish = () => {
+    if (done) return
+    done = true
+    element.removeEventListener("transitionend", onTransitionEnd)
+    clearTimeout(timer)
+    callback()
+  }
+  const onTransitionEnd = (event) => {
+    if (event.target === element) finish()
+  }
+  const timer = setTimeout(finish, timeout)
+  element.addEventListener("transitionend", onTransitionEnd)
+}
+
+function syncSidebarCollapsedDom(collapsed = state.sidebarCollapsed) {
+  const app = appElement()
+  if (app) app.classList.toggle("collapsed", collapsed)
+  const sidebar = document.querySelector(".sidebar")
+  if (!sidebar) return
+  if (collapsed) {
+    sidebar.setAttribute("aria-hidden", "true")
+    sidebar.setAttribute("inert", "")
+  } else {
+    sidebar.removeAttribute("aria-hidden")
+    sidebar.removeAttribute("inert")
+  }
+}
+
+function startPanelOpenTransition(preopenClass) {
+  const app = appElement()
+  if (!app) return
+  app.classList.add(preopenClass)
+  requestAnimationFrame(() => {
+    const current = appElement()
+    if (!current) return
+    current.classList.remove(preopenClass)
+  })
+}
+
+function showDocument(document) {
+  const opening = !state.document
+  state.document = document
   render()
+  if (opening) startPanelOpenTransition("document-preopen")
+}
+
+function closeDocument() {
+  if (!state.document) return
+  const app = appElement()
+  if (!app) {
+    state.document = null
+    render()
+    return
+  }
+  app.classList.add("document-closing")
+  afterTransitionOrTimeout(app, () => {
+    state.document = null
+    render()
+  })
+}
+
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed
+  syncSidebarCollapsedDom()
 }
 
 async function toggleRightSidebar() {
   if (state.rightSidebarOpen) {
-    state.rightSidebarOpen = false
-    render()
+    const app = appElement()
+    if (!app) {
+      state.rightSidebarOpen = false
+      render()
+      return
+    }
+    app.classList.add("right-sidebar-closing")
+    afterTransitionOrTimeout(app, () => {
+      state.rightSidebarOpen = false
+      render()
+    })
     return
   }
   const project = selectedProject()
@@ -1343,10 +1448,10 @@ async function toggleRightSidebar() {
     showToast("Open a project before browsing files.")
     return
   }
-  state.sidebarCollapsed = true
   state.rightSidebarOpen = true
   if (state.fileTreeProjectId !== project.id) resetFileTree(project.id)
   render()
+  startPanelOpenTransition("right-sidebar-preopen")
   await loadFileTreeDirectory("")
 }
 
@@ -1775,7 +1880,7 @@ function renderToolArtifacts(metadata) {
   return `
     <div class="tool-artifacts ${metadata?.quality === "warning" ? "warning" : ""}">
       ${artifacts.map((artifact) => `
-        <button class="artifact-chip" data-open-artifact="${escapeHtml(artifact.path)}" title="${escapeHtml(artifact.path)}">
+        <button class="artifact-chip ${state.document?.requestedPath === artifact.path || state.document?.path === artifact.path ? "active" : ""}" data-open-artifact="${escapeHtml(artifact.path)}" title="${escapeHtml(artifact.path)}">
           ${icon("doc")}<span><strong>${escapeHtml(artifact.filename)}</strong><small>${escapeHtml(artifact.path)}</small></span>
         </button>
       `).join("")}
@@ -2661,6 +2766,21 @@ async function copyMessage(messageId) {
 }
 
 async function openArtifact(artifactPath) {
+  if (!artifactPath) return
+  showDocument({ requestedPath: artifactPath, path: artifactPath, name: filename(artifactPath), relativePath: "", content: "", loading: true, error: "", artifact: true, previewMode: "loading", renderMode: "markdown", tab: "code" })
+  try {
+    const preview = await window.openworking.artifacts.preview(artifactPath)
+    if (state.document?.requestedPath !== artifactPath) return
+    const renderMode = preview.previewMode === "markdown" ? "markdown" : preview.previewMode
+    state.document = { requestedPath: artifactPath, ...preview, artifact: true, loading: false, error: "", renderMode, tab: "code" }
+  } catch (error) {
+    if (state.document?.requestedPath !== artifactPath) return
+    state.document = { requestedPath: artifactPath, path: artifactPath, name: filename(artifactPath), relativePath: "", content: "", loading: false, error: error.message, artifact: true, previewMode: "error", renderMode: "markdown", tab: "code" }
+  }
+  render()
+}
+
+async function openArtifactExternally(artifactPath) {
   await window.openworking.artifacts.open(artifactPath)
   showToast("Artifact opened")
 }
@@ -2673,10 +2793,7 @@ async function handleAction(event) {
       state.expanded.clear()
       render()
     }
-    if (action === "toggleSidebar") {
-      state.sidebarCollapsed = !state.sidebarCollapsed
-      render()
-    }
+    if (action === "toggleSidebar") toggleSidebar()
     if (action === "toggleRightSidebar") await toggleRightSidebar()
     if (action === "newSession") await newSession(state.activeProjectId)
     if (action === "togglePlanMode") {
@@ -2769,6 +2886,7 @@ async function handleAction(event) {
       render()
     }
     if (action === "closeDocument") closeDocument()
+    if (action === "openExternalArtifact") await openArtifactExternally(event.currentTarget.dataset.artifactPath)
     if (action === "attachment") {
       // Triggered from the "+" popover - close it so the menu does not stay open.
       state.popover = null

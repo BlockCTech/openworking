@@ -1,7 +1,7 @@
 const { app, BrowserWindow, clipboard, ipcMain, dialog, Menu, shell } = require("electron")
 const fs = require("node:fs")
 const path = require("node:path")
-const { assertTranslationArtifact, assertProjectFile, listProjectDirectory, readProjectFileContent } = require("./artifact-path")
+const { assertTranslationArtifact, assertProjectFile, listProjectDirectory, previewTranslationArtifact, readProjectFileContent } = require("./artifact-path")
 const { AttachmentRegistry } = require("./attachment-registry")
 const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, writeEditableProfileConfig } = require("./opencode-profile")
 const { ProjectRegistry } = require("./project-registry")
@@ -214,6 +214,11 @@ function registerIpc() {
     const error = await shell.openPath(safePath)
     if (error) throw new Error(error)
     return safePath
+  })
+  ipcMain.handle("artifacts:preview", async (_event, artifactPath) => {
+    const projectPath = runtimeManager.snapshot().project?.path
+    if (!projectPath) throw new Error("Open a project before previewing an artifact.")
+    return previewTranslationArtifact(projectPath, artifactPath)
   })
 
   ipcMain.handle("files:read", async (_event, filePath) => {

@@ -134,6 +134,8 @@ async function main() {
     "```",
     ""
   ].join("\n"))
+  const translatedMarkdownPath = path.join(projectDocsPath, "manual-translated-vietnamese.md")
+  fs.writeFileSync(translatedMarkdownPath, "# Translated markdown smoke\n\nThis artifact should preview in app.\n")
   fs.writeFileSync(path.join(userDataPath, "projects.json"), `${JSON.stringify({
     projects: [{
       id: "proj_smoke",
@@ -211,6 +213,8 @@ async function main() {
         }
 
         const smokeProject = { id: "proj_smoke", name: "Smoke Project", path: ${JSON.stringify(projectPath)} }
+        const translatedMarkdownPath = ${JSON.stringify(translatedMarkdownPath)}
+        state.auth = { saml2Enabled: false, status: "authenticated", user: { displayName: "Smoke User", email: "smoke@example.com" } }
         state.projects = state.projects.some((project) => project.id === smokeProject.id) ? state.projects : [smokeProject, ...state.projects]
         state.activeProjectId = "proj_smoke"
         state.expanded.add(state.activeProjectId)
@@ -540,9 +544,9 @@ async function main() {
             tool: "translate_document",
             state: {
               status: "completed",
-              input: { inputPath: "/tmp/manual.pdf" },
+              input: { inputPath: translatedMarkdownPath },
               metadata: {
-                artifacts: [{ path: "/tmp/manual-translated-vietnamese.pdf", filename: "manual-translated-vietnamese.pdf", mime: "application/pdf" }],
+                artifacts: [{ path: translatedMarkdownPath, filename: "manual-translated-vietnamese.md", mime: "text/markdown" }],
                 quality: "warning",
                 warnings: ["Review translated layout"]
               }
@@ -552,11 +556,22 @@ async function main() {
         await nextPaint()
         const artifactChip = document.querySelector("[data-open-artifact]")
         const hasTranslationArtifact =
-          artifactChip?.textContent.includes("manual-translated-vietnamese.pdf") &&
+          artifactChip?.textContent.includes("manual-translated-vietnamese.md") &&
           document.querySelector(".artifact-warning")?.textContent.includes("Review translated layout")
         const keepsArtifactOutsideCollapsedStep =
           document.querySelector('[data-tool-step="msg_stream:part_translate_document"]')?.getAttribute("aria-expanded") === "false" &&
           Boolean(artifactChip)
+        state.toast = null
+        renderToast()
+        artifactChip?.click()
+        const artifactClickOpensPreview = await waitUntil(() =>
+          document.querySelector(".document-viewer .doc-content")?.textContent.includes("Translated markdown smoke")
+        )
+        const externalArtifactButton = document.querySelector(".document-viewer [data-action='openExternalArtifact']")
+        const artifactPreviewHasExternalButton =
+          externalArtifactButton?.getAttribute("data-artifact-path")?.endsWith("manual-translated-vietnamese.md") === true
+        const artifactClickAvoidsExternalOpenToast =
+          !document.querySelector(".toast")?.textContent.includes("Artifact opened")
 
         handleRuntimeStream({
           type: "message.part.updated",
@@ -570,7 +585,7 @@ async function main() {
           }
         })
         await nextPaint()
-        const errorToolStep = document.querySelector(".tool-step.error")
+        const errorToolStep = document.querySelector('.tool-step.error[data-tool-step="msg_stream:part_error"]')
         const errorStepStartsOpen =
           errorToolStep?.getAttribute("aria-expanded") === "true" &&
           errorToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("Command failed")
@@ -616,15 +631,25 @@ async function main() {
         const usesLocalRendererAssets = Array.from(document.querySelectorAll("script[src], link[href]"))
           .every((element) => !String(element.getAttribute("src") || element.getAttribute("href")).startsWith("http"))
 
-        document.querySelector('[data-nav="config"]').click()
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        state.nav = "settings"
+        state.settingsSection = "provider"
+        render()
+        await nextPaint()
         const apiKey = document.querySelector('[data-field="providerApiKey"]')
         apiKey.value = "smoke-secret"
         apiKey.dispatchEvent(new Event("input"))
         render()
         await nextPaint()
-        const configText = document.body.textContent
+        const providerSectionText = document.body.textContent
+        state.settingsSection = "advanced"
+        render()
+        await nextPaint()
+        const advancedSectionText = document.body.textContent
         const effectiveConfig = document.querySelector(".config-json").value
+        const configText = providerSectionText + "\\n" + advancedSectionText
+        state.settingsSection = "provider"
+        render()
+        await nextPaint()
         const inputModalities = document.querySelector('[data-model-modalities="input"]')
         const originalInputModalities = inputModalities.value
         inputModalities.value = originalInputModalities + ", docx"
@@ -643,12 +668,28 @@ async function main() {
         inputModalities.value = originalInputModalities
         inputModalities.dispatchEvent(new Event("input"))
         const model = state.config.provider.gateway.models["gpt-4o-mini"]
+        const inputModalityDomList = document.querySelector('[data-model-modalities="input"]')?.value.split(",").map((item) => item.trim()) || []
+        const hasLockedConfigFields =
+          document.querySelectorAll(".form [readonly]").length >= 5 &&
+          !document.querySelector('[data-action="newProvider"]') &&
+          !document.querySelector('[data-model-modalities="output"]')
+        const protectsApiKey =
+          document.querySelector('[data-field="providerApiKey"]')?.type === "password" &&
+          effectiveConfig.includes("[redacted]") &&
+          !effectiveConfig.includes("smoke-secret")
+
+        state.nav = "skills"
+        state.skillsTab = "skills"
+        render()
+        await nextPaint()
+        const skillsText = document.body.textContent
+        const builtInSkillCount = document.querySelectorAll('[data-skill-builtin="1"]').length
         return {
           hasBrand: document.title.includes("OpenWorking"),
           hasNewSession: bodyText.includes("New session"),
           hasPrompt: bodyText.includes("What should we work on in") && bodyText.includes("Smoke Project"),
           hasAddProject: Boolean(document.querySelector('[data-action="addProject"]')),
-          hasConfigNav: bodyText.includes("Config"),
+          hasConfigNav: bodyText.includes("Settings"),
           hidesPlanProposalOnToggle,
           showsPlanProposalAfterPlanReply,
           inlinePlanRendersMarkdown,
@@ -685,6 +726,9 @@ async function main() {
           showsApplyPatchDiff,
           hasTranslationArtifact,
           keepsArtifactOutsideCollapsedStep,
+          artifactClickOpensPreview,
+          artifactPreviewHasExternalButton,
+          artifactClickAvoidsExternalOpenToast,
           errorStepStartsOpen,
           hasRetryRow,
           hasAttachmentChip,
@@ -703,39 +747,32 @@ async function main() {
           hasWideChat,
           hasCompactReplyComposer,
           keepsNarrowGutters,
-          hasLockedConfigFields:
-            document.querySelectorAll(".form [readonly]").length >= 5 &&
-            !document.querySelector('[data-action="newProvider"]') &&
-            !document.querySelector('[data-model-modalities="output"]'),
-          protectsApiKey:
-            document.querySelector('[data-field="providerApiKey"]')?.type === "password" &&
-            effectiveConfig.includes("[redacted]") &&
-            !effectiveConfig.includes("smoke-secret"),
+          hasLockedConfigFields,
+          protectsApiKey,
           showsInvalidModality,
           blocksInvalidModalitySave,
           keepsInvalidModalityOutOfProfile,
           hasPdfModelModality:
-            document.querySelector('[data-model-modalities="input"]')?.value.split(",").map((item) => item.trim()).includes("pdf") &&
+            inputModalityDomList.includes("pdf") &&
             configText.includes("App profile JSON") &&
             configText.includes('"pdf"') &&
             model.modalities.input.includes("pdf"),
           hasBuiltInSkills:
-            configText.includes("Built-in skills") &&
-            configText.includes("explain-project") &&
-            configText.includes("find-bugs") &&
-            configText.includes("write-tests") &&
-            configText.includes("summarize-changes") &&
-            configText.includes("code-review") &&
-            configText.includes("docs-update") &&
-            configText.includes("pdf") &&
-            configText.includes("pptx") &&
-            configText.includes("skill-creator") &&
-            configText.includes("xlsx") &&
-            configText.includes("docx") &&
-            configText.includes("translate-document") &&
-            configText.includes("translate-office-document") &&
-            configText.includes("webapp-testing") &&
-            document.querySelectorAll("[data-skill-toggle]").length === 14,
+            skillsText.includes("explain-project") &&
+            skillsText.includes("find-bugs") &&
+            skillsText.includes("write-tests") &&
+            skillsText.includes("summarize-changes") &&
+            skillsText.includes("code-review") &&
+            skillsText.includes("docs-update") &&
+            skillsText.includes("pdf") &&
+            skillsText.includes("pptx") &&
+            skillsText.includes("skill-creator") &&
+            skillsText.includes("xlsx") &&
+            skillsText.includes("docx") &&
+            skillsText.includes("translate-document") &&
+            skillsText.includes("translate-office-document") &&
+            skillsText.includes("webapp-testing") &&
+            builtInSkillCount === 14,
           runtimeStatus: runtime.status,
           runtimeLastError: runtime.lastError,
           runtimeCommand: runtime.runtime?.command,
@@ -755,6 +792,9 @@ async function main() {
       awaitPromise: true,
       returnByValue: true
     })
+    if (result.exceptionDetails) {
+      console.error("SMOKE EVAL EXCEPTION:", JSON.stringify(result.exceptionDetails, null, 2))
+    }
     const value = result.result.value
     if (
       !value?.hasBrand ||
@@ -795,6 +835,9 @@ async function main() {
       !value.showsApplyPatchDiff ||
       !value.hasTranslationArtifact ||
       !value.keepsArtifactOutsideCollapsedStep ||
+      !value.artifactClickOpensPreview ||
+      !value.artifactPreviewHasExternalButton ||
+      !value.artifactClickAvoidsExternalOpenToast ||
       !value.errorStepStartsOpen ||
       !value.hasRetryRow ||
       !value.hasAttachmentChip ||
@@ -821,6 +864,10 @@ async function main() {
       !value.hasPdfModelModality ||
       !value.hasBuiltInSkills
     ) {
+      const failedAssertions = value && typeof value === "object"
+        ? Object.keys(value).filter((key) => value[key] === false)
+        : []
+      console.error("SMOKE FAILED ASSERTIONS:", JSON.stringify(failedAssertions))
       throw new Error(`Expected local desktop shell, received ${JSON.stringify(value)}`)
     }
     if (value.hasTeamCopy) {

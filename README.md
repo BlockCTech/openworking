@@ -135,23 +135,34 @@ npm run smoke:packaged
 
 `smoke:packaged` builds `dist/mac-arm64/OpenWorking.app`, asserts the packaged upstream runtime, fourteen skills and standalone document translation bundle exist, then launches the app with a minimal `PATH` to prove it does not use a global OpenCode CLI.
 
-Build the unsigned macOS artifacts:
+Build unsigned macOS artifacts for local validation:
 
 ```sh
-npm run pack:mac
-npm run dist:mac
+npm run pack:mac           # unsigned .app directory
+npm run dist:mac:unsigned  # unsigned .dmg
 ```
 
-By default `electron-builder` builds for the host architecture. To build for Intel (x64) Macs explicitly, append `--x64`:
+By default `electron-builder` builds for the host architecture when the command
+does not specify one. To build Intel (x64) artifacts explicitly, append `--x64`:
 
 ```sh
-npm run pack:mac -- --x64   # .app (Intel)
-npm run dist:mac -- --x64   # .dmg (Intel)
+npm run pack:mac -- --x64            # unsigned .app (Intel)
+npm run dist:mac:unsigned -- --x64   # unsigned .dmg (Intel)
 ```
 
-This produces `OpenWorking-<version>-x64.dmg`. The bundled `opencode-ai` runtime ships the matching `opencode-darwin-x64` binary (kept unpacked from asar), so an x64 artifact can be built from an Apple Silicon host as well. For Apple Silicon, use `--arm64` (the default on M-series machines).
+This produces `OpenWorking-<version>-x64.dmg`. The bundled `opencode-ai`
+runtime ships the matching `opencode-darwin-x64` binary (kept unpacked from
+asar), so an x64 artifact can be built from an Apple Silicon host as well. For
+Apple Silicon, use `--arm64` (the default on M-series machines):
 
-The `.app` build uses ad-hoc signing for local validation. Public distribution needs the usual Apple signing and notarization setup.
+```sh
+npm run pack:mac -- --arm64
+npm run dist:mac:unsigned -- --arm64
+```
+
+The local `.app` and unsigned `.dmg` builds use ad-hoc signing and skip
+notarization. Public distribution must use a Developer ID signed and notarized
+`.dmg`.
 
 ## Releasing / Bumping Version
 
@@ -165,14 +176,37 @@ npm run bump:minor   # 0.1.0 -> 0.2.0
 npm run bump:major   # 0.1.0 -> 1.0.0
 ```
 
-Or bump and build the `.dmg` in one step (defaults to `patch`):
+Production macOS builds require Apple signing and notarization credentials:
+
+```sh
+export CSC_LINK=/path/to/developer-id-application.p12
+export CSC_KEY_PASSWORD=...
+export APPLE_API_KEY=/path/to/AuthKey_XXXXXXXXXX.p8
+export APPLE_API_KEY_ID=...
+export APPLE_API_ISSUER=...
+```
+
+Build signed and notarized `.dmg` artifacts without bumping the version:
+
+```sh
+npm run dist:mac           # signed + notarized .dmg for configured arches
+npm run dist:mac -- --x64  # signed + notarized .dmg (Intel)
+npm run dist:mac -- --arm64
+```
+
+Or bump and build signed/notarized `.dmg` artifacts in one step (defaults to
+`patch`):
 
 ```sh
 npm run release:mac           # patch + dist:mac
 npm run release:mac -- minor  # minor + dist:mac
 ```
 
-`release:mac` prints the new version and the path of the `.dmg` it produced. It does **not** commit or tag — review and commit the version bump yourself, then attach the `.dmg` to a GitHub release.
+`release:mac` fails before bumping if any required signing/notarization
+environment variable is missing. After building, it verifies the packaged app
+with `codesign` and `spctl`. It prints the new version and the path of the
+`.dmg` it produced. It does **not** commit or tag — review and commit the
+version bump yourself, then attach the `.dmg` to a GitHub release.
 
 The in-app update check is **disabled by default**. If you self-host a version API, set `OPENWORKING_VERSION_API_BASE` to enable the soft/force update gates.
 

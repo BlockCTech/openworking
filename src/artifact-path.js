@@ -1,9 +1,18 @@
 const fs = require("node:fs")
 const path = require("node:path")
 const { StringDecoder } = require("node:string_decoder")
+const { pathToFileURL } = require("node:url")
 
 const TRANSLATION_ARTIFACT_EXTENSIONS = new Set([".docx", ".md", ".markdown", ".pdf", ".pptx", ".xlsx"])
 const TRANSLATION_ARTIFACT_NAME = /^.+-translated-[a-z0-9]+(?:-[a-z0-9]+)*(?:-\d+)?$/
+const TRANSLATION_ARTIFACT_MIME_BY_EXTENSION = {
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".md": "text/markdown",
+  ".markdown": "text/markdown",
+  ".pdf": "application/pdf",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+}
 
 function assertTranslationArtifact(projectPath, artifactPath) {
   const requestedArtifact = path.resolve(String(artifactPath))
@@ -164,4 +173,43 @@ function readProjectFileContent(safePath, maxBytes) {
   }
 }
 
-module.exports = { assertTranslationArtifact, assertProjectFile, assertProjectDirectory, listProjectDirectory, readProjectFileContent }
+function artifactRelativePath(projectPath, safePath) {
+  if (!projectPath) return path.basename(safePath)
+  try {
+    const projectRoot = fs.realpathSync(path.resolve(projectPath))
+    const relative = path.relative(projectRoot, safePath)
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return relative
+  } catch {
+    // Fall through to the basename for artifacts outside the active project.
+  }
+  return path.basename(safePath)
+}
+
+function previewTranslationArtifact(projectPath, artifactPath, maxBytes = 2 * 1024 * 1024) {
+  const safePath = assertTranslationArtifact(projectPath, artifactPath)
+  const extension = path.extname(safePath).toLowerCase()
+  const base = {
+    path: safePath,
+    relativePath: artifactRelativePath(projectPath, safePath),
+    name: path.basename(safePath),
+    extension,
+    mime: TRANSLATION_ARTIFACT_MIME_BY_EXTENSION[extension] || "application/octet-stream"
+  }
+  if (extension === ".md" || extension === ".markdown") {
+    const { content, truncated } = readProjectFileContent(safePath, maxBytes)
+    return { ...base, previewMode: "markdown", content, truncated }
+  }
+  if (extension === ".pdf") {
+    return { ...base, previewMode: "pdf", url: pathToFileURL(safePath).href, truncated: false }
+  }
+  return { ...base, previewMode: "external", truncated: false }
+}
+
+module.exports = {
+  assertTranslationArtifact,
+  assertProjectFile,
+  assertProjectDirectory,
+  listProjectDirectory,
+  previewTranslationArtifact,
+  readProjectFileContent
+}

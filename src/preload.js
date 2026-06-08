@@ -33,7 +33,8 @@ contextBridge.exposeInMainWorld("openworking", {
     writeText: (text) => ipcRenderer.invoke("clipboard:writeText", text)
   },
   artifacts: {
-    open: (artifactPath) => ipcRenderer.invoke("artifacts:open", artifactPath)
+    open: (artifactPath) => ipcRenderer.invoke("artifacts:open", artifactPath),
+    preview: (artifactPath) => ipcRenderer.invoke("artifacts:preview", artifactPath)
   },
   files: {
     read: (filePath) => ipcRenderer.invoke("files:read", filePath),

@@ -1,6 +1,6 @@
 {
   "name": "openworking",
-  "version": "1.10.9",
+  "version": "1.11.1",
   "private": true,
   "description": "OpenWorking — a local-first desktop shell for OpenCode with a self-configured OpenAI-compatible API gateway.",
   "license": "MIT",
@@ -29,9 +29,10 @@
     "presmoke:electron": "npm run build:document-tools",
     "smoke:electron": "node scripts/electron-smoke.js",
     "prepack:mac": "npm run build:document-tools",
-    "pack:mac": "electron-builder --mac dir",
+    "pack:mac": "electron-builder --mac dir -c.mac.forceCodeSigning=false -c.mac.notarize=false",
     "predist:mac": "npm run build:document-tools",
     "dist:mac": "electron-builder --mac dmg",
+    "dist:mac:unsigned": "electron-builder --mac dmg -c.mac.forceCodeSigning=false -c.mac.notarize=false",
     "presmoke:packaged": "npm run build:document-tools",
     "smoke:packaged": "node scripts/packaged-smoke.js",
     "pretest:e2e": "npm run build:document-tools",
@@ -101,7 +102,9 @@
     },
     "mac": {
       "category": "public.app-category.developer-tools",
+      "forceCodeSigning": true,
       "icon": "src/assets/thumbnail_icon.png",
+      "notarize": true,
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
         {

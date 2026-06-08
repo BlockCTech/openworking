@@ -3,7 +3,8 @@ const assert = require("node:assert/strict")
 const fs = require("node:fs")
 const os = require("node:os")
 const path = require("node:path")
-const { assertTranslationArtifact, assertProjectFile, assertProjectDirectory, listProjectDirectory, readProjectFileContent } = require("../src/artifact-path")
+const { pathToFileURL } = require("node:url")
+const { assertTranslationArtifact, assertProjectFile, assertProjectDirectory, listProjectDirectory, previewTranslationArtifact, readProjectFileContent } = require("../src/artifact-path")
 
 test("translation artifacts open when they match the translated document convention", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-artifacts-"))
@@ -51,6 +52,81 @@ test("in-place translated workbooks open when they live inside the project even 
   // An inaccessible or missing project root should fail with the artifact gate's
   // intended error instead of leaking fs.realpathSync.
   assert.throws(() => assertTranslationArtifact(path.join(project, "missing-project"), inProject), /not a translated document artifact/)
+})
+
+test("translated markdown artifacts return preview content", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-preview-md-"))
+  const artifact = path.join(project, "manual-translated-vietnamese.md")
+  fs.writeFileSync(artifact, "# Xin chao\n\nNoi dung da dich.")
+
+  assert.deepEqual(previewTranslationArtifact(project, artifact), {
+    path: fs.realpathSync(artifact),
+    relativePath: "manual-translated-vietnamese.md",
+    name: "manual-translated-vietnamese.md",
+    extension: ".md",
+    mime: "text/markdown",
+    previewMode: "markdown",
+    content: "# Xin chao\n\nNoi dung da dich.",
+    truncated: false
+  })
+})
+
+test("translated markdown artifact preview reports truncation", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-preview-md-trunc-"))
+  const artifact = path.join(project, "large-translated-vietnamese.markdown")
+  fs.writeFileSync(artifact, "a".repeat(20))
+
+  const preview = previewTranslationArtifact(project, artifact, 5)
+  assert.equal(preview.previewMode, "markdown")
+  assert.equal(preview.content, "aaaaa")
+  assert.equal(preview.truncated, true)
+})
+
+test("translated pdf artifacts return a safe file preview URL", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-preview-pdf-"))
+  const artifact = path.join(project, "manual-translated-vietnamese.pdf")
+  fs.writeFileSync(artifact, "%PDF-1.4\n")
+
+  const preview = previewTranslationArtifact(project, artifact)
+  assert.equal(preview.path, fs.realpathSync(artifact))
+  assert.equal(preview.relativePath, "manual-translated-vietnamese.pdf")
+  assert.equal(preview.name, "manual-translated-vietnamese.pdf")
+  assert.equal(preview.extension, ".pdf")
+  assert.equal(preview.mime, "application/pdf")
+  assert.equal(preview.previewMode, "pdf")
+  assert.equal(preview.url, pathToFileURL(fs.realpathSync(artifact)).href)
+  assert.equal("content" in preview, false)
+})
+
+test("translated office artifacts return shell preview metadata without content", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-preview-office-"))
+  const cases = [
+    ["manual-translated-vietnamese.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+    ["manual-translated-vietnamese.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+    ["manual-translated-vietnamese.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]
+  ]
+
+  for (const [name, mime] of cases) {
+    const artifact = path.join(project, name)
+    fs.writeFileSync(artifact, Buffer.from([0, 1, 2, 3]))
+    const preview = previewTranslationArtifact(project, artifact)
+    assert.equal(preview.path, fs.realpathSync(artifact))
+    assert.equal(preview.relativePath, name)
+    assert.equal(preview.name, name)
+    assert.equal(preview.mime, mime)
+    assert.equal(preview.previewMode, "external")
+    assert.equal("content" in preview, false)
+    assert.equal("url" in preview, false)
+  }
+})
+
+test("translated artifact preview rejects invalid artifacts", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-preview-invalid-"))
+  const invalid = path.join(project, "manual.txt")
+  fs.writeFileSync(invalid, "not an artifact")
+
+  assert.throws(() => previewTranslationArtifact(project, invalid), /not a translated document artifact/)
+  assert.throws(() => previewTranslationArtifact(project, path.join(project, "missing-translated-vietnamese.md")), /Artifact does not exist/)
 })
 
 test("project viewable files open only from inside the project tree", () => {
