@@ -736,7 +736,6 @@ function renderThreadRows() {
     ${renderPendingPermissions()}
     ${renderPendingQuestions()}
     ${renderPlanProposal()}
-    ${renderChangesSummary(state.thread)}
   `
 }
 
@@ -792,7 +791,8 @@ function renderThreadMessage(message) {
   const parts = message.parts.map(renderAssistantPart).join("")
   if (!parts) return ""
   const fileRefs = renderFileRefChips(messageFileRefs(message))
-  return `<div class="msg-ai"><div class="message-stack assistant-message"><div class="message-card ai-body">${parts}${fileRefs}</div>${actions}</div></div>`
+  const changes = renderMessageChanges(message)
+  return `<div class="msg-ai"><div class="message-stack assistant-message"><div class="message-card ai-body">${parts}${fileRefs}${changes}</div>${actions}</div></div>`
 }
 
 const MARKDOWN_FILE_RE = /\.(md|markdown)$/i
@@ -1131,30 +1131,31 @@ function renderDiffRow(key, { filepath, label, diff, truncated }) {
   `
 }
 
-// Walks every tool part in the thread and collects the latest diff per file.
-function collectThreadDiffs(thread) {
+// Walks the tool parts of a single message and collects the latest diff per file.
+function collectMessageDiffs(message) {
   const byFile = new Map()
-  for (const message of thread?.messages || []) {
-    for (const part of message.parts || []) {
-      if (part.type !== "tool") continue
-      const metadata = part.state?.metadata
-      const diff = metadata?.diff
-      if (typeof diff !== "string" || !diff) continue
-      const filepath = metadata.filepath
-        || (Array.isArray(metadata.files) && metadata.files.length ? metadata.files.join(", ") : "")
-      const fileKey = filepath || part.id
-      const label = Array.isArray(metadata.files) && metadata.files.length > 1
-        ? `${metadata.files.length} files`
-        : (filepath ? filename(filepath) : "Changes")
-      // Later parts overwrite earlier ones → keep the most recent diff per file.
-      byFile.set(fileKey, { fileKey, filepath, label, diff, truncated: metadata.diffTruncated === true })
-    }
+  for (const part of message?.parts || []) {
+    if (part.type !== "tool") continue
+    const metadata = part.state?.metadata
+    const diff = metadata?.diff
+    if (typeof diff !== "string" || !diff) continue
+    const filepath = metadata.filepath
+      || (Array.isArray(metadata.files) && metadata.files.length ? metadata.files.join(", ") : "")
+    const fileKey = filepath || part.id
+    const label = Array.isArray(metadata.files) && metadata.files.length > 1
+      ? `${metadata.files.length} files`
+      : (filepath ? filename(filepath) : "Changes")
+    // Later parts overwrite earlier ones → keep the most recent diff per file.
+    byFile.set(fileKey, { fileKey, filepath, label, diff, truncated: metadata.diffTruncated === true })
   }
   return [...byFile.values()]
 }
 
-function renderChangesSummary(thread) {
-  const diffs = collectThreadDiffs(thread)
+// Renders the "Changes" card inline beneath the assistant message that produced
+// the edits. Diffs are scoped to this message only — disclosure keys are namespaced
+// by message id so each card keeps its own open/closed state.
+function renderMessageChanges(message) {
+  const diffs = collectMessageDiffs(message)
   if (!diffs.length) return ""
   let additions = 0
   let deletions = 0
@@ -1173,7 +1174,7 @@ function renderChangesSummary(thread) {
         </span>
       </div>
       <div class="changes-list">
-        ${diffs.map((entry) => renderDiffRow(`changes:${entry.fileKey}`, entry)).join("")}
+        ${diffs.map((entry) => renderDiffRow(`changes:${message.id}:${entry.fileKey}`, entry)).join("")}
       </div>
     </div>
   `

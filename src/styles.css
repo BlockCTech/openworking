@@ -541,7 +541,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .tool-diff code { background: none; padding: 0; }
 .tool-diff-truncated { color: var(--text-4); font-size: 11px; }
 
-.changes-summary { margin-top: 18px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); overflow: hidden; }
+.changes-summary { margin-top: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); overflow: hidden; }
 .changes-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; border-bottom: 1px solid var(--border); }
 .changes-head strong { font-size: 13px; }
 .changes-meta { display: inline-flex; align-items: center; gap: 12px; color: var(--text-3); font-size: 12px; }
