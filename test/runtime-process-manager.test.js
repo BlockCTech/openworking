@@ -1,0 +1,902 @@
+const test = require("node:test")
+const assert = require("node:assert/strict")
+const fs = require("node:fs")
+const http = require("node:http")
+const os = require("node:os")
+const path = require("node:path")
+const { pathToFileURL } = require("node:url")
+const AdmZip = require("adm-zip")
+const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, translationGatewayEnv } = require("../src/runtime/process-manager")
+
+test("translation gateway env resolves managed config without exposing extra provider fields", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-gateway-"))
+  const configPath = path.join(temp, "opencode.json")
+  fs.writeFileSync(configPath, JSON.stringify({
+    provider: {
+      managed: {
+        options: { baseURL: "https://gateway.example/v1", apiKey: "{env:GATEWAY_KEY}", ignored: "do-not-export" },
+        models: { "gemma/model": {} }
+      }
+    }
+  }))
+
+  assert.deepEqual(translationGatewayEnv(configPath, { GATEWAY_KEY: "secret" }), {
+    OPENWORKING_TRANSLATION_BASE_URL: "https://gateway.example/v1",
+    OPENWORKING_TRANSLATION_API_KEY: "secret",
+    OPENWORKING_TRANSLATION_MODEL: "gemma/model"
+  })
+})
+
+test("tool metadata projection keeps only allowlisted artifact fields", () => {
+  assert.deepEqual(projectToolMetadata({
+    artifacts: [{ path: "/tmp/report.pdf", filename: "report.pdf", mime: "application/pdf", secret: "remove" }],
+    quality: "warning",
+    warnings: ["Check layout"],
+    secret: "remove"
+  }), {
+    artifacts: [{ path: "/tmp/report.pdf", filename: "report.pdf", mime: "application/pdf" }],
+    quality: "warning",
+    warnings: ["Check layout"]
+  })
+})
+
+test("tool metadata projection forwards the unified diff and filepath", () => {
+  const diff = "@@ -1 +1 @@\n-old line\n+new line"
+  assert.deepEqual(projectToolMetadata({
+    diff,
+    filepath: "/project/src/main.js",
+    diagnostics: { "/project/src/main.js": [{ message: "drop me" }] },
+    secret: "remove"
+  }), {
+    artifacts: [],
+    quality: "verified",
+    warnings: [],
+    diff,
+    filepath: "/project/src/main.js"
+  })
+})
+
+test("tool metadata projection lists files for multi-file patch diffs", () => {
+  const diff = "@@ -1 +1 @@\n-a\n+b"
+  assert.deepEqual(projectToolMetadata({
+    diff,
+    files: ["a.js", "b.js", 7]
+  }), {
+    artifacts: [],
+    quality: "verified",
+    warnings: [],
+    diff,
+    files: ["a.js", "b.js"]
+  })
+})
+
+test("tool metadata projection truncates oversized diffs", () => {
+  const diff = "+x\n".repeat(100000)
+  const projected = projectToolMetadata({ diff, filepath: "/project/big.js" })
+  assert.equal(projected.diffTruncated, true)
+  assert.equal(projected.diff.length, 200000)
+  assert.ok(diff.startsWith(projected.diff))
+})
+
+test("tool metadata projection returns null when nothing is allowlisted", () => {
+  assert.equal(projectToolMetadata({ secret: "remove", diff: "" }), null)
+})
+
+test("text part projection preserves the synthetic flag", () => {
+  assert.deepEqual(projectMessagePart({
+    id: "part_synthetic",
+    sessionID: "sess_one",
+    messageID: "msg_user",
+    type: "text",
+    synthetic: true,
+    text: "Called the Read tool with the following input: {}"
+  }), {
+    id: "part_synthetic",
+    sessionID: "sess_one",
+    messageID: "msg_user",
+    type: "text",
+    text: "Called the Read tool with the following input: {}",
+    synthetic: true
+  })
+
+  assert.equal("synthetic" in projectMessagePart({
+    id: "part_plain",
+    sessionID: "sess_one",
+    messageID: "msg_user",
+    type: "text",
+    text: "Plain prompt"
+  }), false)
+})
+
+test("question.asked projection whitelists prompt and option display fields", () => {
+  const projected = projectRuntimeEvent({
+    type: "question.asked",
+    properties: {
+      sessionID: "sess_one",
+      requestID: "q1",
+      header: "Pick an approach",
+      questions: [{
+        question: "Which approach should I take?",
+        multiple: true,
+        options: [
+          { label: "Doc + script", value: "both", description: "Recommended", secret: "drop" },
+          "doc-only"
+        ]
+      }],
+      secret: "drop"
+    }
+  })
+
+  assert.deepEqual(projected, {
+    type: "question.asked",
+    sessionID: "sess_one",
+    requestID: "q1",
+    question: {
+      header: "Pick an approach",
+      questions: [{
+        question: "Which approach should I take?",
+        multiple: true,
+        options: [
+          { label: "Doc + script", value: "both", description: "Recommended" },
+          { label: "doc-only", value: "doc-only" }
+        ]
+      }]
+    }
+  })
+})
+
+test("question.asked projection accepts a single question string and falls back to id", () => {
+  const projected = projectRuntimeEvent({
+    type: "question.asked",
+    properties: { sessionID: "sess_one", id: "q9", question: "Continue?" }
+  })
+  assert.equal(projected.requestID, "q9")
+  assert.equal(projected.question.questions[0].question, "Continue?")
+  assert.deepEqual(projected.question.questions[0].options, [])
+})
+
+test("question reply/reject projection forwards only ids", () => {
+  for (const type of ["question.replied", "question.rejected"]) {
+    assert.deepEqual(projectRuntimeEvent({ type, properties: { sessionID: "sess_one", requestID: "q1", extra: "drop" } }), {
+      type, sessionID: "sess_one", requestID: "q1"
+    })
+  }
+})
+
+test("permission.asked projection whitelists display fields", () => {
+  const projected = projectRuntimeEvent({
+    type: "permission.asked",
+    properties: {
+      sessionID: "sess_one",
+      requestID: "p1",
+      title: "Allow edit to src/index.js?",
+      type: "edit",
+      pattern: "src/**",
+      callID: "call_42",
+      metadata: { tool: "edit" },
+      secret: "drop"
+    }
+  })
+
+  assert.deepEqual(projected, {
+    type: "permission.asked",
+    sessionID: "sess_one",
+    requestID: "p1",
+    permission: {
+      title: "Allow edit to src/index.js?",
+      type: "edit",
+      pattern: "src/**",
+      callID: "call_42",
+      metadata: { tool: "edit" }
+    }
+  })
+})
+
+test("permission.replied projection forwards only ids and drops malformed events", () => {
+  assert.deepEqual(projectRuntimeEvent({ type: "permission.replied", properties: { sessionID: "sess_one", requestID: "p1" } }), {
+    type: "permission.replied", sessionID: "sess_one", requestID: "p1"
+  })
+  assert.equal(projectRuntimeEvent({ type: "permission.asked", properties: { sessionID: "sess_one" } }), null)
+  assert.equal(projectRuntimeEvent({ type: "question.asked", properties: { requestID: "q1" } }), null)
+})
+
+test("prompt parts route an office attachment as a local path instead of a model file part", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-prompt-office-"))
+  const input = path.join(temp, "事業.xlsx")
+  const zip = new AdmZip()
+  zip.addFile("[Content_Types].xml", Buffer.from("<Types/>"))
+  zip.addFile("xl/workbook.xml", Buffer.from("<workbook><sheets><sheet name=\"QA\" sheetId=\"1\"/></sheets></workbook>"))
+  zip.addFile("xl/sharedStrings.xml", Buffer.from("<sst><si><t>確認事項</t></si></sst>"))
+  zip.addFile("xl/worksheets/sheet1.xml", Buffer.from("<worksheet><sheetData><row r=\"1\"><c r=\"A1\" t=\"s\"><v>0</v></c></row></sheetData></worksheet>"))
+  zip.writeZip(input)
+
+  const parts = buildPromptParts({
+    prompt: "Hãy dịch file này sang tiếng Việt",
+    attachments: [{
+      url: pathToFileURL(input).href,
+      filename: "事業.xlsx",
+      mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    }]
+  })
+
+  assert.equal(parts.some((part) => part.type === "file"), false)
+  assert.equal(parts.length, 1)
+  assert.equal(parts[0].type, "text")
+  assert.match(parts[0].text, /Hãy dịch file này sang tiếng Việt/)
+  assert.match(parts[0].text, /gateway accepts text\/images, not raw Office binaries/)
+  assert.match(parts[0].text, /call the translate_document tool with the exact local inputPath/)
+  assert.match(parts[0].text, /Do not claim an output path unless it is returned in translate_document metadata\.artifacts/)
+  assert.match(parts[0].text, /Attached files \(local paths\):/)
+  assert.match(parts[0].text, new RegExp(`- ${input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`))
+  assert.match(parts[0].text, /## XLSX attachment: 事業\.xlsx/)
+  assert.match(parts[0].text, /Sheet: QA/)
+  assert.match(parts[0].text, /確認事項/)
+})
+
+test("prompt parts keep pdf and image attachments as model file parts", () => {
+  const parts = buildPromptParts({
+    prompt: "Summarize",
+    attachments: [
+      { url: "file:///tmp/report.pdf", filename: "report.pdf", mime: "application/pdf" },
+      { url: "file:///tmp/diagram.png", filename: "diagram.png", mime: "image/png" }
+    ]
+  })
+
+  assert.deepEqual(parts, [
+    { type: "file", url: "file:///tmp/report.pdf", filename: "report.pdf", mime: "application/pdf" },
+    { type: "file", url: "file:///tmp/diagram.png", filename: "diagram.png", mime: "image/png" },
+    { type: "text", text: "Summarize" }
+  ])
+})
+
+test("prompt parts split a mixed pdf and office attachment set", () => {
+  const parts = buildPromptParts({
+    prompt: "Translate the deck",
+    attachments: [
+      { url: "file:///tmp/report.pdf", filename: "report.pdf", mime: "application/pdf" },
+      { url: "file:///tmp/deck.pptx", filename: "deck.pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation" }
+    ]
+  })
+
+  const fileParts = parts.filter((part) => part.type === "file")
+  assert.deepEqual(fileParts, [
+    { type: "file", url: "file:///tmp/report.pdf", filename: "report.pdf", mime: "application/pdf" }
+  ])
+  const textPart = parts.find((part) => part.type === "text")
+  assert.match(textPart.text, /- \/tmp\/deck\.pptx/)
+  assert.equal(textPart.text.includes("report.pdf"), false)
+})
+
+test("runtime binary resolves to bundled opencode dependency by default", () => {
+  const previous = process.env.OPENWORKING_RUNTIME_BIN
+  const previousOpencode = process.env.OPENCODE_BIN
+  delete process.env.OPENWORKING_RUNTIME_BIN
+  delete process.env.OPENCODE_BIN
+
+  try {
+    assert.equal(
+      resolveRuntimeBin(),
+      path.join(__dirname, "..", "node_modules", "opencode-ai", "bin", "opencode.exe")
+    )
+  } finally {
+    if (previous === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previous
+    if (previousOpencode === undefined) delete process.env.OPENCODE_BIN
+    else process.env.OPENCODE_BIN = previousOpencode
+  }
+})
+
+test("runtime binary falls back to packaged platform opencode dependency", () => {
+  const previous = Object.getOwnPropertyDescriptor(process, "resourcesPath")
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-packaged-runtime-"))
+  const runtimePlatform = process.platform === "win32" ? "windows" : process.platform
+  const executable = process.platform === "win32" ? "opencode.exe" : "opencode"
+  const runtimePath = path.join(temp, "app.asar.unpacked", "node_modules", `opencode-${runtimePlatform}-fallback`, "bin", executable)
+  fs.mkdirSync(path.dirname(runtimePath), { recursive: true })
+  fs.writeFileSync(runtimePath, "")
+
+  try {
+    Object.defineProperty(process, "resourcesPath", { value: temp, configurable: true })
+    assert.equal(resolveRuntimeBin(), runtimePath)
+  } finally {
+    if (previous) Object.defineProperty(process, "resourcesPath", previous)
+    else delete process.resourcesPath
+  }
+})
+
+test("runtime manager opens a project and exposes explicit session APIs", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-"))
+  const projectPath = path.join(temp, "project")
+  const secondProjectPath = path.join(temp, "second-project")
+  fs.mkdirSync(projectPath)
+  fs.mkdirSync(secondProjectPath)
+  const configPath = path.join(temp, "opencode.json")
+  fs.writeFileSync(configPath, JSON.stringify({
+    provider: {
+      gateway: {
+        options: { baseURL: "http://127.0.0.1:49152/api/v1", apiKey: "gateway-key" },
+        models: { "gpt-4o-mini": {} }
+      }
+    }
+  }))
+  const capturePath = path.join(temp, "capture.json")
+  const fakeRuntimePath = path.join(temp, "fake-opencode.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+const fs = require("node:fs")
+const http = require("node:http")
+const port = Number(process.argv[process.argv.indexOf("--port") + 1])
+const capturePath = ${JSON.stringify(capturePath)}
+const capture = {
+  cwd: process.cwd(),
+  config: process.env.OPENCODE_CONFIG,
+  configDir: process.env.OPENCODE_CONFIG_DIR,
+  dataHome: process.env.XDG_DATA_HOME,
+  stateHome: process.env.XDG_STATE_HOME,
+  cacheHome: process.env.XDG_CACHE_HOME,
+  projectId: process.env.OPENWORKING_PROJECT_ID,
+  projectPath: process.env.OPENWORKING_PROJECT_PATH,
+  translationBaseURL: process.env.OPENWORKING_TRANSLATION_BASE_URL,
+  translationApiKey: process.env.OPENWORKING_TRANSLATION_API_KEY,
+  translationModel: process.env.OPENWORKING_TRANSLATION_MODEL
+}
+const sessions = [
+  { id: "sess_existing", title: "Existing session", directory: process.cwd() },
+  { id: "sess_other", title: "Other project", directory: "/tmp/other-project" }
+]
+function save() { fs.writeFileSync(capturePath, JSON.stringify(capture)) }
+function body(req, done) {
+  let raw = ""
+  req.on("data", chunk => { raw += chunk })
+  req.on("end", () => done(raw ? JSON.parse(raw) : {}))
+}
+save()
+const server = http.createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json")
+  if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
+  if (req.url === "/command" && req.method === "GET") return res.end(JSON.stringify([
+    { name: "init", description: "guided AGENTS.md setup", source: "command", template: "Create or update AGENTS.md $ARGUMENTS", hints: ["$ARGUMENTS"] },
+    { name: "find-bugs", description: "Inspect code for likely defects.", source: "skill", template: "long skill template body", agent: "build", model: "gemma/model", hints: [] },
+    { name: "mcp-thing", description: "from an MCP server", source: "mcp", template: "x", hints: [] }
+  ]))
+  if (req.url === "/session/sess_new/command" && req.method === "POST") return body(req, data => {
+    capture.command = data
+    save()
+    res.end(JSON.stringify({ ok: true }))
+  })
+  if (req.url === "/session" && req.method === "GET") return res.end(JSON.stringify(sessions))
+  if (req.url === "/session" && req.method === "POST") return body(req, data => {
+    capture.created = data
+    sessions.unshift({ id: "sess_new", title: data.title, directory: process.cwd() })
+    save()
+    res.end(JSON.stringify(sessions[0]))
+  })
+  if (req.url === "/session/sess_new/message?limit=100") {
+    return res.end(JSON.stringify([{
+      info: { id: "msg_ready", sessionID: "sess_new", role: "assistant" },
+      parts: [
+        { id: "part_ready", sessionID: "sess_new", messageID: "msg_ready", type: "text", text: "Ready" },
+        { id: "part_file", sessionID: "sess_new", messageID: "msg_ready", type: "file", filename: "report.pdf", mime: "application/pdf", url: "file:///private/report.pdf" }
+      ]
+    }]))
+  }
+  if (req.url === "/session/sess_new/prompt_async" && req.method === "POST") return body(req, data => {
+    capture.prompt = data
+    save()
+    res.end(JSON.stringify({ ok: true }))
+  })
+  if (req.url === "/event") {
+    res.setHeader("Content-Type", "text/event-stream")
+    return res.writeHead(200)
+  }
+  res.writeHead(404)
+  res.end()
+})
+server.listen(port, "127.0.0.1")
+process.on("SIGTERM", () => process.exit(0))
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  const previousConfigPath = process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  process.env.OPENWORKING_OPENCODE_CONFIG_PATH = configPath
+
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath },
+    emit() {}
+  })
+  const project = { id: "proj_local", name: "Local Project", path: projectPath }
+
+  try {
+    const snapshot = await manager.openProject({ project })
+    const firstPid = snapshot.runtime.pid
+    const captured = JSON.parse(fs.readFileSync(capturePath, "utf8"))
+
+    assert.equal(snapshot.status, "running")
+    assert.equal(snapshot.runtime.cwd, projectPath)
+    assert.equal(snapshot.runtime.configPath, configPath)
+    assert.equal(snapshot.activeSessionId, null)
+    assert.equal(captured.cwd, fs.realpathSync(projectPath))
+    assert.equal(captured.config, configPath)
+    assert.equal(captured.configDir, path.join(temp, "profile"))
+    assert.equal(captured.dataHome, path.join(temp, "profile", "data"))
+    assert.equal(captured.stateHome, path.join(temp, "profile", "state"))
+    assert.equal(captured.cacheHome, path.join(temp, "profile", "cache"))
+    assert.equal(captured.projectId, "proj_local")
+    assert.equal(captured.projectPath, projectPath)
+    assert.equal(captured.translationBaseURL, "http://127.0.0.1:49152/api/v1")
+    assert.equal(captured.translationApiKey, "gateway-key")
+    assert.equal(captured.translationModel, "gpt-4o-mini")
+    assert.equal(JSON.stringify(snapshot).includes("gateway-key"), false)
+
+    assert.equal((await manager.openProject({ project })).runtime.pid, firstPid)
+    assert.deepEqual(await manager.listSessions(), [
+      { id: "sess_existing", title: "Existing session", directory: fs.realpathSync(projectPath) }
+    ])
+
+    assert.equal((await manager.createSession({ title: "New session" })).id, "sess_new")
+    assert.deepEqual((await manager.listMessages({ sessionId: "sess_new" }))[0].parts, [
+      { id: "part_ready", sessionID: "sess_new", messageID: "msg_ready", type: "text", text: "Ready" },
+      { id: "part_file", sessionID: "sess_new", messageID: "msg_ready", type: "file", filename: "report.pdf", mime: "application/pdf" }
+    ])
+    await manager.sendPrompt({
+      sessionId: "sess_new",
+      prompt: "Explain the project",
+      attachments: [
+        { type: "file", url: "file:///tmp/report.pdf", filename: "report.pdf", mime: "application/pdf" },
+        { type: "file", url: "file:///tmp/image.png", filename: "image.png", mime: "image/png" }
+      ],
+      agent: "plan",
+      model: { providerID: "gateway", modelID: "gpt-4o-mini" }
+    })
+
+    const afterPrompt = JSON.parse(fs.readFileSync(capturePath, "utf8"))
+    assert.deepEqual(afterPrompt.created, { title: "New session" })
+    assert.deepEqual(afterPrompt.prompt, {
+      parts: [
+        { type: "file", url: "file:///tmp/report.pdf", filename: "report.pdf", mime: "application/pdf" },
+        { type: "file", url: "file:///tmp/image.png", filename: "image.png", mime: "image/png" },
+        { type: "text", text: "Explain the project" }
+      ],
+      agent: "plan",
+      model: { providerID: "gateway", modelID: "gpt-4o-mini" }
+    })
+
+    assert.deepEqual(await manager.listCommands(), [
+      { name: "init", description: "guided AGENTS.md setup", source: "command", agent: undefined, model: undefined, hints: ["$ARGUMENTS"] },
+      { name: "find-bugs", description: "Inspect code for likely defects.", source: "skill", agent: "build", model: "gemma/model", hints: [] },
+      { name: "mcp-thing", description: "from an MCP server", source: "mcp", agent: undefined, model: undefined, hints: [] }
+    ])
+    await manager.sendCommand({
+      sessionId: "sess_new",
+      command: "init",
+      arguments: "focus on the build steps",
+      agent: "build",
+      model: { providerID: "gateway", modelID: "gpt-4o-mini" }
+    })
+    const afterCommand = JSON.parse(fs.readFileSync(capturePath, "utf8"))
+    assert.deepEqual(afterCommand.command, {
+      command: "init",
+      arguments: "focus on the build steps",
+      agent: "build",
+      model: "gateway/gpt-4o-mini"
+    })
+
+    await manager.sendCommand({
+      sessionId: "sess_new",
+      command: "init",
+      arguments: "without an explicit model",
+      agent: "build"
+    })
+    const afterCommandWithoutModel = JSON.parse(fs.readFileSync(capturePath, "utf8"))
+    assert.deepEqual(afterCommandWithoutModel.command, {
+      command: "init",
+      arguments: "without an explicit model",
+      agent: "build"
+    })
+
+    const switched = await manager.openProject({
+      project: { id: "proj_second", name: "Second Project", path: secondProjectPath }
+    })
+    assert.equal(switched.status, "running")
+    assert.equal(switched.runtime.cwd, secondProjectPath)
+    assert.notEqual(switched.runtime.pid, firstPid)
+  } finally {
+    await manager.stop()
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+    if (previousConfigPath === undefined) delete process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+    else process.env.OPENWORKING_OPENCODE_CONFIG_PATH = previousConfigPath
+  }
+})
+
+test("runtime manager aborts the active session through opencode", async () => {
+  const emitted = []
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/session/sess_new/abort" && req.method === "POST") {
+      captured = { authorization: req.headers.authorization }
+      return res.end("true")
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = server.address().port
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-abort",
+    emit(channel, payload) {
+      emitted.push({ channel, payload })
+    }
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activity = "running"
+  manager.state.activeSessionId = "sess_new"
+  manager.state.runtime = {
+    serverUrl: `http://127.0.0.1:${port}`,
+    auth: { username: "opencode", password: "pw" }
+  }
+  manager.sessionStatuses.sess_new = { type: "busy" }
+
+  try {
+    assert.equal(await manager.abortSession({ sessionId: "sess_new" }), true)
+    assert.deepEqual(captured, {
+      authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`
+    })
+    assert.equal(manager.snapshot().activity, "idle")
+    assert.deepEqual(manager.snapshot().activeSessionStatus, { type: "idle" })
+    assert.ok(emitted.some((event) => (
+      event.channel === "runtime:stream" &&
+      event.payload.type === "session.aborted" &&
+      event.payload.sessionID === "sess_new"
+    )))
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("runtime manager keeps busy state when abort fails", async () => {
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/session/sess_new/abort" && req.method === "POST") {
+      res.writeHead(500)
+      return res.end(JSON.stringify({ error: "abort failed" }))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = server.address().port
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-abort-failed",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activity = "running"
+  manager.state.activeSessionId = "sess_new"
+  manager.state.runtime = {
+    serverUrl: `http://127.0.0.1:${port}`,
+    auth: { username: "opencode", password: "pw" }
+  }
+  manager.sessionStatuses.sess_new = { type: "busy" }
+
+  try {
+    await assert.rejects(
+      () => manager.abortSession({ sessionId: "sess_new" }),
+      /HTTP 500/
+    )
+    assert.equal(manager.snapshot().activity, "running")
+    assert.deepEqual(manager.snapshot().activeSessionStatus, { type: "busy" })
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("runtime manager deletes a session through opencode", async () => {
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/session/sess_new" && req.method === "DELETE") {
+      captured = { method: req.method, authorization: req.headers.authorization }
+      return res.end("true")
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = server.address().port
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-delete",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activeSessionId = "sess_new"
+  manager.state.runtime = {
+    serverUrl: `http://127.0.0.1:${port}`,
+    auth: { username: "opencode", password: "pw" }
+  }
+  manager.sessionStatuses.sess_new = { type: "idle" }
+
+  try {
+    assert.equal(await manager.deleteSession({ sessionId: "sess_new" }), true)
+    assert.deepEqual(captured, {
+      method: "DELETE",
+      authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`
+    })
+    assert.equal(manager.snapshot().activeSessionId, null)
+    assert.equal(Object.prototype.hasOwnProperty.call(manager.sessionStatuses, "sess_new"), false)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("runtime manager surfaces delete failures without clearing the active session", async () => {
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/session/sess_new" && req.method === "DELETE") {
+      res.writeHead(500)
+      return res.end(JSON.stringify({ error: "delete failed" }))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = server.address().port
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-delete-failed",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activeSessionId = "sess_new"
+  manager.state.runtime = {
+    serverUrl: `http://127.0.0.1:${port}`,
+    auth: { username: "opencode", password: "pw" }
+  }
+
+  try {
+    await assert.rejects(
+      () => manager.deleteSession({ sessionId: "sess_new" }),
+      /HTTP 500/
+    )
+    assert.equal(manager.snapshot().activeSessionId, "sess_new")
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("reload respawns the running project so updated credentials take effect", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-reload-"))
+  const projectPath = path.join(temp, "project")
+  fs.mkdirSync(projectPath)
+  const configPath = path.join(temp, "opencode.json")
+  const writeConfig = (apiKey) => fs.writeFileSync(configPath, JSON.stringify({
+    provider: {
+      gateway: {
+        options: { baseURL: "http://127.0.0.1:49152/api/v1", apiKey },
+        models: { "gpt-4o-mini": {} }
+      }
+    }
+  }))
+  writeConfig("old-key")
+  const capturePath = path.join(temp, "capture.json")
+  const fakeRuntimePath = path.join(temp, "fake-opencode.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+const fs = require("node:fs")
+const http = require("node:http")
+const port = Number(process.argv[process.argv.indexOf("--port") + 1])
+fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({ apiKey: process.env.OPENWORKING_TRANSLATION_API_KEY }))
+const server = http.createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json")
+  if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
+  if (req.url === "/event") { res.setHeader("Content-Type", "text/event-stream"); return res.writeHead(200) }
+  res.writeHead(404)
+  res.end()
+})
+server.listen(port, "127.0.0.1")
+process.on("SIGTERM", () => process.exit(0))
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  const previousConfigPath = process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  process.env.OPENWORKING_OPENCODE_CONFIG_PATH = configPath
+
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath },
+    emit() {}
+  })
+  const project = { id: "proj_local", name: "Local Project", path: projectPath }
+
+  try {
+    const first = await manager.openProject({ project })
+    assert.equal(JSON.parse(fs.readFileSync(capturePath, "utf8")).apiKey, "old-key")
+
+    writeConfig("new-key")
+    const reloaded = await manager.reload()
+    assert.equal(reloaded.status, "running")
+    assert.notEqual(reloaded.runtime.pid, first.runtime.pid)
+    assert.equal(JSON.parse(fs.readFileSync(capturePath, "utf8")).apiKey, "new-key")
+  } finally {
+    await manager.stop()
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+    if (previousConfigPath === undefined) delete process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+    else process.env.OPENWORKING_OPENCODE_CONFIG_PATH = previousConfigPath
+  }
+})
+
+test("reload is a no-op when no runtime is running", async () => {
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-reload-noop",
+    emit() {}
+  })
+  const snapshot = await manager.reload()
+  assert.equal(snapshot.status, "idle")
+  assert.equal(manager.child, null)
+})
+
+test("runtime manager projects stream events independently from the diagnostic timeline", () => {
+  const emitted = []
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-stream",
+    emit(channel, payload) {
+      emitted.push({ channel, payload })
+    }
+  })
+  manager.state.activeSessionId = "sess_active"
+
+  manager.handleRuntimeEvent({
+    type: "session.status",
+    properties: { sessionID: "sess_active", status: { type: "busy" } }
+  })
+  manager.handleRuntimeEvent({
+    type: "message.part.updated",
+    properties: {
+      sessionID: "sess_active",
+      part: {
+        id: "part_tool",
+        sessionID: "sess_active",
+        messageID: "msg_assistant",
+        type: "tool",
+        tool: "read",
+        state: {
+          status: "completed",
+          input: { filePath: "src/index.js" },
+          title: "Read src/index.js",
+          output: "do not forward this output"
+        }
+      }
+    }
+  })
+  manager.handleRuntimeEvent({
+    type: "message.part.updated",
+    properties: {
+      sessionID: "sess_active",
+      part: {
+        id: "part_file",
+        sessionID: "sess_active",
+        messageID: "msg_assistant",
+        type: "file",
+        filename: "report.pdf",
+        mime: "application/pdf",
+        url: "file:///private/report.pdf"
+      }
+    }
+  })
+  for (let index = 0; index < 301; index += 1) {
+    manager.handleRuntimeEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: "sess_active",
+        messageID: "msg_assistant",
+        partID: "part_text",
+        field: "text",
+        delta: String(index)
+      }
+    })
+  }
+
+  const stream = emitted.filter((event) => event.channel === "runtime:stream").map((event) => event.payload)
+  assert.deepEqual(manager.snapshot().activeSessionStatus, { type: "busy" })
+  assert.equal(manager.snapshot().activity, "running")
+  assert.equal(manager.snapshot().timeline.length, 300)
+  assert.deepEqual(stream[1], {
+    type: "message.part.updated",
+    sessionID: "sess_active",
+    part: {
+      id: "part_tool",
+      sessionID: "sess_active",
+      messageID: "msg_assistant",
+      type: "tool",
+      tool: "read",
+      state: {
+        status: "completed",
+        input: { filePath: "src/index.js" },
+        title: "Read src/index.js",
+        error: undefined
+      }
+    }
+  })
+  assert.deepEqual(stream[2], {
+    type: "message.part.updated",
+    sessionID: "sess_active",
+    part: {
+      id: "part_file",
+      sessionID: "sess_active",
+      messageID: "msg_assistant",
+      type: "file",
+      filename: "report.pdf",
+      mime: "application/pdf"
+    }
+  })
+  assert.equal(stream.at(-1).delta, "300")
+
+  manager.handleRuntimeEvent({
+    type: "session.status",
+    properties: { sessionID: "sess_active", status: { type: "retry", attempt: 2, message: "Rate limited" } }
+  })
+  assert.equal(manager.snapshot().activeSessionStatus.type, "retry")
+  assert.equal(manager.snapshot().activity, "running")
+
+  manager.handleRuntimeEvent({ type: "session.idle", properties: { sessionID: "sess_active" } })
+  assert.deepEqual(manager.snapshot().activeSessionStatus, { type: "idle" })
+
+  manager.handleRuntimeEvent({
+    type: "session.error",
+    properties: { sessionID: "sess_active", error: { data: { message: "Provider failed" } } }
+  })
+  assert.equal(manager.snapshot().lastError, "Provider failed")
+
+  manager.sessionStatuses.sess_background = { type: "busy" }
+  manager.handleRuntimeEvent({
+    type: "session.error",
+    properties: { sessionID: "sess_background", error: { data: { message: "Background failed" } } }
+  })
+  assert.deepEqual(manager.sessionStatuses.sess_background, { type: "idle" })
+  assert.equal(manager.snapshot().lastError, "Provider failed")
+})
+
+test("runtime manager reconnects the event stream until it is stopped", async () => {
+  const previousFetch = global.fetch
+  let requests = 0
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-reconnect",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  global.fetch = async () => {
+    requests += 1
+    return {
+      ok: true,
+      body: {
+        getReader() {
+          return { read: async () => ({ done: true }) }
+        }
+      }
+    }
+  }
+
+  try {
+    manager.startEventStream("http://127.0.0.1:1", "auth")
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    assert.ok(requests >= 2)
+
+    manager.stopEventStream()
+    const stoppedAt = requests
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    assert.equal(requests, stoppedAt)
+  } finally {
+    manager.stopEventStream()
+    manager.child = null
+    global.fetch = previousFetch
+  }
+})

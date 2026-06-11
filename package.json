@@ -1,0 +1,109 @@
+{
+  "name": "openworking",
+  "version": "1.8.1",
+  "private": true,
+  "description": "OpenWorking — a local-first desktop shell for OpenCode with a self-configured OpenAI-compatible API gateway.",
+  "license": "MIT",
+  "author": "OpenWorking contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BlockCTech/openworking.git"
+  },
+  "keywords": [
+    "electron",
+    "opencode",
+    "ai",
+    "desktop",
+    "local-first",
+    "coding-assistant"
+  ],
+  "main": "src/main.js",
+  "scripts": {
+    "build:document-tools": "node scripts/build-document-tools.js",
+    "predev": "npm run build:document-tools",
+    "dev": "electron .",
+    "prestart": "npm run build:document-tools",
+    "start": "electron .",
+    "pretest": "npm run build:document-tools",
+    "test": "node --test",
+    "presmoke:electron": "npm run build:document-tools",
+    "smoke:electron": "node scripts/electron-smoke.js",
+    "prepack:mac": "npm run build:document-tools",
+    "pack:mac": "electron-builder --mac dir",
+    "predist:mac": "npm run build:document-tools",
+    "dist:mac": "electron-builder --mac dmg",
+    "presmoke:packaged": "npm run build:document-tools",
+    "smoke:packaged": "node scripts/packaged-smoke.js",
+    "preverify": "npm run build:document-tools",
+    "verify": "node --test",
+    "bump:patch": "npm version patch --no-git-tag-version",
+    "bump:minor": "npm version minor --no-git-tag-version",
+    "bump:major": "npm version major --no-git-tag-version",
+    "release:mac": "node scripts/release.js"
+  },
+  "devDependencies": {
+    "@embedpdf/pdfium": "^2.14.3",
+    "@pdf-lib/fontkit": "^1.1.1",
+    "electron": "^39.8.10",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.28.0",
+    "pdf-lib": "^1.17.1",
+    "pngjs": "^7.0.0",
+    "ws": "^8.21.0",
+    "zod": "^4.4.3"
+  },
+  "dependencies": {
+    "@highlightjs/cdn-assets": "11.9.0",
+    "adm-zip": "^0.5.17",
+    "ajv": "^8.20.0",
+    "marked": "18.0.3",
+    "mime-types": "2.1.35",
+    "opencode-ai": "1.16.2"
+  },
+  "build": {
+    "appId": "ai.openworking.desktop",
+    "productName": "OpenWorking",
+    "asar": true,
+    "beforePack": "scripts/before-pack.js",
+    "electronLanguages": [
+      "en"
+    ],
+    "asarUnpack": [
+      "node_modules/opencode-*/**/*"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "node_modules/**/*",
+      "package.json",
+      "!node_modules/@highlightjs/cdn-assets/**/*",
+      "node_modules/@highlightjs/cdn-assets/highlight.min.js",
+      "node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/opencode",
+        "to": "opencode"
+      }
+    ],
+    "dmg": {
+      "format": "ULFO"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "src/assets/thumbnail_icon.png",
+      "artifactName": "${productName}-${version}-${arch}.${ext}",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ]
+    }
+  }
+}
