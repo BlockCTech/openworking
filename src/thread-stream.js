@@ -69,6 +69,15 @@
         mime: part.mime || "application/octet-stream"
       }
     }
+    if (part.type === "reasoning") {
+      return {
+        id: part.id || fallbackId,
+        sessionID: part.sessionID,
+        messageID: part.messageID,
+        type: "reasoning",
+        text: part.text || ""
+      }
+    }
     if (part.type === "error") {
       return {
         id: part.id || fallbackId,
@@ -492,6 +501,12 @@
       if (message.role === "user") removeMatchingOptimistic(thread, message)
       return { changed: true, reconcile: false }
     }
+    // OpenCode streams both answer text and reasoning through `message.part.delta`
+    // with `field: "text"` (the part's text field). The part *type* (text vs
+    // reasoning) is set by the preceding `message.part.updated` that created the
+    // part — so we append to the existing part and preserve its type rather than
+    // inferring type from `field`. If the delta arrives before its part.updated,
+    // default to a text part.
     if (event.type === "message.part.delta" && event.field === "text") {
       const existing = thread.messages.find((message) => message.id === event.messageID)
       const message = ensureMessage(thread, event.messageID, existing?.role || "assistant")
@@ -500,8 +515,8 @@
         part = { id: event.partID, messageID: event.messageID, type: "text", text: "" }
         message.parts.push(part)
       }
-      if (part.type !== "text") return { changed: false, reconcile: false }
-      part.text += event.delta || ""
+      if (part.type !== "text" && part.type !== "reasoning") return { changed: false, reconcile: false }
+      part.text = (part.text || "") + (event.delta || "")
       return { changed: true, reconcile: false }
     }
     if (event.type === "question.asked" && event.requestID) {
@@ -525,6 +540,11 @@
       return { changed, reconcile: false }
     }
     return { changed: false, reconcile: false }
+  }
+
+  function threadIsBusy(thread) {
+    const type = thread?.status?.type
+    return type === "busy" || type === "retry"
   }
 
   function hasRunningTool(thread) {
@@ -559,6 +579,7 @@
     messageCopyText,
     messageText,
     removeOptimisticUser,
-    resetThread
+    resetThread,
+    threadIsBusy
   }
 })

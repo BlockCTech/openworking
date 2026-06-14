@@ -10,7 +10,8 @@ const {
   hydrateThread,
   messageCopyText,
   messageText,
-  removeOptimisticUser
+  removeOptimisticUser,
+  threadIsBusy
 } = require("../src/thread-stream")
 
 function officeContextText(prompt = "Hãy dịch file này sang tiếng Việt") {
@@ -755,6 +756,60 @@ test("thread stream clears pending questions and permissions on abort and sessio
   assert.equal(thread.pendingPermissions.length, 0)
 })
 
+test("threadIsBusy reflects busy/retry status", () => {
+  const thread = createThreadStream("sess_one")
+  assert.equal(threadIsBusy(thread), false)
+  thread.status = { type: "busy" }
+  assert.equal(threadIsBusy(thread), true)
+  thread.status = { type: "retry", attempt: 1 }
+  assert.equal(threadIsBusy(thread), true)
+  thread.status = { type: "idle" }
+  assert.equal(threadIsBusy(thread), false)
+  assert.equal(threadIsBusy(undefined), false)
+})
+
+// Models the renderer's per-session routing: one thread per session, kept live
+// concurrently. An event for the backgrounded session B must land on B's thread
+// while session A (on screen, busy) is untouched. This is what lets session A keep
+// running while the user works in session B without the app "freezing".
+test("concurrent per-session threads route events independently", () => {
+  const threadA = createThreadStream("sess_a")
+  const threadB = createThreadStream("sess_b")
+
+  // A is mid-flight (a long task), B is brand new.
+  addOptimisticUser(threadA, "Read the whole repo and summarize")
+  threadA.status = { type: "busy" }
+  applyThreadEvent(threadA, {
+    type: "message.part.updated",
+    sessionID: "sess_a",
+    part: { id: "a_text", messageID: "msg_a", type: "text", text: "Working on it" }
+  })
+
+  // Streamed output for B arrives while A is on screen. Route it to B's thread only.
+  const bySession = { sess_a: threadA, sess_b: threadB }
+  const events = [
+    { type: "message.part.updated", sessionID: "sess_b", part: { id: "b_text", messageID: "msg_b", type: "text", text: "Hello from B" } },
+    // A's background task keeps streaming too — must still reach A's thread.
+    { type: "message.part.delta", sessionID: "sess_a", messageID: "msg_a", partID: "a_text", field: "text", delta: " — done" },
+    { type: "session.idle", sessionID: "sess_b" }
+  ]
+  for (const event of events) applyThreadEvent(bySession[event.sessionID], event)
+
+  // A retained its streamed output and stays busy (its task is still running).
+  assert.equal(messageText(threadA.messages[0]), "Read the whole repo and summarize")
+  assert.equal(messageText(threadA.messages[1]), "Working on it — done")
+  assert.equal(threadIsBusy(threadA), true)
+
+  // B received only its own event and went idle independently.
+  assert.equal(threadB.messages.length, 1)
+  assert.equal(messageText(threadB.messages[0]), "Hello from B")
+  assert.equal(threadIsBusy(threadB), false)
+
+  // Aborting B leaves A's running task completely unaffected.
+  applyThreadEvent(threadB, { type: "session.aborted", sessionID: "sess_b" })
+  assert.equal(threadIsBusy(threadA), true)
+})
+
 test("thread stream supports optimistic clearing of pending requests", () => {
   const thread = createThreadStream("sess_one")
   applyThreadEvent(thread, {
@@ -772,4 +827,81 @@ test("thread stream supports optimistic clearing of pending requests", () => {
 
   assert.equal(clearPendingPermission(thread, "p1"), true)
   assert.equal(thread.pendingPermissions.length, 0)
+})
+
+test("thread stream streams reasoning deltas into the reasoning part created by part.updated", () => {
+  const thread = createThreadStream("sess_one")
+  // OpenCode 1.17.3 wire order: a `message.part.updated` first creates the empty
+  // reasoning part (reasoning-start), then `message.part.delta` events with
+  // field:"text" stream its content (reasoning-delta). The part *type* lives on
+  // the part, not on the delta's `field`.
+  applyThreadEvent(thread, {
+    type: "message.part.updated", sessionID: "sess_one",
+    part: { id: "part_reason", sessionID: "sess_one", messageID: "msg_a", type: "reasoning", text: "" }
+  })
+  applyThreadEvent(thread, {
+    type: "message.part.delta", sessionID: "sess_one", messageID: "msg_a",
+    partID: "part_reason", field: "text", delta: "First I "
+  })
+  applyThreadEvent(thread, {
+    type: "message.part.delta", sessionID: "sess_one", messageID: "msg_a",
+    partID: "part_reason", field: "text", delta: "consider the inputs."
+  })
+  // Then the answer text part, same field:"text" delta channel.
+  applyThreadEvent(thread, {
+    type: "message.part.updated", sessionID: "sess_one",
+    part: { id: "part_text", sessionID: "sess_one", messageID: "msg_a", type: "text", text: "" }
+  })
+  applyThreadEvent(thread, {
+    type: "message.part.delta", sessionID: "sess_one", messageID: "msg_a",
+    partID: "part_text", field: "text", delta: "Here is the answer."
+  })
+
+  const message = thread.messages.find((item) => item.id === "msg_a")
+  const reasoning = message.parts.find((part) => part.id === "part_reason")
+  const text = message.parts.find((part) => part.id === "part_text")
+  assert.equal(reasoning.type, "reasoning")
+  assert.equal(reasoning.text, "First I consider the inputs.")
+  assert.equal(text.type, "text")
+  assert.equal(text.text, "Here is the answer.")
+  // Reasoning is not the answer: it stays out of copy text.
+  assert.equal(messageCopyText(message), "Here is the answer.")
+})
+
+test("thread stream finalizes a streamed reasoning part with the full text on part.updated", () => {
+  const thread = createThreadStream("sess_one")
+  applyThreadEvent(thread, {
+    type: "message.part.updated", sessionID: "sess_one",
+    part: { id: "part_reason", sessionID: "sess_one", messageID: "msg_a", type: "reasoning", text: "" }
+  })
+  applyThreadEvent(thread, {
+    type: "message.part.delta", sessionID: "sess_one", messageID: "msg_a",
+    partID: "part_reason", field: "text", delta: "partial"
+  })
+  // finishReasoning replaces the part with the full text — must not double-count.
+  applyThreadEvent(thread, {
+    type: "message.part.updated", sessionID: "sess_one",
+    part: { id: "part_reason", sessionID: "sess_one", messageID: "msg_a", type: "reasoning", text: "partial reasoning done" }
+  })
+
+  const message = thread.messages.find((item) => item.id === "msg_a")
+  const reasoning = message.parts.find((part) => part.id === "part_reason")
+  assert.equal(reasoning.type, "reasoning")
+  assert.equal(reasoning.text, "partial reasoning done")
+})
+
+test("thread stream hydrates a reasoning part and excludes it from message text", () => {
+  const thread = createThreadStream()
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_a", role: "assistant" },
+    parts: [
+      { id: "part_reason", messageID: "msg_a", type: "reasoning", text: "thinking out loud" },
+      { id: "part_text", messageID: "msg_a", type: "text", text: "final answer" }
+    ]
+  }])
+
+  const message = thread.messages[0]
+  assert.equal(message.parts[0].type, "reasoning")
+  assert.equal(message.parts[0].text, "thinking out loud")
+  assert.equal(messageText(message), "final answer")
 })

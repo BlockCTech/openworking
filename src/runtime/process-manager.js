@@ -306,6 +306,15 @@ function projectMessagePart(part) {
       mime: part.mime
     }
   }
+  if (part.type === "reasoning") {
+    return {
+      id: part.id,
+      sessionID: part.sessionID,
+      messageID: part.messageID,
+      type: "reasoning",
+      text: part.text || ""
+    }
+  }
   return null
 }
 
@@ -483,6 +492,10 @@ class RuntimeProcessManager {
     return {
       ...this.state,
       activeSessionStatus: this.sessionStatuses[this.state.activeSessionId] || { type: "idle" },
+      // Per-session status map so the renderer can show a "running" badge for every
+      // busy session in the sidebar, not just the one currently on screen. Each entry
+      // is already whitelisted to a `{ type }` shape by handleRuntimeEvent.
+      sessionStatuses: { ...this.sessionStatuses },
       logs: this.state.logs.slice(-300),
       timeline: this.state.timeline.slice(-300)
     }
@@ -1007,6 +1020,21 @@ class RuntimeProcessManager {
 
   handleRuntimeEvent(event) {
     const properties = event.properties || {}
+    // TEMP DEBUG (remove): dump raw opencode events to stderr when enabled. Lets us
+    // see whether the runtime emits incremental message.part.delta for text/reasoning.
+    if (process.env.OPENWORKING_DEBUG_EVENTS === "1") {
+      const p = properties
+      const summary = {
+        type: event.type,
+        partType: p.part?.type,
+        partId: p.part?.id,
+        field: p.field,
+        deltaLen: typeof p.delta === "string" ? p.delta.length : undefined,
+        deltaPreview: typeof p.delta === "string" ? p.delta.slice(0, 24) : undefined,
+        textLen: typeof p.part?.text === "string" ? p.part.text.length : undefined
+      }
+      process.stderr.write(`[OW-EVENT] ${JSON.stringify(summary)}\n`)
+    }
     let publish = false
     if (event.type === "session.status" && properties.sessionID) {
       this.sessionStatuses[properties.sessionID] = properties.status || { type: "idle" }

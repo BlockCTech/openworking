@@ -108,6 +108,24 @@ test("text part projection preserves the synthetic flag", () => {
   }), false)
 })
 
+test("reasoning part projection keeps only the text content across the boundary", () => {
+  assert.deepEqual(projectMessagePart({
+    id: "part_reasoning",
+    sessionID: "sess_one",
+    messageID: "msg_assistant",
+    type: "reasoning",
+    text: "Let me think about this…",
+    metadata: { provider: "secret" },
+    time: { start: 1, end: 2 }
+  }), {
+    id: "part_reasoning",
+    sessionID: "sess_one",
+    messageID: "msg_assistant",
+    type: "reasoning",
+    text: "Let me think about this…"
+  })
+})
+
 test("question.asked projection whitelists prompt and option display fields", () => {
   const projected = projectRuntimeEvent({
     type: "question.asked",
@@ -862,6 +880,41 @@ test("runtime manager projects stream events independently from the diagnostic t
   })
   assert.deepEqual(manager.sessionStatuses.sess_background, { type: "idle" })
   assert.equal(manager.snapshot().lastError, "Provider failed")
+})
+
+test("runtime manager snapshot exposes a per-session status map for sidebar badges", () => {
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-session-statuses",
+    emit() {}
+  })
+  manager.state.activeSessionId = "sess_active"
+
+  // Two sessions running concurrently: the one on screen and a backgrounded one.
+  manager.handleRuntimeEvent({
+    type: "session.status",
+    properties: { sessionID: "sess_active", status: { type: "busy" } }
+  })
+  manager.handleRuntimeEvent({
+    type: "session.status",
+    properties: { sessionID: "sess_background", status: { type: "busy" } }
+  })
+
+  const snapshot = manager.snapshot()
+  // Both sessions surface as busy so the renderer can badge each one independently.
+  assert.deepEqual(snapshot.sessionStatuses, {
+    sess_active: { type: "busy" },
+    sess_background: { type: "busy" }
+  })
+  // Mutating the snapshot must not leak back into the manager's internal map.
+  snapshot.sessionStatuses.sess_active = { type: "idle" }
+  assert.deepEqual(manager.sessionStatuses.sess_active, { type: "busy" })
+
+  // The backgrounded session going idle is reflected without touching the active one.
+  manager.handleRuntimeEvent({ type: "session.idle", properties: { sessionID: "sess_background" } })
+  assert.deepEqual(manager.snapshot().sessionStatuses, {
+    sess_active: { type: "busy" },
+    sess_background: { type: "idle" }
+  })
 })
 
 test("runtime manager reconnects the event stream until it is stopped", async () => {
