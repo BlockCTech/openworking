@@ -859,7 +859,7 @@ class RuntimeProcessManager {
     this.timeline("session.question.reply", { sessionId, requestID })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/question/request/${encodeURIComponent(requestID)}/reply`,
+        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/question/${encodeURIComponent(requestID)}/reply`,
         method: "POST",
         auth: this.auth(),
         body: { answers: Array.isArray(answers) ? answers : [] }
@@ -878,7 +878,7 @@ class RuntimeProcessManager {
     this.timeline("session.question.reject", { sessionId, requestID })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/question/request/${encodeURIComponent(requestID)}/reject`,
+        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/question/${encodeURIComponent(requestID)}/reject`,
         method: "POST",
         auth: this.auth()
       })
@@ -899,7 +899,7 @@ class RuntimeProcessManager {
     this.timeline("session.permission.reply", { sessionId, requestID, reply })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/permission/request/${encodeURIComponent(requestID)}/reply`,
+        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestID)}/reply`,
         method: "POST",
         auth: this.auth(),
         body: { reply, ...(message ? { message: String(message) } : {}) }

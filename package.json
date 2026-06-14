@@ -58,7 +58,7 @@
     "ajv": "^8.20.0",
     "marked": "18.0.3",
     "mime-types": "2.1.35",
-    "opencode-ai": "1.16.2"
+    "opencode-ai": "1.17.3"
   },
   "build": {
     "appId": "ai.openworking.desktop",

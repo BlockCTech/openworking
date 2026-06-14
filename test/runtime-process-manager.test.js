@@ -900,3 +900,100 @@ test("runtime manager reconnects the event stream until it is stopped", async ()
     global.fetch = previousFetch
   }
 })
+
+// The opencode HTTP API dropped the `/request/` path segment from the session-scoped
+// reply/reject endpoints in 1.17.x. These tests pin the exact URL + body the manager
+// sends so a future runtime bump that moves them is caught before it breaks the
+// in-chat approve/reject and question flows.
+function readyManager(serverUrl) {
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-hitl",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activeSessionId = "sess_new"
+  manager.state.runtime = {
+    serverUrl,
+    auth: { username: "opencode", password: "pw" }
+  }
+  return manager
+}
+
+test("answerQuestion posts to the session question reply endpoint without a /request/ segment", async () => {
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.method === "POST" && /^\/session\/[^/]+\/question\/[^/]+\/reply$/.test(req.url)) {
+      let raw = ""
+      req.on("data", (chunk) => { raw += chunk })
+      req.on("end", () => {
+        captured = { url: req.url, body: raw ? JSON.parse(raw) : {} }
+        res.end("true")
+      })
+      return
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    await manager.answerQuestion({ sessionId: "sess_new", requestID: "q1", answers: [["yes"]] })
+    assert.equal(captured.url, "/session/sess_new/question/q1/reply")
+    assert.equal(captured.url.includes("/request/"), false)
+    assert.deepEqual(captured.body, { answers: [["yes"]] })
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("rejectQuestion posts to the session question reject endpoint without a /request/ segment", async () => {
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.method === "POST" && /^\/session\/[^/]+\/question\/[^/]+\/reject$/.test(req.url)) {
+      captured = { url: req.url }
+      return res.end("true")
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    await manager.rejectQuestion({ sessionId: "sess_new", requestID: "q1" })
+    assert.equal(captured.url, "/session/sess_new/question/q1/reject")
+    assert.equal(captured.url.includes("/request/"), false)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("replyPermission posts to the session permission reply endpoint without a /request/ segment", async () => {
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.method === "POST" && /^\/session\/[^/]+\/permission\/[^/]+\/reply$/.test(req.url)) {
+      let raw = ""
+      req.on("data", (chunk) => { raw += chunk })
+      req.on("end", () => {
+        captured = { url: req.url, body: raw ? JSON.parse(raw) : {} }
+        res.end("true")
+      })
+      return
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    await manager.replyPermission({ sessionId: "sess_new", requestID: "p1", reply: "reject", message: "no" })
+    assert.equal(captured.url, "/session/sess_new/permission/p1/reply")
+    assert.equal(captured.url.includes("/request/"), false)
+    assert.deepEqual(captured.body, { reply: "reject", message: "no" })
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
