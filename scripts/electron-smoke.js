@@ -94,6 +94,46 @@ async function main() {
   const projectPath = path.join(temp, "project")
   fs.mkdirSync(userDataPath, { recursive: true })
   fs.mkdirSync(projectPath)
+  const projectSrcPath = path.join(projectPath, "src")
+  const projectDocsPath = path.join(projectPath, "docs")
+  fs.mkdirSync(projectSrcPath)
+  fs.mkdirSync(projectDocsPath)
+  const projectCodePath = path.join(projectSrcPath, "renderer.js")
+  fs.writeFileSync(projectCodePath, "export const escaped = '<tag>'\n")
+  fs.writeFileSync(path.join(projectDocsPath, "diagram.md"), [
+    "# Diagram preview",
+    "",
+    "```mermaid",
+    "sequenceDiagram",
+    "    participant CP2",
+    "    participant DIP as データ連携基盤",
+    "    participant MIWS",
+    "",
+    "    CP2->>CP2: requestId を発行",
+    "    CP2->>DIP: 面接日程の変更依頼 requestId",
+    "    DIP->>MIWS: 面接日程の変更依頼 requestId",
+    "    MIWS->>MIWS: 依頼内容を検証",
+    "    MIWS->>MIWS: 面接日程が変更される",
+    "    MIWS->>MIWS: Outbox に変更イベントを保存 eventId",
+    "    MIWS->>DIP: APIレスポンス accepted / eventId",
+    "    DIP->>CP2: APIレスポンス accepted / eventId",
+    "    CP2->>CP2: 受付状態と eventId を記録",
+    "    MIWS->>DIP: 面接日程変更イベント eventId",
+    "    DIP->>CP2: 面接日程変更イベント eventId",
+    "    CP2->>CP2: eventId で重複確認",
+    "    CP2->>CP2: 面接日程の変更を反映",
+    "```",
+    "",
+    "```js",
+    "console.log('plain code')",
+    "```",
+    "",
+    "```mermaid",
+    "flowchart LR",
+    "  A -->",
+    "```",
+    ""
+  ].join("\n"))
   fs.writeFileSync(path.join(userDataPath, "projects.json"), `${JSON.stringify({
     projects: [{
       id: "proj_smoke",
@@ -148,6 +188,14 @@ async function main() {
           const thread = document.querySelector(".thread-scroll")
           return thread ? thread.scrollHeight - thread.scrollTop - thread.clientHeight : null
         }
+        const waitUntil = async (callback, timeout = 3000) => {
+          const startedAt = Date.now()
+          while (Date.now() - startedAt < timeout) {
+            if (callback()) return true
+            await new Promise((resolve) => setTimeout(resolve, 100))
+          }
+          return false
+        }
         const hasCompactToolStepStatus = (step, statusSelector) => {
           const label = step?.querySelector(".tool-copy strong")
           const status = step?.querySelector(statusSelector)
@@ -175,7 +223,7 @@ async function main() {
 
         state.activeSessionId = "sess_scroll_smoke"
         state.sessionsByProject[state.activeProjectId] = [{ id: state.activeSessionId, title: "Scroll smoke" }]
-        hydrateThread(state.thread, state.activeSessionId, Array.from({ length: 24 }, (_, index) => ({
+        hydrateActiveThread(Array.from({ length: 24 }, (_, index) => ({
           id: "msg_smoke_" + index,
           role: index % 2 ? "assistant" : "user",
           text: "Scroll smoke message " + index + "\\n" + "Long line ".repeat(20)
@@ -183,6 +231,61 @@ async function main() {
         render({ threadScroll: "latest" })
         await nextPaint()
         await waitForImages()
+        state.popover = "plus"
+        render()
+        await nextPaint()
+        document.querySelector('[data-action="togglePlanMode"]').click()
+        await nextPaint()
+        const hidesPlanProposalOnToggle =
+          state.mode === "plan" &&
+          !document.querySelector(".plan-proposal") &&
+          !document.body.textContent.includes("Proposed a plan")
+        const planThread = activeThread()
+        planThread.messages.push({
+          id: "msg_plan_user",
+          role: "user",
+          parts: [{ id: "part_plan_user", messageID: "msg_plan_user", type: "text", text: "Plan the next fix" }]
+        })
+        state.planProposal = {
+          sessionId: state.activeSessionId,
+          afterMessageIndex: planThread.messages.length - 1
+        }
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_plan_reply",
+            messageID: "msg_plan_reply",
+            type: "text",
+            text: "Implementation plan\\n" + "Detailed step. ".repeat(30)
+          }
+        })
+        handleRuntimeStream({ type: "session.idle", sessionID: state.activeSessionId })
+        await nextPaint()
+        const showsPlanProposalAfterPlanReply =
+          Boolean(document.querySelector(".plan-proposal")) &&
+          document.body.textContent.includes("Proposed a plan")
+        const inlinePlanRendersMarkdown =
+          Boolean(document.querySelector(".document-viewer .doc-content")) &&
+          !document.querySelector(".document-viewer .doc-code")
+        const originalSendPrompt = sendPrompt
+        let acceptedPlanPrompt = ""
+        sendPrompt = async (prompt) => {
+          acceptedPlanPrompt = prompt
+        }
+        await acceptPlan()
+        await nextPaint()
+        sendPrompt = originalSendPrompt
+        const acceptPlanClosesViewer =
+          !document.querySelector(".document-viewer") &&
+          state.mode === "agent" &&
+          acceptedPlanPrompt.includes("approved")
+        state.mode = "agent"
+        state.planProposal = null
+        state.planAutoOpened = null
+        state.planAccepted = null
+        render({ threadScroll: "latest" })
+        await nextPaint()
         const openedAtLatest = atLatest()
         const openedLatestDistance = latestDistance()
         const hasSidebarAccount = Boolean(document.querySelector(".side-user"))
@@ -249,7 +352,7 @@ async function main() {
             messageID: "msg_stream",
             type: "tool",
             tool: "read",
-            state: { status: "running", input: { filePath: "src/index.js" } }
+            state: { status: "running", input: { filePath: "CLAUDE.md" } }
           }
         })
         await nextPaint()
@@ -258,7 +361,7 @@ async function main() {
         const keepsRunningToolStatusCompact = hasCompactToolStepStatus(runningToolStep, ".tool-processing")
         const runningStepStartsOpen =
           runningToolStep?.getAttribute("aria-expanded") === "true" &&
-          document.querySelector(".tool-step-details")?.textContent.includes("index.js")
+          document.querySelector(".tool-step-details")?.textContent.includes("CLAUDE.md")
         runningToolStep?.click()
         await nextPaint()
         runningToolStep = document.querySelector(".tool-step.running")
@@ -270,7 +373,7 @@ async function main() {
         runningToolStep = document.querySelector(".tool-step.running")
         const runningStepCanReopen =
           runningToolStep?.getAttribute("aria-expanded") === "true" &&
-          runningToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("index.js")
+          runningToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("CLAUDE.md")
 
         handleRuntimeStream({
           type: "message.part.updated",
@@ -280,7 +383,14 @@ async function main() {
             messageID: "msg_stream",
             type: "tool",
             tool: "read",
-            state: { status: "completed", input: { filePath: "src/index.js" } }
+            state: {
+              status: "completed",
+              input: { filePath: "CLAUDE.md" },
+              metadata: {
+                diff: "@@ -1 +1 @@\\n-old\\n+new",
+                filepath: "CLAUDE.md"
+              }
+            }
           }
         })
         await nextPaint()
@@ -295,7 +405,91 @@ async function main() {
         completedToolStep = document.querySelector(".tool-step.completed")
         const completedStepCanReopen =
           completedToolStep?.getAttribute("aria-expanded") === "true" &&
-          completedToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("index.js")
+          completedToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("CLAUDE.md")
+        const hidesReadFileRef = !document.querySelector(".file-ref-chip")
+        const hidesReadDiff = !document.querySelector(".changes-summary")
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_write_code",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "write",
+            state: {
+              status: "completed",
+              input: { filePath: "src/renderer.js" },
+              metadata: {
+                diff: "@@ -1 +1 @@\\n-old\\n+export const escaped = '<tag>'",
+                filepath: "src/renderer.js"
+              }
+            }
+          }
+        })
+        await nextPaint()
+        const codeFileChip = document.querySelector(".file-ref-chip")
+        const showsCodeFileRef =
+          codeFileChip?.textContent.includes("renderer.js") &&
+          codeFileChip?.textContent.includes("Code · JS")
+        const showsWriteDiff =
+          document.querySelector(".changes-summary")?.textContent.includes("1 file") &&
+          document.querySelector(".changes-summary")?.textContent.includes("renderer.js")
+        codeFileChip?.click()
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        await nextPaint()
+        // A file with a diff opens on the Diff tab: the unified diff view renders
+        // with the added line tinted, and the full-file Code view is not shown yet.
+        const rendersDiffViewer =
+          Boolean(document.querySelector(".diff-view .diff-line.add")) &&
+          document.querySelector(".diff-view")?.textContent.includes("export const escaped = '<tag>'") &&
+          !document.querySelector(".doc-code")
+        // Switching to the Code tab shows the full highlighted file (escaped, no injection).
+        document.querySelector('[data-doc-tab="code"]')?.click()
+        await nextPaint()
+        const rendersCodeViewer =
+          document.querySelector(".doc-code")?.textContent.includes("export const escaped = '<tag>'") &&
+          !document.querySelector(".doc-content")
+
+        await openDocument("docs/diagram.md")
+        await waitUntil(() => !document.querySelector(".mermaid-block[data-mermaid-pending='true']"))
+        await nextPaint()
+        const rendersMermaidDiagram =
+          Boolean(document.querySelector(".document-viewer .doc-content .mermaid-block.rendered svg")) &&
+          document.querySelector(".document-viewer .doc-content")?.textContent.includes("Diagram preview")
+        const mermaidSvgRect = document.querySelector(".document-viewer .doc-content .mermaid-block.rendered svg")?.getBoundingClientRect()
+        const rendersMermaidAtReadableSize =
+          mermaidSvgRect?.width > 300 &&
+          mermaidSvgRect?.height > 180
+        const mermaidSvgSize = mermaidSvgRect ? Math.round(mermaidSvgRect.width) + "x" + Math.round(mermaidSvgRect.height) : ""
+        const keepsNonMermaidCodeBlock =
+          [...document.querySelectorAll(".document-viewer .doc-content pre code")]
+            .some((code) => code.textContent.includes("console.log('plain code')"))
+        const showsMermaidFallback =
+          document.querySelector(".document-viewer .doc-content .mermaid-block.error .mermaid-source")?.textContent.includes("A -->")
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_patch_code",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "apply_patch",
+            state: {
+              status: "completed",
+              input: { files: ["src/renderer.js"] },
+              metadata: {
+                diff: "@@ -1 +1 @@\\n-export const escaped = '<tag>'\\n+export const escaped = '<patch>'",
+                files: ["src/renderer.js"]
+              }
+            }
+          }
+        })
+        await nextPaint()
+        const showsApplyPatchDiff =
+          document.querySelector(".changes-summary")?.textContent.includes("renderer.js") &&
+          document.querySelector(".changes-summary")?.textContent.includes("+1")
 
         handleRuntimeStream({
           type: "message.part.updated",
@@ -358,7 +552,7 @@ async function main() {
         await nextPaint()
         const removesAttachmentChip = !document.querySelector(".composer-attachments")
 
-        state.thread.messages.push({
+        activeThread().messages.push({
           id: "msg_attachment_smoke",
           role: "user",
           parts: [
@@ -416,6 +610,10 @@ async function main() {
           hasPrompt: bodyText.includes("What should we work on in") && bodyText.includes("Smoke Project"),
           hasAddProject: Boolean(document.querySelector('[data-action="addProject"]')),
           hasConfigNav: bodyText.includes("Config"),
+          hidesPlanProposalOnToggle,
+          showsPlanProposalAfterPlanReply,
+          inlinePlanRendersMarkdown,
+          acceptPlanClosesViewer,
           openedAtLatest,
           openedLatestDistance,
           preservedHistoryPosition,
@@ -432,6 +630,18 @@ async function main() {
           keepsCompletedToolStatusCompact,
           completedStepStartsClosed,
           completedStepCanReopen,
+          hidesReadFileRef,
+          hidesReadDiff,
+          showsCodeFileRef,
+          showsWriteDiff,
+          rendersDiffViewer,
+          rendersCodeViewer,
+          rendersMermaidDiagram,
+          rendersMermaidAtReadableSize,
+          mermaidSvgSize,
+          keepsNonMermaidCodeBlock,
+          showsMermaidFallback,
+          showsApplyPatchDiff,
           hasTranslationArtifact,
           keepsArtifactOutsideCollapsedStep,
           errorStepStartsOpen,
@@ -511,6 +721,10 @@ async function main() {
       !value.hasPrompt ||
       !value.hasAddProject ||
       !value.hasConfigNav ||
+      !value.hidesPlanProposalOnToggle ||
+      !value.showsPlanProposalAfterPlanReply ||
+      !value.inlinePlanRendersMarkdown ||
+      !value.acceptPlanClosesViewer ||
       !value.openedAtLatest ||
       !value.preservedHistoryPosition ||
       !value.followedLatest ||
@@ -525,6 +739,17 @@ async function main() {
       !value.keepsCompletedToolStatusCompact ||
       !value.completedStepStartsClosed ||
       !value.completedStepCanReopen ||
+      !value.hidesReadFileRef ||
+      !value.hidesReadDiff ||
+      !value.showsCodeFileRef ||
+      !value.showsWriteDiff ||
+      !value.rendersDiffViewer ||
+      !value.rendersCodeViewer ||
+      !value.rendersMermaidDiagram ||
+      !value.rendersMermaidAtReadableSize ||
+      !value.keepsNonMermaidCodeBlock ||
+      !value.showsMermaidFallback ||
+      !value.showsApplyPatchDiff ||
       !value.hasTranslationArtifact ||
       !value.keepsArtifactOutsideCollapsedStep ||
       !value.errorStepStartsOpen ||

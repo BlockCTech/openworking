@@ -573,6 +573,10 @@
           },
           "description": "Command and arguments to run the MCP server"
         },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory to start the MCP server from. Can be a workspace-relative directory."
+        },
         "environment": {
           "type": "object",
           "additionalProperties": {

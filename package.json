@@ -1,6 +1,6 @@
 {
   "name": "openworking",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "private": true,
   "description": "OpenWorking — a local-first desktop shell for OpenCode with a self-configured OpenAI-compatible API gateway.",
   "license": "MIT",
@@ -57,8 +57,9 @@
     "adm-zip": "^0.5.17",
     "ajv": "^8.20.0",
     "marked": "18.0.3",
+    "mermaid": "^11.15.0",
     "mime-types": "2.1.35",
-    "opencode-ai": "1.17.3"
+    "opencode-ai": "1.17.4"
   },
   "build": {
     "appId": "ai.openworking.desktop",

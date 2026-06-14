@@ -22,11 +22,43 @@ function assertTranslationArtifact(_projectPath, artifactPath) {
   return resolvedArtifact
 }
 
-const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"])
+const VIEWABLE_FILE_EXTENSIONS = new Set([
+  ".md", ".markdown",
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+  ".css", ".scss", ".html",
+  ".json", ".jsonc", ".yml", ".yaml", ".toml", ".xml",
+  ".py", ".rb", ".go", ".rs", ".java", ".kt", ".swift",
+  ".c", ".cpp", ".h", ".cs", ".php", ".sql",
+  ".vue", ".svelte", ".astro",
+  ".sh", ".bash", ".zsh"
+])
+const VIEWABLE_FILE_BASENAMES = new Set(["Dockerfile", "Makefile", "Procfile", ".gitignore", ".eslintrc", ".prettierrc", ".editorconfig"])
+const IGNORED_PROJECT_DIRECTORIES = new Set([
+  ".cache",
+  ".git",
+  ".next",
+  ".nuxt",
+  ".parcel-cache",
+  ".pnpm-store",
+  ".turbo",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "target"
+])
+
+function isViewableProjectFile(filePath) {
+  const parsed = path.parse(filePath)
+  return VIEWABLE_FILE_BASENAMES.has(parsed.base) || VIEWABLE_FILE_EXTENSIONS.has(parsed.ext.toLowerCase())
+}
 
 function assertProjectFile(projectPath, filePath) {
   const projectRoot = fs.realpathSync(path.resolve(projectPath))
-  const requested = path.resolve(String(filePath))
+  const requestedInput = String(filePath)
+  const requested = path.isAbsolute(requestedInput)
+    ? path.resolve(requestedInput)
+    : path.resolve(projectRoot, requestedInput)
   if (!fs.existsSync(requested)) {
     throw new Error("File does not exist.")
   }
@@ -38,10 +70,58 @@ function assertProjectFile(projectPath, filePath) {
   if (!fs.statSync(resolved).isFile()) {
     throw new Error("File path is not a file.")
   }
-  if (!MARKDOWN_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
-    throw new Error("Only markdown files can be opened.")
+  if (!isViewableProjectFile(resolved)) {
+    throw new Error("Only markdown and common code files can be opened.")
   }
   return resolved
+}
+
+function assertProjectDirectory(projectPath, directoryPath = "") {
+  const projectRoot = fs.realpathSync(path.resolve(projectPath))
+  const requestedInput = String(directoryPath || "")
+  const requested = path.isAbsolute(requestedInput)
+    ? path.resolve(requestedInput)
+    : path.resolve(projectRoot, requestedInput)
+  if (!fs.existsSync(requested)) {
+    throw new Error("Directory does not exist.")
+  }
+  const resolved = fs.realpathSync(requested)
+  const relative = path.relative(projectRoot, resolved)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("Directory path is outside the current project.")
+  }
+  if (!fs.statSync(resolved).isDirectory()) {
+    throw new Error("Directory path is not a directory.")
+  }
+  return { projectRoot, resolved, relative }
+}
+
+function listProjectDirectory(projectPath, directoryPath = "") {
+  const { projectRoot, resolved, relative } = assertProjectDirectory(projectPath, directoryPath)
+  const entries = fs.readdirSync(resolved, { withFileTypes: true })
+  const children = []
+  for (const entry of entries) {
+    const type = entry.isDirectory() ? "directory" : entry.isFile() ? "file" : null
+    if (!type) continue
+    if (type === "directory" && IGNORED_PROJECT_DIRECTORIES.has(entry.name)) continue
+    const absolutePath = path.join(resolved, entry.name)
+    const childRelativePath = path.relative(projectRoot, absolutePath)
+    children.push({
+      name: entry.name,
+      path: childRelativePath,
+      type,
+      openable: type === "file" && isViewableProjectFile(absolutePath)
+    })
+  }
+  children.sort((a, b) => {
+    if (a.type !== b.type) return a.type === "directory" ? -1 : 1
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+  })
+  return {
+    path: relative,
+    name: relative ? path.basename(resolved) : path.basename(projectRoot) || projectRoot,
+    children
+  }
 }
 
 // Reads a UTF-8 file, truncating to `maxBytes` without corrupting multibyte
@@ -65,4 +145,4 @@ function readProjectFileContent(safePath, maxBytes) {
   }
 }
 
-module.exports = { assertTranslationArtifact, assertProjectFile, readProjectFileContent }
+module.exports = { assertTranslationArtifact, assertProjectFile, assertProjectDirectory, listProjectDirectory, readProjectFileContent }

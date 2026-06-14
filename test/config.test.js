@@ -118,6 +118,28 @@ test("rejects invalid OpenCode config without changing the saved file", () => {
   assert.equal(fs.readFileSync(configPath, "utf8"), original)
 })
 
+test("accepts a local MCP server config that uses a workspace-relative cwd", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-config-"))
+  const configPath = path.join(temp, "opencode.json")
+  const withMcp = {
+    ...DEFAULT_CONFIG,
+    mcp: {
+      docs: { type: "local", command: ["node", "server.js"], cwd: "./tools/mcp" }
+    }
+  }
+
+  assert.doesNotThrow(() => writeOpencodeConfig(withMcp, configPath))
+  const saved = JSON.parse(fs.readFileSync(configPath, "utf8"))
+  assert.equal(saved.mcp.docs.cwd, "./tools/mcp")
+
+  // The local-first schema must still reject unknown MCP keys.
+  const unknownMcpKey = {
+    ...DEFAULT_CONFIG,
+    mcp: { docs: { type: "local", command: ["node", "server.js"], bogus: true } }
+  }
+  assert.throws(() => writeOpencodeConfig(unknownMcpKey, configPath), /\/bogus must NOT have additional properties/)
+})
+
 test("rejects malformed JSON when reading a saved config", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-config-"))
   const configPath = path.join(temp, "opencode.json")

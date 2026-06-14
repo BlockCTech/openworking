@@ -43,7 +43,10 @@ const icons = {
   folderPlus: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 12v4M10 14h4"/></svg>',
   collapse: '<svg viewBox="0 0 24 24"><path d="M9 4 5 8m0 0h3.5M5 8V4.5"/><path d="M15 20l4-4m0 0h-3.5M19 16v3.5"/></svg>',
   sidebarToggle: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>',
-  chevUpDown: '<svg viewBox="0 0 24 24"><path d="m8 9 4-4 4 4"/><path d="m16 15-4 4-4-4"/></svg>'
+  sidebarRight: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>',
+  chevUpDown: '<svg viewBox="0 0 24 24"><path d="m8 9 4-4 4 4"/><path d="m16 15-4 4-4-4"/></svg>',
+  cloud: '<svg viewBox="0 0 24 24"><path d="M7 18a4.2 4.2 0 0 1-.4-8.38 5 5 0 0 1 9.61-1.1A3.8 3.8 0 0 1 17.5 18z"/></svg>',
+  logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>'
 }
 
 const modes = [
@@ -69,8 +72,11 @@ const {
   messageCopyText,
   messageText,
   removeOptimisticUser,
-  resetThread
+  resetThread,
+  threadIsBusy
 } = window.OpenWorkingThreadStream
+
+const { parseUnifiedDiff } = window.OpenWorkingDiffView
 
 const state = {
   nav: "session",
@@ -78,9 +84,12 @@ const state = {
   activeProjectId: null,
   activeSessionId: null,
   sessionsByProject: {},
-  thread: createThreadStream(),
+  // One live thread per session, keyed by sessionId. Background sessions keep their
+  // thread (and its streaming state) alive while another session is on screen, so a
+  // long task in session A is not lost when the user switches to / creates session B.
+  // The `null` key holds the "new session" draft thread before the session exists.
+  threads: new Map(),
   toolDisclosure: new Map(),
-  diffDisclosure: new Map(),
   document: null,
   expanded: new Set(),
   showAll: new Set(),
@@ -93,6 +102,7 @@ const state = {
   mode: "agent",
   planAutoOpened: null,
   planAccepted: null,
+  planProposal: null,
   selectedModelKey: "",
   promptDraft: "",
   pendingAttachments: [],
@@ -102,6 +112,12 @@ const state = {
   sessionMenu: null,          // sessionId đang mở menu, hoặc null
   sessionDeleteTarget: null,  // { id, title } của session chờ xác nhận xóa trong modal
   sidebarCollapsed: false,
+  rightSidebarOpen: false,
+  fileTreeProjectId: null,
+  fileTreeLoading: new Set(),
+  fileTreeError: "",
+  fileTreeExpanded: new Set(),
+  fileTreeChildren: new Map(),
   diagnosticsOpen: false,
   toast: null,
   loading: false,
@@ -121,10 +137,28 @@ const THREAD_SCROLL_THRESHOLD = 80
 const SIDEBAR_WIDTH_KEY = "openworking:sidebar-w"
 const SIDEBAR_MIN_WIDTH = 200
 const SIDEBAR_MAX_WIDTH = 480
+const RIGHT_FILE_WIDTH_KEY = "openworking:right-file-sidebar-w"
+const RIGHT_FILE_MIN_WIDTH = 180
+const RIGHT_FILE_MAX_WIDTH = 420
+const DOCUMENT_WIDTH_KEY = "openworking:document-viewer-w"
+const DOCUMENT_MIN_WIDTH = 300
+const DOCUMENT_MAX_WIDTH = 900
 
 function setSidebarWidth(width) {
   const clamped = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(width)))
   document.documentElement.style.setProperty("--sidebar-w", `${clamped}px`)
+  return clamped
+}
+
+function setRightFileSidebarWidth(width) {
+  const clamped = Math.max(RIGHT_FILE_MIN_WIDTH, Math.min(RIGHT_FILE_MAX_WIDTH, Math.round(width)))
+  document.documentElement.style.setProperty("--right-sidebar-w", `${clamped}px`)
+  return clamped
+}
+
+function setDocumentViewerWidth(width) {
+  const clamped = Math.max(DOCUMENT_MIN_WIDTH, Math.min(DOCUMENT_MAX_WIDTH, Math.round(width)))
+  document.documentElement.style.setProperty("--document-w", `${clamped}px`)
   return clamped
 }
 
@@ -133,7 +167,19 @@ function applyStoredSidebarWidth() {
   if (Number.isFinite(stored) && stored > 0) setSidebarWidth(stored)
 }
 
+function applyStoredRightFileSidebarWidth() {
+  const stored = Number(localStorage.getItem(RIGHT_FILE_WIDTH_KEY))
+  if (Number.isFinite(stored) && stored > 0) setRightFileSidebarWidth(stored)
+}
+
+function applyStoredDocumentViewerWidth() {
+  const stored = Number(localStorage.getItem(DOCUMENT_WIDTH_KEY))
+  if (Number.isFinite(stored) && stored > 0) setDocumentViewerWidth(stored)
+}
+
 applyStoredSidebarWidth()
+applyStoredRightFileSidebarWidth()
+applyStoredDocumentViewerWidth()
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -152,6 +198,14 @@ function selectedProject() {
   return state.projects.find((project) => project.id === state.activeProjectId) || null
 }
 
+function resetFileTree(projectId = state.activeProjectId) {
+  state.fileTreeProjectId = projectId || null
+  state.fileTreeLoading.clear()
+  state.fileTreeError = ""
+  state.fileTreeExpanded.clear()
+  state.fileTreeChildren.clear()
+}
+
 function projectSessions(projectId) {
   return state.sessionsByProject[projectId] || []
 }
@@ -160,8 +214,31 @@ function selectedSession() {
   return projectSessions(state.activeProjectId).find((session) => session.id === state.activeSessionId) || null
 }
 
+// Returns the live thread for a session, creating and storing one on first access.
+// `null` is a valid key — it holds the draft thread for an unsaved "new session".
+function ensureThread(sessionId = state.activeSessionId) {
+  let thread = state.threads.get(sessionId)
+  if (!thread) {
+    thread = createThreadStream(sessionId)
+    state.threads.set(sessionId, thread)
+  }
+  return thread
+}
+
+// The thread currently shown in the chat pane (the active session's thread).
+function activeThread() {
+  return ensureThread(state.activeSessionId)
+}
+
+// A session shows a "running" badge if either its in-memory thread is mid-flight or
+// the server reports it busy (covers sessions never opened in this renderer session).
+function sessionBusy(sessionId) {
+  if (threadIsBusy(state.threads.get(sessionId))) return true
+  return state.runtime?.sessionStatuses?.[sessionId]?.type === "busy"
+}
+
 function threadAbortable() {
-  return state.thread.status?.type === "busy" || state.thread.status?.type === "retry"
+  return threadIsBusy(activeThread())
 }
 
 function providerEntries() {
@@ -228,23 +305,24 @@ function sessionUpdatedAt(session) {
 }
 
 function hydrateActiveThread(messages, status) {
-  if (state.thread.sessionId !== state.activeSessionId) {
-    state.toolDisclosure.clear()
-    state.diffDisclosure.clear()
+  const thread = activeThread()
+  // A fresh thread (no messages yet) is being populated from the server for the
+  // first time → clear the per-session view state. An already-live background thread
+  // keeps its disclosure/document state so returning to it looks unchanged.
+  if (thread.sessionId !== state.activeSessionId || !thread.messages.length) {
     state.document = null
-    state.planAutoOpened = null
-    state.planAccepted = null
   }
-  hydrateThread(state.thread, state.activeSessionId, messages, status)
+  hydrateThread(thread, state.activeSessionId, messages, status)
 }
 
+// Resets the *draft* thread used before a session exists. Switching to a real
+// session never resets that session's thread — its history must survive.
 function resetActiveThread(sessionId = null) {
-  state.toolDisclosure.clear()
-  state.diffDisclosure.clear()
   state.document = null
   state.planAutoOpened = null
   state.planAccepted = null
-  resetThread(state.thread, sessionId)
+  state.planProposal = null
+  state.threads.set(sessionId, resetThread(ensureThread(sessionId), sessionId))
 }
 
 function showToast(message) {
@@ -332,38 +410,66 @@ async function loadInitialState() {
 function handleRuntimeUpdate(runtime) {
   state.runtime = runtime
   renderRuntimeStatus()
+  renderSessionBadges()
 }
 
+const SESSION_LIFECYCLE_EVENTS = new Set(["session.status", "session.idle", "session.aborted", "session.error"])
+
 function handleRuntimeStream(event) {
-  const result = applyThreadEvent(state.thread, event)
-  if (event?.type === "session.status" || event?.type === "session.idle" || event?.type === "session.aborted" || event?.type === "session.error") {
-    updateComposerSubmitButton()
+  // Connection (re)established → reconcile every known thread from the server.
+  if (event?.type === "runtime.stream.connected") {
+    scheduleRefresh()
+    return
   }
-  if (result.changed) {
+  // Route each event to its own session's thread, even if that session is not on
+  // screen — this is what keeps a backgrounded session streaming. We only touch a
+  // thread we already track (active or previously opened); unknown sessions are
+  // picked up lazily by the periodic refresh when the user opens them.
+  const sessionId = event?.sessionID
+  if (!sessionId) return
+  const thread = state.threads.get(sessionId)
+  if (!thread) {
+    // We are not tracking this session's thread yet, but a lifecycle change still
+    // moves its sidebar badge (busy/idle) — repaint badges without a full render.
+    if (SESSION_LIFECYCLE_EVENTS.has(event.type)) renderSessionBadges()
+    return
+  }
+  const result = applyThreadEvent(thread, event)
+  const isActive = sessionId === state.activeSessionId
+  if (SESSION_LIFECYCLE_EVENTS.has(event.type)) {
+    if (isActive) updateComposerSubmitButton()
+    renderSessionBadges()
+  }
+  if (result.changed && isActive) {
     maybeAutoOpenPlan()
     scheduleThreadRender()
   }
   if (result.reconcile) scheduleRefresh()
 }
 
-// In Plan mode, the plan agent often writes a plan markdown file. Surface it in
-// the document-viewer panel automatically the first time it appears for a session.
-function latestAssistantMessage() {
-  const messages = state.thread.messages || []
-  for (let i = messages.length - 1; i >= 0; i--) {
+function activePlanProposal() {
+  const proposal = state.planProposal
+  return proposal?.sessionId === state.activeSessionId ? proposal : null
+}
+
+function latestPlanMessage() {
+  const proposal = activePlanProposal()
+  if (!proposal) return null
+  const messages = activeThread().messages || []
+  for (let i = messages.length - 1; i > proposal.afterMessageIndex; i--) {
     if (messages[i].role === "assistant") return messages[i]
   }
   return null
 }
 
 function latestPlanFileRef() {
-  const message = latestAssistantMessage()
+  const message = latestPlanMessage()
   if (!message) return null
   return messageFileRefs(message)[0] || null
 }
 
 function latestPlanText() {
-  const message = latestAssistantMessage()
+  const message = latestPlanMessage()
   return message ? (messageText(message) || "").trim() : ""
 }
 
@@ -379,13 +485,13 @@ function openInlinePlan(text) {
   if (!text) return
   state.document = {
     requestedPath: INLINE_PLAN_PATH, path: "", name: "Plan", relativePath: "Plan",
-    content: text, loading: false, error: "", truncated: false
+    content: text, loading: false, error: "", truncated: false, renderMode: "markdown"
   }
   render()
 }
 
 function maybeAutoOpenPlan() {
-  if (state.mode !== "plan") return
+  if (!activePlanProposal()) return
   const sessionId = state.activeSessionId
   if (!sessionId || state.planAutoOpened === sessionId) return
   const ref = latestPlanFileRef()
@@ -396,7 +502,7 @@ function maybeAutoOpenPlan() {
   }
   // No plan file written (common for prose-only plan agents): fall back to the
   // assistant's text, but only once the reply has finished streaming.
-  const status = state.thread.status?.type
+  const status = activeThread().status?.type
   if (status === "busy" || status === "retry") return
   const text = latestPlanText()
   if (text.length < PLAN_TEXT_MIN_LENGTH) return
@@ -453,14 +559,76 @@ function restoreThreadScroll(previous, threadScroll) {
 }
 
 function renderMarkdown(text) {
-  if (!text) return "";
+  if (!text) return ""
+  const renderer = new marked.Renderer()
+  renderer.code = ({ text: code, lang }) => {
+    const language = (lang || "").match(/\S+/)?.[0] || ""
+    if (language.toLowerCase() === "mermaid") {
+      return `<div class="mermaid-block" data-mermaid-pending="true"><pre class="mermaid-source"><code>${escapeHtml(code)}</code></pre></div>`
+    }
+    const normalized = hljs.getLanguage(language) ? language : "plaintext"
+    const highlighted = normalized === "plaintext"
+      ? escapeHtml(code)
+      : hljs.highlight(code, { language: normalized }).value
+    return `<pre><code class="hljs language-${escapeHtml(normalized)}">${highlighted}</code></pre>\n`
+  }
   return marked.parse(text, {
-    highlight: function(code, lang) {
-      const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-      return hljs.highlight(code, { language }).value;
-    },
-    langPrefix: 'hljs language-'
-  });
+    renderer
+  })
+}
+
+let mermaidInitialized = false
+let mermaidRenderId = 0
+
+function ensureMermaid() {
+  if (!window.mermaid) return false
+  if (!mermaidInitialized) {
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "dark"
+    })
+    mermaidInitialized = true
+  }
+  return true
+}
+
+function markMermaidError(block, source, message) {
+  block.classList.add("error")
+  block.innerHTML = `
+    <div class="mermaid-error">${escapeHtml(message || "Could not render Mermaid diagram.")}</div>
+    <pre class="mermaid-source"><code>${escapeHtml(source)}</code></pre>
+  `
+}
+
+async function renderMermaidDiagrams(root = document) {
+  const blocks = [...root.querySelectorAll(".mermaid-block[data-mermaid-pending='true']")]
+  if (!blocks.length) return
+  if (!ensureMermaid()) {
+    for (const block of blocks) {
+      block.removeAttribute("data-mermaid-pending")
+      const source = block.querySelector(".mermaid-source code")?.textContent || ""
+      markMermaidError(block, source, "Mermaid renderer is unavailable.")
+    }
+    return
+  }
+  for (const block of blocks) {
+    block.removeAttribute("data-mermaid-pending")
+    const source = block.querySelector(".mermaid-source code")?.textContent || ""
+    try {
+      const { svg } = await window.mermaid.render(`mermaid-${++mermaidRenderId}`, source)
+      if (!block.isConnected) continue
+      block.classList.add("rendered")
+      block.innerHTML = svg
+    } catch (error) {
+      if (!block.isConnected) continue
+      markMermaidError(block, source, error.message)
+    }
+  }
+}
+
+function scheduleMermaidRender(root = document) {
+  requestAnimationFrame(() => renderMermaidDiagrams(root).catch(() => {}))
 }
 
 function renderThreadContent({ threadScroll = "preserve" } = {}) {
@@ -471,10 +639,10 @@ function renderThreadContent({ threadScroll = "preserve" } = {}) {
   bindMessageActions(inner)
   bindArtifactActions(inner)
   bindToolStepActions(inner)
-  bindDiffToggleActions(inner)
   bindFileRefActions(inner)
   bindPendingPromptActions(inner)
   inner.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", handleAction))
+  scheduleMermaidRender(inner)
   restoreThreadScroll(previousThreadScroll, threadScroll)
 }
 
@@ -492,10 +660,11 @@ function render({ threadScroll = "preserve" } = {}) {
   document.getElementById("root").innerHTML = `
     <div class="desktop">
       <div class="window">
-        <div class="app${state.sidebarCollapsed ? " collapsed" : ""}${state.document ? " has-doc" : ""}">
+        <div class="app${state.sidebarCollapsed ? " collapsed" : ""}${state.document ? " has-doc" : ""}${state.rightSidebarOpen ? " right-open" : ""}">
           ${renderSidebar()}
           ${renderMain()}
           ${state.document ? renderDocumentViewer() : ""}
+          ${state.rightSidebarOpen ? renderRightFileSidebar() : ""}
         </div>
       </div>
       ${renderForceUpdate()}
@@ -506,6 +675,7 @@ function render({ threadScroll = "preserve" } = {}) {
   `
   bindEvents()
   renderToast()
+  scheduleMermaidRender()
   restoreThreadScroll(previousThreadScroll, threadScroll)
 }
 
@@ -592,7 +762,7 @@ function renderUpdatePill() {
 
 function renderSidebar() {
   if (state.sidebarCollapsed) {
-    return `<button class="sidebar-reopen" data-action="toggleSidebar" title="Show sidebar">${icon("sidebarToggle")}</button>`
+    return ""
   }
   return `
     <aside class="sidebar">
@@ -633,6 +803,85 @@ function renderSidebar() {
   `
 }
 
+function renderRightFileSidebar() {
+  const project = selectedProject()
+  const rootChildren = state.fileTreeChildren.get("")
+  let body
+  if (!project) {
+    body = `<div class="file-tree-state">Open a project to browse files.</div>`
+  } else if (state.fileTreeProjectId !== project.id || (state.fileTreeLoading.has("") && !rootChildren)) {
+    body = `<div class="file-tree-state">Loading files...</div>`
+  } else if (state.fileTreeError && !rootChildren) {
+    body = `<div class="file-tree-state error">${escapeHtml(state.fileTreeError)}</div>`
+  } else if (!rootChildren?.length) {
+    body = `<div class="file-tree-state">No files found.</div>`
+  } else {
+    body = `<div class="file-tree">${renderFileTreeRows("", 0)}</div>`
+  }
+  return `
+    <div class="right-file-resizer" data-right-file-resizer></div>
+    <aside class="right-file-sidebar">
+      <div class="right-file-head">
+        <span class="right-file-title">Files</span>
+        <span class="right-file-project" title="${escapeHtml(project?.path || "")}">${escapeHtml(project?.name || "")}</span>
+      </div>
+      ${state.fileTreeError && rootChildren ? `<div class="file-tree-alert">${escapeHtml(state.fileTreeError)}</div>` : ""}
+      <div class="right-file-scroll">${body}</div>
+    </aside>
+  `
+}
+
+function renderFileTreeRows(directoryPath, depth) {
+  const children = state.fileTreeChildren.get(directoryPath) || []
+  return children.map((entry) => {
+    const padding = 10 + depth * 14
+    if (entry.type === "directory") {
+      const open = state.fileTreeExpanded.has(entry.path)
+      const loaded = state.fileTreeChildren.has(entry.path)
+      const loading = state.fileTreeLoading.has(entry.path)
+      return `
+        <div class="file-tree-node">
+          <button class="file-tree-row directory ${open ? "open" : ""}" data-tree-dir="${escapeHtml(entry.path)}" style="--tree-pad:${padding}px" title="${escapeHtml(entry.path)}">
+            <span class="file-tree-chev">${icon(open ? "chevDown" : "chevRight")}</span>
+            <span class="file-tree-icon">${icon("folder")}</span>
+            <span class="file-tree-name">${escapeHtml(entry.name)}</span>
+          </button>
+          ${open ? `
+            <div class="file-tree-children">
+              ${loading && !loaded ? `<div class="file-tree-state inline" style="--tree-pad:${padding + 28}px">Loading...</div>` : renderFileTreeRows(entry.path, depth + 1)}
+            </div>
+          ` : ""}
+        </div>
+      `
+    }
+    return `
+      <button class="file-tree-row file ${entry.openable ? "" : "disabled"} ${state.document?.requestedPath === entry.path ? "active" : ""}" ${entry.openable ? `data-tree-file="${escapeHtml(entry.path)}"` : ""} style="--tree-pad:${padding + 22}px" title="${escapeHtml(entry.path)}">
+        <span class="file-tree-icon">${icon("doc")}</span>
+        <span class="file-tree-name">${escapeHtml(entry.name)}</span>
+      </button>
+    `
+  }).join("")
+}
+
+function renderAccountPopover() {
+  const user = state.auth?.user
+  const name = userLabel(user)
+  const email = user?.email && user.email !== name ? user.email : ""
+  return `
+    <div class="pop pop-up account-pop">
+      <div class="account-head">
+        <span class="su-av">${escapeHtml(userInitials(user))}</span>
+        <span class="account-id">
+          <span class="account-name">${escapeHtml(name)}</span>
+          ${email ? `<span class="account-email">${escapeHtml(email)}</span>` : ""}
+        </span>
+      </div>
+      <div class="pop-divider"></div>
+      <button class="pop-item account-logout" data-action="authLogout">${icon("logout")}<span>Logout</span></button>
+    </div>
+  `
+}
+
 function renderProjectGroup(project) {
   const sessions = projectSessions(project.id)
   const open = state.expanded.has(project.id)
@@ -647,8 +896,9 @@ function renderProjectGroup(project) {
       ${open ? `
         <div class="sessions">
           ${sessions.length ? shown.map((session) => `
-            <div class="session-row-wrap ${session.id === state.activeSessionId ? "active" : ""}">
+            <div class="session-row-wrap ${session.id === state.activeSessionId ? "active" : ""}" data-session-row="${escapeHtml(session.id)}">
               <button class="session-row" data-session-id="${escapeHtml(session.id)}" data-project-id="${escapeHtml(project.id)}">
+                <span class="session-busy-dot ${sessionBusy(session.id) ? "on" : ""}" title="Running"></span>
                 <span class="stitle">${escapeHtml(session.title || "Untitled session")}</span>
                 <span class="stime">${escapeHtml(relativeTime(sessionUpdatedAt(session)))}</span>
               </button>
@@ -676,11 +926,20 @@ function renderMain() {
 
 function renderHeader(title, subtitle) {
   const label = runtimeLabel()
+  const fileTitle = state.rightSidebarOpen ? "Close files" : "Open current folder"
   return `
     <div class="main-head">
-      <div><div class="head-title">${escapeHtml(title)}</div><div class="head-path">${escapeHtml(subtitle || "")}</div></div>
+      <div class="head-copy"><div class="head-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div><div class="head-path" title="${escapeHtml(subtitle || "")}">${escapeHtml(subtitle || "")}</div></div>
       <div class="head-actions">
+        ${state.sidebarCollapsed ? `
+          <button class="head-icon-btn" data-action="toggleSidebar" title="Show sidebar" aria-label="Show sidebar">
+            ${icon("sidebarToggle")}
+          </button>
+        ` : ""}
         <button class="status-pill ${label}" data-action="toggleDiagnostics"><span class="status-dot"></span>${escapeHtml(label)}</button>
+        <button class="head-icon-btn ${state.rightSidebarOpen ? "active" : ""}" data-action="toggleRightSidebar" title="${fileTitle}" aria-label="${fileTitle}">
+          ${icon("sidebarRight")}
+        </button>
       </div>
     </div>
     ${state.diagnosticsOpen ? renderDiagnostics() : ""}
@@ -727,11 +986,12 @@ function renderThread(project) {
 }
 
 function renderThreadRows() {
-  const status = state.thread.status || { type: "idle" }
+  const thread = activeThread()
+  const status = thread.status || { type: "idle" }
   const awaiting = pendingPrompts()
   return `
-    ${state.thread.messages.map(renderThreadMessage).join("")}
-    ${status.type === "busy" && !hasRunningTool(state.thread) && !awaiting ? renderThinkingRow() : ""}
+    ${thread.messages.map(renderThreadMessage).join("")}
+    ${status.type === "busy" && !hasRunningTool(thread) && !awaiting ? renderThinkingRow() : ""}
     ${status.type === "retry" ? renderRetryRow(status) : ""}
     ${renderPendingPermissions()}
     ${renderPendingQuestions()}
@@ -740,12 +1000,12 @@ function renderThreadRows() {
 }
 
 function planProposalRef() {
-  if (state.mode !== "plan") return undefined
-  const status = state.thread.status || { type: "idle" }
+  if (!activePlanProposal()) return undefined
+  const status = activeThread().status || { type: "idle" }
   if (status.type === "busy" || status.type === "retry") return undefined
   if (pendingPrompts()) return undefined
   if (state.planAccepted === state.activeSessionId) return undefined
-  const message = latestAssistantMessage()
+  const message = latestPlanMessage()
   if (!message) return undefined
   const fileRef = messageFileRefs(message)[0]
   if (fileRef) return fileRef
@@ -774,8 +1034,9 @@ function renderPlanProposal() {
 }
 
 function pendingPrompts() {
-  const questions = state.thread.pendingQuestions?.length || 0
-  const permissions = state.thread.pendingPermissions?.length || 0
+  const thread = activeThread()
+  const questions = thread.pendingQuestions?.length || 0
+  const permissions = thread.pendingPermissions?.length || 0
   return questions + permissions
 }
 
@@ -795,17 +1056,60 @@ function renderThreadMessage(message) {
   return `<div class="msg-ai"><div class="message-stack assistant-message"><div class="message-card ai-body">${parts}${fileRefs}${changes}</div>${actions}</div></div>`
 }
 
-const MARKDOWN_FILE_RE = /\.(md|markdown)$/i
+const MUTATING_FILE_TOOLS = new Set(["edit", "write", "apply_patch"])
+const VIEWABLE_FILE_EXTENSIONS = new Set([
+  ".md", ".markdown",
+  ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+  ".css", ".scss", ".html",
+  ".json", ".jsonc", ".yml", ".yaml", ".toml", ".xml",
+  ".py", ".rb", ".go", ".rs", ".java", ".kt", ".swift",
+  ".c", ".cpp", ".h", ".cs", ".php", ".sql",
+  ".vue", ".svelte", ".astro",
+  ".sh", ".bash", ".zsh"
+])
+const MARKDOWN_FILE_EXTENSIONS = new Set([".md", ".markdown"])
+const VIEWABLE_FILE_BASENAMES = new Set(["Dockerfile", "Makefile", "Procfile", ".gitignore", ".eslintrc", ".prettierrc", ".editorconfig"])
+
+function fileExtension(value) {
+  const name = filename(value)
+  const index = name.lastIndexOf(".")
+  return index > 0 ? name.slice(index).toLowerCase() : ""
+}
+
+function isViewableFilePath(value) {
+  const name = filename(value)
+  return VIEWABLE_FILE_BASENAMES.has(name) || VIEWABLE_FILE_EXTENSIONS.has(fileExtension(value))
+}
+
+function isMarkdownFilePath(value) {
+  return MARKDOWN_FILE_EXTENSIONS.has(fileExtension(value))
+}
+
+function fileRefKind(value) {
+  const extension = fileExtension(value)
+  if (MARKDOWN_FILE_EXTENSIONS.has(extension)) return "Document · MD"
+  if (extension) return `Code · ${extension.slice(1).toUpperCase()}`
+  return "Code"
+}
 
 function messageFileRefs(message) {
   const refs = new Map()
   for (const part of message.parts || []) {
     if (part.type !== "tool") continue
-    if (!["read", "edit", "write"].includes(part.tool)) continue
-    const candidate = part.state?.input?.filePath || part.state?.metadata?.filepath
-    if (typeof candidate !== "string" || !candidate) continue
-    if (!MARKDOWN_FILE_RE.test(candidate)) continue
-    if (!refs.has(candidate)) refs.set(candidate, { path: candidate, name: filename(candidate) })
+    if (!MUTATING_FILE_TOOLS.has(part.tool)) continue
+    const candidates = []
+    if (part.tool === "edit" || part.tool === "write") {
+      candidates.push(part.state?.input?.filePath)
+    }
+    if (part.tool === "apply_patch") {
+      candidates.push(part.state?.metadata?.filepath)
+      if (Array.isArray(part.state?.metadata?.files)) candidates.push(...part.state.metadata.files)
+    }
+    for (const candidate of candidates) {
+      if (typeof candidate !== "string" || !candidate) continue
+      if (!isViewableFilePath(candidate)) continue
+      if (!refs.has(candidate)) refs.set(candidate, { path: candidate, name: filename(candidate), kind: fileRefKind(candidate) })
+    }
   }
   return [...refs.values()]
 }
@@ -816,7 +1120,7 @@ function renderFileRefChips(refs) {
     <div class="file-refs">
       ${refs.map((ref) => `
         <button class="file-ref-chip ${state.document?.requestedPath === ref.path ? "active" : ""}" data-open-file="${escapeHtml(ref.path)}" title="${escapeHtml(ref.path)}">
-          ${icon("doc")}<span><strong>${escapeHtml(ref.name)}</strong><small>Document · MD</small></span>
+          ${icon("doc")}<span><strong>${escapeHtml(ref.name)}</strong><small>${escapeHtml(ref.kind)}</small></span>
         </button>
       `).join("")}
     </div>
@@ -830,18 +1134,36 @@ function renderDocumentViewer() {
   const breadcrumb = crumbs.length
     ? crumbs.map((crumb, index) => `<span class="doc-crumb${index === crumbs.length - 1 ? " current" : ""}">${escapeHtml(crumb)}</span>`).join(`<span class="doc-crumb-sep">${icon("chevRight")}</span>`)
     : escapeHtml(doc.name || "")
+  const path = doc.path || doc.requestedPath || doc.name
+  const hasDiff = Boolean(doc.diff)
+  // "diff" only when there is a diff to show; otherwise fall back to the file's
+  // natural render mode (markdown for .md, code for everything else).
+  const tab = hasDiff && doc.tab === "diff" ? "diff" : "code"
+  const previewTabLabel = (doc.renderMode || (isMarkdownFilePath(path) ? "markdown" : "code")) === "markdown" ? "Preview" : "Code"
   let body
   if (doc.loading) {
     body = `<div class="doc-state">Loading…</div>`
   } else if (doc.error) {
     body = `<div class="doc-state error">${escapeHtml(doc.error)}</div>`
-  } else {
+  } else if (tab === "diff") {
+    body = renderUnifiedDiff(doc.diff, path)
+  } else if ((doc.renderMode || (isMarkdownFilePath(path) ? "markdown" : "code")) === "markdown") {
     body = `<div class="doc-content assistant-text">${renderMarkdown(doc.content)}</div>${doc.truncated ? `<small class="doc-truncated">File truncated.</small>` : ""}`
+  } else {
+    body = `<pre class="doc-code"><code class="hljs">${highlightCode(doc.content, path)}</code></pre>${doc.truncated ? `<small class="doc-truncated">File truncated.</small>` : ""}`
   }
+  const tabs = hasDiff
+    ? `<div class="doc-tabs" role="tablist">
+        <button class="doc-tab" role="tab" data-doc-tab="diff" aria-selected="${tab === "diff"}">Diff</button>
+        <button class="doc-tab" role="tab" data-doc-tab="code" aria-selected="${tab === "code"}">${previewTabLabel}</button>
+      </div>`
+    : ""
   return `
+    <div class="document-resizer" data-document-resizer></div>
     <aside class="document-viewer">
       <div class="doc-head">
         <div class="doc-crumbs">${breadcrumb}</div>
+        ${tabs}
         <button class="doc-close" data-action="closeDocument" title="Close" aria-label="Close">${icon("x")}</button>
       </div>
       <div class="doc-scroll">${body}</div>
@@ -849,24 +1171,102 @@ function renderDocumentViewer() {
   `
 }
 
-async function openDocument(filePath) {
+// Finds the most recent diff produced for `filePath` across the active thread's
+// messages, so opening a file can default to its Diff tab. Reuses collectMessageDiffs.
+function findDiffForPath(filePath) {
+  if (!filePath) return null
+  let found = null
+  for (const message of activeThread().messages || []) {
+    for (const entry of collectMessageDiffs(message)) {
+      if (entry.filepath === filePath) found = entry.diff
+    }
+  }
+  return found
+}
+
+async function openDocument(filePath, { diff = null, tab = null } = {}) {
   if (!filePath) return
-  state.document = { requestedPath: filePath, path: filePath, name: filename(filePath), relativePath: "", content: "", loading: true, error: "" }
+  const renderMode = isMarkdownFilePath(filePath) ? "markdown" : "code"
+  const resolvedDiff = diff || findDiffForPath(filePath)
+  const resolvedTab = tab || (resolvedDiff ? "diff" : "code")
+  state.document = { requestedPath: filePath, path: filePath, name: filename(filePath), relativePath: "", content: "", loading: true, error: "", renderMode, diff: resolvedDiff, tab: resolvedTab }
   render()
   try {
     const doc = await window.openworking.files.read(filePath)
     if (state.document?.requestedPath !== filePath) return
-    state.document = { requestedPath: filePath, ...doc, loading: false, error: "" }
+    state.document = { requestedPath: filePath, ...doc, loading: false, error: "", renderMode, diff: resolvedDiff, tab: resolvedTab }
   } catch (error) {
     if (state.document?.requestedPath !== filePath) return
-    state.document = { requestedPath: filePath, path: filePath, name: filename(filePath), relativePath: "", content: "", loading: false, error: error.message }
+    state.document = { requestedPath: filePath, path: filePath, name: filename(filePath), relativePath: "", content: "", loading: false, error: error.message, renderMode, diff: resolvedDiff, tab: resolvedTab }
   }
+  render()
+}
+
+function switchDocumentTab(tab) {
+  if (!state.document || (tab !== "diff" && tab !== "code")) return
+  if (state.document.tab === tab) return
+  state.document.tab = tab
   render()
 }
 
 function closeDocument() {
   state.document = null
   render()
+}
+
+async function toggleRightSidebar() {
+  if (state.rightSidebarOpen) {
+    state.rightSidebarOpen = false
+    render()
+    return
+  }
+  const project = selectedProject()
+  if (!project) {
+    showToast("Open a project before browsing files.")
+    return
+  }
+  state.sidebarCollapsed = true
+  state.rightSidebarOpen = true
+  if (state.fileTreeProjectId !== project.id) resetFileTree(project.id)
+  render()
+  await loadFileTreeDirectory("")
+}
+
+async function loadFileTreeDirectory(directoryPath = "", { force = false } = {}) {
+  const project = selectedProject()
+  if (!project) return
+  if (state.fileTreeProjectId !== project.id) resetFileTree(project.id)
+  const key = String(directoryPath || "")
+  if (!force && state.fileTreeChildren.has(key)) return
+  state.fileTreeLoading.add(key)
+  state.fileTreeError = ""
+  render()
+  try {
+    const listing = await window.openworking.files.list(key)
+    if (state.fileTreeProjectId !== project.id) return
+    state.fileTreeChildren.set(listing.path || "", listing.children || [])
+  } catch (error) {
+    state.fileTreeError = error.message || "Could not load files."
+  } finally {
+    state.fileTreeLoading.delete(key)
+    render()
+  }
+}
+
+async function toggleFileTreeDirectory(directoryPath) {
+  const key = String(directoryPath || "")
+  if (state.fileTreeExpanded.has(key)) {
+    state.fileTreeExpanded.delete(key)
+    render()
+    return
+  }
+  state.fileTreeExpanded.add(key)
+  render()
+  await loadFileTreeDirectory(key)
+}
+
+async function openFileTreeFile(filePath) {
+  await openDocument(filePath)
 }
 
 function renderMessageActions(message) {
@@ -878,9 +1278,23 @@ function renderAssistantPart(part) {
   if (part.type === "text") {
     return part.text ? `<div class="assistant-text">${renderMarkdown(part.text)}</div>` : ""
   }
+  if (part.type === "reasoning") return renderReasoningRow(part)
   if (part.type === "error") return renderErrorPart(part)
   if (part.type === "tool") return renderToolRow(part)
   return ""
+}
+
+// The model's "thinking" stream (OpenCode `reasoning` part). Shown above the answer
+// as a dimmed, always-expanded block — it is not the answer, so it stays visually
+// distinct and never feeds copy/plan detection (those filter on type === "text").
+function renderReasoningRow(part) {
+  if (!String(part.text || "").trim()) return ""
+  return `
+    <div class="reasoning-block">
+      <div class="reasoning-label">${icon("sparkle")}<span>Suy nghĩ</span></div>
+      <div class="reasoning-text assistant-text">${renderMarkdown(part.text)}</div>
+    </div>
+  `
 }
 
 function renderErrorPart(part) {
@@ -1009,7 +1423,7 @@ function questionDraft(requestID, index) {
 // tool. Single-select questions submit on click; multi-select questions collect choices
 // and submit via a button. An "Other" option exposes a free-text field.
 function renderPendingQuestions() {
-  const pending = state.thread.pendingQuestions || []
+  const pending = activeThread().pendingQuestions || []
   if (!pending.length) return ""
   return pending.map(renderQuestionCard).join("")
 }
@@ -1071,7 +1485,7 @@ function permissionSummary(request) {
 
 // Renders the tool-approval card OpenCode raises when an action is gated to "ask".
 function renderPendingPermissions() {
-  const pending = state.thread.pendingPermissions || []
+  const pending = activeThread().pendingPermissions || []
   if (!pending.length) return ""
   return pending.map(renderPermissionCard).join("")
 }
@@ -1101,32 +1515,87 @@ function diffStats(diff) {
   return { additions, deletions }
 }
 
-function highlightDiff(diff) {
+
+// Maps a previewed file's extension to a highlight.js language. Only the common
+// languages bundled in the @highlightjs/cdn-assets build are listed; anything not
+// here falls back to plain escaped text in highlightCode.
+const HLJS_LANGUAGE_BY_EXTENSION = {
+  ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+  ".ts": "typescript", ".tsx": "typescript",
+  ".py": "python", ".rb": "ruby", ".go": "go", ".rs": "rust",
+  ".java": "java", ".kt": "kotlin", ".swift": "swift",
+  ".c": "c", ".h": "c", ".cpp": "cpp", ".cs": "csharp", ".php": "php", ".sql": "sql",
+  ".css": "css", ".scss": "scss", ".html": "xml", ".xml": "xml",
+  ".vue": "xml", ".svelte": "xml", ".astro": "xml",
+  ".json": "json", ".jsonc": "json", ".yml": "yaml", ".yaml": "yaml", ".toml": "ini",
+  ".sh": "bash", ".bash": "bash", ".zsh": "bash"
+}
+// Dockerfile grammar is not in the bundled highlight.js "common" build, so it is
+// intentionally omitted and falls back to plain text.
+const HLJS_LANGUAGE_BY_BASENAME = { Makefile: "makefile" }
+
+// Highlights previewed source by file extension: the returned string is already
+// HTML-escaped by hljs, and any miss (unknown language or thrown error) falls
+// back to escapeHtml so the panel never breaks or injects.
+function highlightCode(content, path) {
+  const language = HLJS_LANGUAGE_BY_BASENAME[filename(path)] || HLJS_LANGUAGE_BY_EXTENSION[fileExtension(path)]
+  if (!language || !hljs.getLanguage(language)) return escapeHtml(content)
   try {
-    return hljs.highlight(diff, { language: "diff" }).value
+    return hljs.highlight(content, { language }).value
   } catch (error) {
-    return escapeHtml(diff)
+    return escapeHtml(content)
   }
 }
 
-// Renders one collapsible file diff. `key` identifies the disclosure state.
+// Renders a unified diff as a GitHub-style two-gutter view: old/new line numbers
+// plus the line content, with added/removed lines tinted green/red and hunk
+// boundaries shown as "N unmodified lines" separators. Line content is run
+// through highlightCode so it keeps per-language colors; everything is escaped.
+function renderUnifiedDiff(diff, path) {
+  const rows = parseUnifiedDiff(diff)
+  if (!rows.length) return `<div class="doc-state">No changes to display.</div>`
+  let lastNewNo = 0
+  const html = rows.map((row) => {
+    if (row.type === "hunk") {
+      // The jump from the last rendered new-line to this hunk's start is the
+      // count of unmodified lines collapsed between hunks.
+      const skipped = lastNewNo ? Math.max(0, row.newStart - lastNewNo - 1) : 0
+      lastNewNo = row.newStart - 1
+      const label = skipped > 0 ? `${skipped} unmodified line${skipped === 1 ? "" : "s"}` : escapeHtml(row.text)
+      return `<div class="diff-hunk"><span class="diff-hunk-label">${label}</span></div>`
+    }
+    const content = `<code class="hljs">${highlightCode(row.text, path)}</code>`
+    if (row.type === "add") {
+      lastNewNo = row.newNo
+      return `<div class="diff-line add"><span class="diff-gutter"></span><span class="diff-gutter">${row.newNo}</span><span class="diff-mark">+</span>${content}</div>`
+    }
+    if (row.type === "del") {
+      return `<div class="diff-line del"><span class="diff-gutter">${row.oldNo}</span><span class="diff-gutter"></span><span class="diff-mark">-</span>${content}</div>`
+    }
+    lastNewNo = row.newNo
+    return `<div class="diff-line"><span class="diff-gutter">${row.oldNo}</span><span class="diff-gutter">${row.newNo}</span><span class="diff-mark"></span>${content}</div>`
+  }).join("")
+  return `<div class="diff-view">${html}</div>`
+}
+
+// Renders one file row in the inline "Changes" card. Clicking it opens the diff
+// in the document-viewer panel (Diff tab) rather than expanding inline. Rows
+// without a resolvable file path are shown read-only (no panel to open).
 function renderDiffRow(key, { filepath, label, diff, truncated }) {
-  let disclosure = state.diffDisclosure.get(key)
-  if (!disclosure) {
-    disclosure = { open: false }
-    state.diffDisclosure.set(key, disclosure)
-  }
   const displayLabel = label || (filepath ? filename(filepath) : "Changes")
   const { additions, deletions } = diffStats(diff)
-  return `
-    <div class="tool-diff-block">
-      <button class="tool-diff-head" data-diff-toggle="${escapeHtml(key)}" aria-expanded="${disclosure.open}"${filepath ? ` title="${escapeHtml(filepath)}"` : ""}>
+  const openable = Boolean(filepath) && isViewableFilePath(filepath)
+  const active = openable && state.document?.requestedPath === filepath && state.document?.tab === "diff"
+  const head = `
         ${icon("doc")}
         <span class="tool-diff-name">${escapeHtml(displayLabel)}</span>
         <span class="tool-diff-stats"><span class="diff-add">+${additions}</span><span class="diff-del">-${deletions}</span></span>
-        <span class="tool-chevron">${icon("chevRight")}</span>
-      </button>
-      ${disclosure.open ? `<pre class="tool-diff"><code class="hljs language-diff">${highlightDiff(diff)}</code></pre>${truncated ? `<small class="tool-diff-truncated">Diff truncated</small>` : ""}` : ""}
+        <span class="tool-chevron">${icon("chevRight")}</span>`
+  return `
+    <div class="tool-diff-block">
+      ${openable
+        ? `<button class="tool-diff-head${active ? " active" : ""}" data-open-file="${escapeHtml(filepath)}" data-open-tab="diff" title="${escapeHtml(filepath)}">${head}</button>`
+        : `<div class="tool-diff-head readonly"${filepath ? ` title="${escapeHtml(filepath)}"` : ""}>${head}</div>`}
     </div>
   `
 }
@@ -1136,6 +1605,7 @@ function collectMessageDiffs(message) {
   const byFile = new Map()
   for (const part of message?.parts || []) {
     if (part.type !== "tool") continue
+    if (!MUTATING_FILE_TOOLS.has(part.tool)) continue
     const metadata = part.state?.metadata
     const diff = metadata?.diff
     if (typeof diff !== "string" || !diff) continue
@@ -1197,7 +1667,7 @@ function renderToolArtifacts(metadata) {
 }
 
 function renderThinkingRow() {
-  return `<div class="msg-ai stream-row"><div class="thinking"><i></i><i></i><i></i><span>Thinking</span></div></div>`
+  return `<div class="msg-ai stream-row"><div class="thinking"><img class="thinking-logo" src="./assets/techtus_logo.apng" alt="" width="24" height="24"><span>Thinking</span></div></div>`
 }
 
 function renderRetryRow(status) {
@@ -1255,10 +1725,7 @@ function renderComposer(project, dock = false) {
         </div>
         <span class="mode-label ${planOn ? "plan" : ""}">${planOn ? "Plan" : "Execution"}</span>
         <span class="spacer"></span>
-        <div class="popover-anchor">
-          <button class="pill" data-popover="model">${icon("sparkle")}<span>${escapeHtml(model?.name || "No model configured")}</span>${icon("chevDown")}</button>
-          ${state.popover === "model" ? `<div class="pop pop-up model-pop"><div class="pop-label">Model</div>${modelOptions().map((item) => `<button class="pop-item" data-model="${escapeHtml(item.key)}"><span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.sub)}</small></span>${item.key === state.selectedModelKey ? icon("check") : ""}</button>`).join("") || `<div class="pop-empty">Add a model in Config.</div>`}</div>` : ""}
-        </div>
+        <span class="model-label">${escapeHtml(model?.name || "No model configured")}</span>
         <button class="send ${abortable || state.promptDraft.trim() ? "" : "disabled"}" data-action="${abortable ? "abortSession" : "sendPrompt"}" title="${abortable ? "Stop response" : "Send"}" aria-label="${abortable ? "Stop response" : "Send"}">${icon(abortable ? "stop" : "arrowUp")}</button>
       </div>
     </div>
@@ -1387,6 +1854,16 @@ function renderRuntimeStatus() {
   pill.innerHTML = `<span class="status-dot"></span>${escapeHtml(label)}`
 }
 
+// Toggles the per-session "running" dots in the sidebar in place, so a session
+// going busy/idle (including a backgrounded one) updates its badge without a full
+// re-render that would disrupt scroll/focus elsewhere.
+function renderSessionBadges() {
+  document.querySelectorAll("[data-session-row]").forEach((row) => {
+    const dot = row.querySelector(".session-busy-dot")
+    if (dot) dot.classList.toggle("on", sessionBusy(row.dataset.sessionRow))
+  })
+}
+
 function renderToast() {
   const host = document.getElementById("toastHost")
   if (!host) return
@@ -1410,17 +1887,13 @@ function bindToolStepActions(root = document) {
   }))
 }
 
-function bindDiffToggleActions(root = document) {
-  root.querySelectorAll("[data-diff-toggle]").forEach((element) => element.addEventListener("click", () => {
-    const disclosure = state.diffDisclosure.get(element.dataset.diffToggle)
-    if (!disclosure) return
-    disclosure.open = !disclosure.open
-    renderThreadContent()
-  }))
+function bindFileRefActions(root = document) {
+  root.querySelectorAll("[data-open-file]").forEach((element) => element.addEventListener("click", () =>
+    openDocument(element.dataset.openFile, { tab: element.dataset.openTab || null }).catch((error) => showToast(error.message))))
 }
 
-function bindFileRefActions(root = document) {
-  root.querySelectorAll("[data-open-file]").forEach((element) => element.addEventListener("click", () => openDocument(element.dataset.openFile).catch((error) => showToast(error.message))))
+function bindDocTabActions(root = document) {
+  root.querySelectorAll("[data-doc-tab]").forEach((element) => element.addEventListener("click", () => switchDocumentTab(element.dataset.docTab)))
 }
 
 function bindPendingPromptActions(root = document) {
@@ -1477,14 +1950,14 @@ function clearQuestionDrafts(requestID) {
 }
 
 async function submitQuestion(requestID, index, answer) {
-  const request = (state.thread.pendingQuestions || []).find((item) => item.requestID === requestID)
+  const request = (activeThread().pendingQuestions || []).find((item) => item.requestID === requestID)
   const questionCount = Array.isArray(request?.questions) ? request.questions.length : 1
   // The runtime expects one answer entry per question prompt in the request.
   const answers = Array.from({ length: questionCount }, (_value, i) => (i === index ? answer : []))
   if (!state.activeSessionId) throw new Error("No active session for this question.")
   await window.openworking.runtime.answerQuestion({ sessionId: state.activeSessionId, requestID, answers })
   clearQuestionDrafts(requestID)
-  clearPendingQuestion(state.thread, requestID)
+  clearPendingQuestion(activeThread(), requestID)
   renderThreadContent()
 }
 
@@ -1492,14 +1965,14 @@ async function dismissQuestion(requestID) {
   if (!state.activeSessionId) throw new Error("No active session for this question.")
   await window.openworking.runtime.rejectQuestion({ sessionId: state.activeSessionId, requestID })
   clearQuestionDrafts(requestID)
-  clearPendingQuestion(state.thread, requestID)
+  clearPendingQuestion(activeThread(), requestID)
   renderThreadContent()
 }
 
 async function replyPermission(requestID, decision) {
   if (!state.activeSessionId) throw new Error("No active session for this request.")
   await window.openworking.runtime.replyPermission({ sessionId: state.activeSessionId, requestID, reply: decision })
-  clearPendingPermission(state.thread, requestID)
+  clearPendingPermission(activeThread(), requestID)
   renderThreadContent()
 }
 
@@ -1534,6 +2007,10 @@ function bindEvents() {
   }))
   document.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", handleAction))
   document.querySelectorAll("[data-resizer]").forEach((element) => element.addEventListener("mousedown", startSidebarResize))
+  document.querySelectorAll("[data-document-resizer]").forEach((element) => element.addEventListener("mousedown", startDocumentViewerResize))
+  document.querySelectorAll("[data-right-file-resizer]").forEach((element) => element.addEventListener("mousedown", startRightFileSidebarResize))
+  document.querySelectorAll("[data-tree-dir]").forEach((element) => element.addEventListener("click", () => toggleFileTreeDirectory(element.dataset.treeDir).catch((error) => showToast(error.message))))
+  document.querySelectorAll("[data-tree-file]").forEach((element) => element.addEventListener("click", () => openFileTreeFile(element.dataset.treeFile).catch((error) => showToast(error.message))))
   document.querySelectorAll("[data-open-project]").forEach((element) => element.addEventListener("click", () => openProject(element.dataset.openProject)))
   document.querySelectorAll("[data-new-session]").forEach((element) => element.addEventListener("click", (event) => {
     event.stopPropagation()
@@ -1586,8 +2063,8 @@ function bindEvents() {
   bindMessageActions()
   bindArtifactActions()
   bindToolStepActions()
-  bindDiffToggleActions()
   bindFileRefActions()
+  bindDocTabActions()
   bindPendingPromptActions()
   bindSkillUploadDrop()
   document.querySelectorAll("[data-command]").forEach((element) => element.addEventListener("mousedown", (event) => {
@@ -1717,8 +2194,56 @@ function startSidebarResize(event) {
   document.addEventListener("mouseup", onUp)
 }
 
+function startRightFileSidebarResize(event) {
+  event.preventDefault()
+  const sidebar = document.querySelector(".right-file-sidebar")
+  if (!sidebar) return
+  const startX = event.clientX
+  const startWidth = sidebar.getBoundingClientRect().width
+  document.body.style.cursor = "col-resize"
+  document.body.style.userSelect = "none"
+
+  let width = startWidth
+  const onMove = (moveEvent) => {
+    width = setRightFileSidebarWidth(startWidth + startX - moveEvent.clientX)
+  }
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove)
+    document.removeEventListener("mouseup", onUp)
+    document.body.style.cursor = ""
+    document.body.style.userSelect = ""
+    localStorage.setItem(RIGHT_FILE_WIDTH_KEY, String(width))
+  }
+  document.addEventListener("mousemove", onMove)
+  document.addEventListener("mouseup", onUp)
+}
+
+function startDocumentViewerResize(event) {
+  event.preventDefault()
+  const viewer = document.querySelector(".document-viewer")
+  if (!viewer) return
+  const startX = event.clientX
+  const startWidth = viewer.getBoundingClientRect().width
+  document.body.style.cursor = "col-resize"
+  document.body.style.userSelect = "none"
+
+  let width = startWidth
+  const onMove = (moveEvent) => {
+    width = setDocumentViewerWidth(startWidth + startX - moveEvent.clientX)
+  }
+  const onUp = () => {
+    document.removeEventListener("mousemove", onMove)
+    document.removeEventListener("mouseup", onUp)
+    document.body.style.cursor = ""
+    document.body.style.userSelect = ""
+    localStorage.setItem(DOCUMENT_WIDTH_KEY, String(width))
+  }
+  document.addEventListener("mousemove", onMove)
+  document.addEventListener("mouseup", onUp)
+}
+
 async function copyMessage(messageId) {
-  const message = state.thread.messages.find((item) => item.id === messageId)
+  const message = activeThread().messages.find((item) => item.id === messageId)
   const text = message ? messageCopyText(message) : ""
   if (!text) return
   await window.openworking.clipboard.writeText(text)
@@ -1742,6 +2267,7 @@ async function handleAction(event) {
       state.sidebarCollapsed = !state.sidebarCollapsed
       render()
     }
+    if (action === "toggleRightSidebar") await toggleRightSidebar()
     if (action === "newSession") await newSession(state.activeProjectId)
     if (action === "togglePlanMode") {
       // Keep the "+" popover open so the user can see the switch flip.
@@ -1832,8 +2358,9 @@ async function clearPendingAttachments() {
 async function abortSession() {
   if (!state.activeSessionId || !threadAbortable()) return
   await window.openworking.runtime.abortSession({ sessionId: state.activeSessionId })
-  state.thread.status = { type: "idle" }
+  activeThread().status = { type: "idle" }
   updateComposerSubmitButton()
+  renderSessionBadges()
   renderThreadContent()
 }
 
@@ -1847,7 +2374,9 @@ async function openProject(projectId, { selectLatest = true } = {}) {
     return
   }
   await clearPendingAttachments()
+  const switchingProject = state.activeProjectId !== projectId
   state.activeProjectId = projectId
+  if (switchingProject) resetFileTree(projectId)
   state.activeSessionId = null
   resetActiveThread()
   state.nav = "session"
@@ -1861,6 +2390,9 @@ async function openProject(projectId, { selectLatest = true } = {}) {
     state.commandMenu = { open: false, query: "", index: 0 }
     const sessions = await window.openworking.runtime.listSessions()
     state.sessionsByProject[projectId] = sessions
+    // Opening a different project's runtime drops the old project's sessions — clear
+    // their in-memory threads so background state from another workspace can't leak.
+    if (switchingProject) pruneThreads(sessions.map((session) => session.id))
     if (selectLatest && sessions[0]) {
       state.activeSessionId = sessions[0].id
       hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId: sessions[0].id }), state.runtime.activeSessionStatus)
@@ -1870,14 +2402,26 @@ async function openProject(projectId, { selectLatest = true } = {}) {
     state.loading = false
     render({ threadScroll: scrollLatest ? "latest" : "preserve" })
   }
+  if (state.rightSidebarOpen) loadFileTreeDirectory("").catch((error) => showToast(error.message))
+}
+
+// Drops threads for sessions no longer present, keeping the active/draft threads.
+// Prevents unbounded growth and cross-project bleed of background session state.
+function pruneThreads(keepSessionIds) {
+  const keep = new Set([...keepSessionIds, state.activeSessionId, null])
+  for (const sessionId of [...state.threads.keys()]) {
+    if (!keep.has(sessionId)) state.threads.delete(sessionId)
+  }
 }
 
 async function newSession(projectId, { clearAttachments = true } = {}) {
   if (!projectId) return
   const project = state.projects.find((item) => item.id === projectId)
   if (!project) return
+  const switchingProject = state.activeProjectId !== projectId
   if (clearAttachments) await clearPendingAttachments()
   state.activeProjectId = projectId
+  if (switchingProject) resetFileTree(projectId)
   state.activeSessionId = null
   resetActiveThread()
   state.nav = "session"
@@ -1894,6 +2438,7 @@ async function newSession(projectId, { clearAttachments = true } = {}) {
       render()
     }
   }
+  if (state.rightSidebarOpen) loadFileTreeDirectory("").catch((error) => showToast(error.message))
   document.getElementById("promptInput")?.focus()
 }
 
@@ -1905,7 +2450,13 @@ async function selectSession(projectId, sessionId) {
   state.activeProjectId = projectId
   state.activeSessionId = sessionId
   state.nav = "session"
-  hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId }))
+  // If we already hold a live thread for this session that is mid-flight (busy), keep
+  // it as-is — re-hydrating from the server would drop streamed parts not yet
+  // persisted there. Idle or first-time threads hydrate from the server as before.
+  const existing = state.threads.get(sessionId)
+  if (!existing || !threadIsBusy(existing)) {
+    hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId }))
+  }
   render({ threadScroll: "latest" })
 }
 
@@ -1918,6 +2469,7 @@ async function deleteSession(sessionId) {
     return
   }
   state.sessionsByProject[projectId] = await window.openworking.runtime.listSessions()
+  state.threads.delete(sessionId)
   if (state.activeSessionId === sessionId) {
     state.activeSessionId = null
     resetActiveThread()
@@ -1930,7 +2482,9 @@ async function acceptPlan() {
   // Accepting a plan switches out of Plan mode into Execution mode (build agent)
   // and asks the agent to carry out the plan it just proposed.
   state.planAccepted = state.activeSessionId
+  state.planProposal = null
   state.mode = "agent"
+  state.document = null
   render()
   await sendPrompt("The plan above is approved. Please execute it.")
 }
@@ -1940,6 +2494,7 @@ async function rejectPlan() {
   // proposal card. The plan is abandoned with no follow-up prompt.
   if (threadAbortable()) await abortSession()
   state.planAccepted = state.activeSessionId  // marks the proposal resolved -> card hides
+  state.planProposal = null
   render()
 }
 
@@ -1952,6 +2507,7 @@ async function sendPrompt(rawPrompt) {
   const command = commandMatch && findCommand(commandMatch[1]) ? commandMatch[1] : null
   const commandArgs = command ? (commandMatch[2] || "") : ""
   const attachments = command ? [] : state.pendingAttachments.slice()
+  const mode = modes.find((item) => item.id === state.mode) || modes[0]
   if (state.runtime?.project?.id !== project.id || state.runtime.status !== "running") {
     await newSession(project.id, { clearAttachments: false })
   }
@@ -1961,17 +2517,31 @@ async function sendPrompt(rawPrompt) {
     state.activeSessionId = session.id
     state.sessionsByProject[project.id] ||= []
     state.sessionsByProject[project.id].unshift(session)
+    // Discard the unsaved "new session" draft thread and start a clean thread under
+    // the real session id, so subsequent stream events route to it by sessionID.
+    state.threads.delete(null)
     resetActiveThread(session.id)
   }
-  const optimisticId = addOptimisticUser(state.thread, prompt, attachments)
+  const thread = activeThread()
+  const optimisticId = addOptimisticUser(thread, prompt, attachments)
+  if (mode.id === "plan") {
+    const afterMessageIndex = thread.messages.findIndex((message) => message.id === optimisticId)
+    state.planProposal = {
+      sessionId: state.activeSessionId,
+      afterMessageIndex: afterMessageIndex === -1 ? thread.messages.length - 1 : afterMessageIndex
+    }
+    state.planAccepted = null
+    state.planAutoOpened = null
+  } else if (state.planProposal?.sessionId === state.activeSessionId) {
+    state.planProposal = null
+  }
   const sentAttachmentIds = new Set(attachments.map((attachment) => attachment.id))
-  state.thread.status = { type: "busy" }
+  thread.status = { type: "busy" }
   state.promptDraft = ""
   if (!command && sentAttachmentIds.size) {
     state.pendingAttachments = state.pendingAttachments.filter((attachment) => !sentAttachmentIds.has(attachment.id))
   }
   render({ threadScroll: "latest" })
-  const mode = modes.find((item) => item.id === state.mode) || modes[0]
   const model = selectedModel()
   try {
     if (command) {
@@ -1993,8 +2563,9 @@ async function sendPrompt(rawPrompt) {
     }
     render({ threadScroll: "latest" })
   } catch (error) {
-    removeOptimisticUser(state.thread, optimisticId)
-    state.thread.status = { type: "idle" }
+    removeOptimisticUser(thread, optimisticId)
+    if (state.planProposal?.sessionId === state.activeSessionId) state.planProposal = null
+    thread.status = { type: "idle" }
     state.promptDraft = prompt
     if (!command && attachments.length) {
       const pendingIds = new Set(state.pendingAttachments.map((attachment) => attachment.id))
@@ -2025,6 +2596,7 @@ async function removeProject(projectId) {
   if (state.activeProjectId === projectId) {
     state.activeProjectId = state.projects[0]?.id || null
     state.activeSessionId = null
+    state.threads.clear()
     resetActiveThread()
   }
   render()
@@ -2143,6 +2715,38 @@ async function reloadConfig() {
   state.customSkills = configResult.customSkills || []
   state.providerId = Object.keys(state.config.provider || {})[0] || "gateway"
   selectedModel()
+}
+
+async function login() {
+  state.authLoading = true
+  render()
+  try {
+    state.auth = await window.openworking.auth.login()
+    await reloadConfig()
+    render()
+    if (isAuthenticated() && state.projects[0]) {
+      await openProject(state.projects[0].id, { selectLatest: false })
+    }
+  } finally {
+    state.authLoading = false
+    render()
+  }
+}
+
+async function logout() {
+  state.popover = null
+  state.authLoading = true
+  render()
+  try {
+    state.auth = await window.openworking.auth.logout()
+    state.runtime = await window.openworking.runtime.get()
+    state.activeSessionId = null
+    state.threads.clear()
+    resetActiveThread()
+  } finally {
+    state.authLoading = false
+    render()
+  }
 }
 
 document.addEventListener("click", (event) => {

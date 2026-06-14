@@ -28,7 +28,8 @@ contextBridge.exposeInMainWorld("openworking", {
     open: (artifactPath) => ipcRenderer.invoke("artifacts:open", artifactPath)
   },
   files: {
-    read: (filePath) => ipcRenderer.invoke("files:read", filePath)
+    read: (filePath) => ipcRenderer.invoke("files:read", filePath),
+    list: (relativePath) => ipcRenderer.invoke("files:list", relativePath)
   },
   version: {
     check: () => ipcRenderer.invoke("version:check"),
