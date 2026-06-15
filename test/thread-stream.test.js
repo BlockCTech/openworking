@@ -216,6 +216,54 @@ test("thread stream drops tool boilerplate but keeps assistant replies", () => {
   assert.equal(messageText(thread.messages[0]), "Here is the translation.")
 })
 
+test("thread stream drops the stray Gemma tool-call marker leaked as a text part", () => {
+  const thread = createThreadStream("sess_one")
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_assistant", role: "assistant" },
+    parts: [
+      { id: "part_reply", messageID: "msg_assistant", type: "text", text: "Tôi sẽ dịch nội dung của file." },
+      // Observed real leak from google/gemma-4-31B-it: the tool-call marker plus the
+      // brace that closed the tool-call JSON, surfacing as its own text part.
+      { id: "part_marker", messageID: "msg_assistant", type: "text", text: "\n}<tool_call|>\n" }
+    ]
+  }])
+
+  assert.equal(messageText(thread.messages[0]), "Tôi sẽ dịch nội dung của file.")
+  assert.equal(thread.messages[0].parts.some((part) => /tool_call/.test(part.text || "")), false)
+})
+
+test("thread stream drops a bare tool-call marker text part built up via streaming deltas", () => {
+  const thread = createThreadStream("sess_one")
+  applyThreadEvent(thread, { type: "message.updated", sessionID: "sess_one", info: { id: "msg_a", role: "assistant" } })
+  applyThreadEvent(thread, {
+    type: "message.part.updated",
+    sessionID: "sess_one",
+    part: { id: "p_marker", messageID: "msg_a", sessionID: "sess_one", type: "text", text: "" }
+  })
+  applyThreadEvent(thread, {
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "p_marker",
+    field: "text",
+    delta: "\n}<tool_call|>\n"
+  })
+
+  assert.equal(messageText(thread.messages[0]), "")
+  assert.equal(thread.messages[0].parts.some((part) => /tool_call/.test(part.text || "")), false)
+})
+
+test("thread stream keeps a real answer that merely contains the word tool_call in prose", () => {
+  const thread = createThreadStream("sess_one")
+  const answer = "Bạn có thể dùng marker tool_call để báo hiệu một lệnh gọi công cụ trong prompt."
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_assistant", role: "assistant" },
+    parts: [{ id: "part_reply", messageID: "msg_assistant", type: "text", text: answer }]
+  }])
+
+  assert.equal(messageText(thread.messages[0]), answer)
+})
+
 test("thread stream keeps assistant text even if it mentions the office context marker", () => {
   const thread = createThreadStream("sess_one")
   const assistantText = "Attached Office files are provided as local paths plus extracted text context is an internal marker."

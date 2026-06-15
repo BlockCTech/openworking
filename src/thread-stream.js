@@ -95,6 +95,25 @@
     return part.type === "text" && /^Called the .+ tool with the following input:/i.test(String(part.text || "").trim())
   }
 
+  // Gemma-family models (e.g. google/gemma-4-31B-it, the bundled default) signal a
+  // tool call with a literal control marker like `<tool_call|>`. The runtime lifts
+  // the structured call out, but the marker — plus the trailing `}` that closed the
+  // tool-call JSON — can leak through as its own text part (observed content:
+  // "\n}<tool_call|>\n"), rendering as a stray "}<tool_call|>"/"{" at the end of the
+  // answer. Drop text parts whose trimmed content is ONLY these markers (with the
+  // stray brace/whitespace around them) — never legitimate prose.
+  function isStrayToolCallMarkerText(part) {
+    if (part.type !== "text") return false
+    const text = String(part.text || "").trim()
+    if (!text) return false
+    // Fresh non-global regexes per call to avoid shared lastIndex state.
+    if (!/<\/?\|?tool[_▁\s]?call\|?>/i.test(text)) return false
+    // Only drop if what remains after stripping markers is mere brace/JSON
+    // punctuation — i.e. there is no actual answer prose riding along with it.
+    const remainder = text.replace(/<\/?\|?tool[_▁\s]?call\|?>/gi, "").trim()
+    return remainder === "" || /^[{}\[\],:"'\s]+$/.test(remainder)
+  }
+
   function officeAttachmentPromptText(part) {
     if (part.type !== "text") return null
     const text = String(part.text || "")
@@ -111,7 +130,7 @@
   }
 
   function shouldDropPart(role, part) {
-    return isToolBoilerplateText(part) || isSyntheticUserText(role, part)
+    return isToolBoilerplateText(part) || isSyntheticUserText(role, part) || isStrayToolCallMarkerText(part)
   }
 
   function normalizePart(role, part) {
@@ -517,6 +536,9 @@
       }
       if (part.type !== "text" && part.type !== "reasoning") return { changed: false, reconcile: false }
       part.text = (part.text || "") + (event.delta || "")
+      // A delta can complete a stray tool-call-marker part (Gemma emits the marker
+      // as text). Re-normalize so it never even flickers into the rendered thread.
+      message.parts = normalizeParts(message.role, message.parts)
       return { changed: true, reconcile: false }
     }
     if (event.type === "question.asked" && event.requestID) {

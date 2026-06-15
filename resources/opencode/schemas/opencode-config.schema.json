@@ -43,48 +43,44 @@
       },
       "additionalProperties": false
     },
-    "ReferenceConfigEntry": {
-      "anyOf": [
-        {
+    "ConfigV2.Reference.Git": {
+      "type": "object",
+      "properties": {
+        "repository": {
           "type": "string"
         },
-        {
-          "type": "object",
-          "properties": {
-            "repository": {
-              "type": "string",
-              "description": "Git repository URL, host/path reference, or GitHub owner/repo shorthand"
-            },
-            "branch": {
-              "type": "string",
-              "description": "Branch or ref Scout should clone and inspect"
-            }
-          },
-          "required": [
-            "repository"
-          ],
-          "additionalProperties": false
+        "branch": {
+          "type": "string"
         },
-        {
-          "type": "object",
-          "properties": {
-            "path": {
-              "type": "string",
-              "description": "Absolute path, ~/ path, or workspace-relative path to a local reference directory"
-            }
-          },
-          "required": [
-            "path"
-          ],
-          "additionalProperties": false
+        "description": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean"
         }
-      ]
+      },
+      "required": [
+        "repository"
+      ],
+      "additionalProperties": false
     },
-    "ReferenceConfig": {
+    "ConfigV2.Reference.Local": {
       "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/ReferenceConfigEntry"
-      }
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "additionalProperties": false
     },
     "PermissionActionConfig": {
       "type": "string",
@@ -153,12 +149,6 @@
             },
             "websearch": {
               "$ref": "#/$defs/PermissionActionConfig"
-            },
-            "repo_clone": {
-              "$ref": "#/$defs/PermissionRuleConfig"
-            },
-            "repo_overview": {
-              "$ref": "#/$defs/PermissionRuleConfig"
             },
             "lsp": {
               "$ref": "#/$defs/PermissionRuleConfig"
@@ -396,6 +386,7 @@
                       "field": {
                         "type": "string",
                         "enum": [
+                          "reasoning",
                           "reasoning_content",
                           "reasoning_details"
                         ]
@@ -575,7 +566,7 @@
         },
         "cwd": {
           "type": "string",
-          "description": "Working directory to start the MCP server from. Can be a workspace-relative directory."
+          "description": "Working directory for the MCP server process. Relative paths resolve from the workspace directory."
         },
         "environment": {
           "type": "object",
@@ -801,6 +792,9 @@
                 "type": "string",
                 "$ref": "https://models.dev/model-schema.json#/$defs/Model"
               },
+              "variant": {
+                "type": "string"
+              },
               "subtask": {
                 "type": "boolean"
               }
@@ -833,9 +827,39 @@
           "additionalProperties": false,
           "description": "Additional skill folder paths"
         },
+        "references": {
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/ConfigV2.Reference.Git"
+              },
+              {
+                "$ref": "#/$defs/ConfigV2.Reference.Local"
+              }
+            ]
+          },
+          "description": "Named git or local directory references"
+        },
         "reference": {
-          "$ref": "#/$defs/ReferenceConfig",
-          "description": "Named git or local directory references that can be mentioned as @alias or @alias/path"
+          "type": "object",
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "$ref": "#/$defs/ConfigV2.Reference.Git"
+              },
+              {
+                "$ref": "#/$defs/ConfigV2.Reference.Local"
+              }
+            ]
+          },
+          "description": "@deprecated Use 'references' field instead. Named git or local directory references"
         },
         "watcher": {
           "type": "object",
@@ -963,9 +987,6 @@
               "$ref": "#/$defs/AgentConfig"
             },
             "explore": {
-              "$ref": "#/$defs/AgentConfig"
-            },
-            "scout": {
               "$ref": "#/$defs/AgentConfig"
             },
             "title": {
@@ -1183,7 +1204,7 @@
             },
             "prune": {
               "type": "boolean",
-              "description": "Enable pruning of old tool outputs (default: true)"
+              "description": "Enable pruning of old tool outputs (default: false)"
             },
             "tail_turns": {
               "minimum": 0,
