@@ -305,7 +305,15 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .session-kebab:hover { background: var(--surface-2); color: var(--text); }
 .session-row-wrap:hover .stime { opacity: 0; }
 
-.session-pop { position: absolute; right: 6px; top: calc(100% - 2px); z-index: 20; min-width: 150px; }
+.pop.session-pop {
+  position: absolute;
+  right: 6px;
+  top: calc(100% - 2px);
+  z-index: 20;
+  min-width: 0;
+  width: fit-content;
+  max-width: min(200px, calc(100vw - 32px));
+}
 .session-pop .pop-item.danger { color: var(--red); }
 .session-pop .pop-item.danger svg { color: var(--red); }
 .session-pop .pop-item.danger:hover { background: var(--red-soft); }
@@ -859,6 +867,8 @@ input[readonly], label textarea[readonly] { color: var(--text-2); background: va
 }
 .confirm-modal .confirm-title { font-size: 19px; font-weight: 700; }
 .confirm-modal p { color: var(--text-2); font-size: 13.5px; line-height: 1.5; }
+.rename-modal-body { display: grid; gap: 10px; margin-top: 4px; }
+.rename-modal .field-error { min-height: 15px; }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .danger-btn {
   display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 8px 14px;

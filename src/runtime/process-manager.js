@@ -739,6 +739,29 @@ class RuntimeProcessManager {
     return session
   }
 
+  async renameSession({ sessionId, title }) {
+    this.assertReady()
+    const nextTitle = String(title || "").trim()
+    if (!sessionId) throw new Error("Select a session before renaming it.")
+    if (!nextTitle) throw new Error("Session title is required.")
+    this.timeline("session.rename.requested", { sessionId })
+    try {
+      const session = await requestJson({
+        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}`,
+        method: "PATCH",
+        auth: this.auth(),
+        body: { title: nextTitle }
+      })
+      this.timeline("session.rename.completed", { sessionId })
+      this.publish()
+      return session
+    } catch (error) {
+      this.log("error", `Rename failed: ${error.message}`)
+      this.timeline("session.rename.error", { sessionId, error: error.message })
+      throw error
+    }
+  }
+
   async listMessages({ sessionId, limit = 100 }) {
     this.assertReady()
     if (!sessionId) return []
