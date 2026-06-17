@@ -5,7 +5,8 @@ const os = require("node:os")
 const path = require("node:path")
 const zlib = require("node:zlib")
 const AdmZip = require("adm-zip")
-const { PDFDocument, StandardFonts } = require("pdf-lib")
+const { PDFDocument, StandardFonts, rgb } = require("pdf-lib")
+const { PNG } = require("pngjs")
 const runtime = require("../resources/opencode/document-tools/runtime.cjs")
 
 function tempProject() {
@@ -14,6 +15,52 @@ function tempProject() {
 
 function mockTranslation(segments) {
   return new Map(segments.map((segment) => [segment.id, `VI ${segment.text}`]))
+}
+
+function gatewayResponse(content, headers = {}) {
+  return {
+    ok: true,
+    headers: {
+      get(name) {
+        return headers[String(name).toLowerCase()] || ""
+      }
+    },
+    async text() {
+      return JSON.stringify({
+        choices: [{
+          message: { content }
+        }]
+      })
+    }
+  }
+}
+
+const fakePdfFont = {
+  widthOfTextAtSize(text, size) {
+    return String(text).length * size * 0.5
+  }
+}
+
+function solidRenderedImage(width, height, red, green, blue) {
+  const data = Buffer.alloc(width * height * 4)
+  for (let index = 0; index < width * height; index += 1) {
+    data[index * 4] = red
+    data[index * 4 + 1] = green
+    data[index * 4 + 2] = blue
+    data[index * 4 + 3] = 255
+  }
+  return { width, height, data }
+}
+
+function solidPngBuffer(width, height, red, green, blue) {
+  const png = new PNG({ width, height })
+  for (let index = 0; index < width * height; index += 1) {
+    png.data[index * 4] = red
+    png.data[index * 4 + 1] = green
+    png.data[index * 4 + 2] = blue
+    png.data[index * 4 + 3] = 255
+  }
+  return PNG.sync.write(png)
 }
 
 function crc32(buffer) {
@@ -161,20 +208,9 @@ test("DOCX gateway retries by splitting batches that omit segment IDs", async ()
         assert.ok(content.segments.length <= 80)
         assert.ok(content.segments.reduce((sum, segment) => sum + segment.text.length, 0) <= 4000)
         const returned = content.segments.length > 1 ? content.segments.slice(0, -1) : content.segments
-        return {
-          ok: true,
-          async json() {
-            return {
-              choices: [{
-                message: {
-                  content: JSON.stringify({
-                    segments: returned.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
-                  })
-                }
-              }]
-            }
-          }
-        }
+        return gatewayResponse(JSON.stringify({
+          segments: returned.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
+        }))
       }
     }
   )
@@ -185,6 +221,141 @@ test("DOCX gateway retries by splitting batches that omit segment IDs", async ()
   assert.equal(requestedBatchSizes.filter((size) => size === 1).length, 82)
   assert.match(documentXml, /VI DOCX retry text 1/)
   assert.match(documentXml, /VI DOCX retry text 82/)
+})
+
+test("PDF overlay fitter caps vision font and centers shape labels", () => {
+  const block = { x: 10, y: 20, width: 90, height: 34, fontSize: 24, kind: "shape-label", vision: true }
+  const fit = runtime.fitPdfOverlayText(fakePdfFont, "Nhãn dịch dài hơn vùng gốc", block)
+
+  assert.equal(fit.kind, "shape-label")
+  assert.equal(fit.textAlign, "center")
+  assert.equal(fit.verticalAlign, "middle")
+  assert.ok(fit.size <= 12)
+  assert.ok(fit.size >= 3)
+  assert.equal(fit.overflow, false)
+  assert.ok(fit.xForLine(fit.lines[0]) > block.x)
+})
+
+test("PDF overlay fitter top-aligns paragraph and callout text", () => {
+  const block = { x: 5, y: 10, width: 220, height: 80, fontSize: 18, kind: "paragraph", vision: true }
+  const fit = runtime.fitPdfOverlayText(fakePdfFont, "Đoạn mô tả dài cần nằm từ phía trên để không đè vào các vùng bên dưới.", block)
+
+  assert.equal(fit.textAlign, "left")
+  assert.equal(fit.verticalAlign, "top")
+  assert.equal(fit.xForLine(fit.lines[0]), block.x + fit.padding)
+  assert.ok(fit.firstY <= block.y + block.height - fit.padding - fit.size)
+})
+
+test("PDF vision blocks clamp coordinates and infer missing kind", () => {
+  const page = { pageIndex: 0, width: 200, height: 100 }
+  const block = runtime.normalizeVisionBlock({ text: "Trang chủ", x: -0.1, y: 0.1, width: 0.4, height: 0.2, backgroundColor: { r: 240, g: 224, b: 160 } }, page, 3)
+
+  assert.equal(block.id, "pdf:0:vision:3")
+  assert.equal(block.kind, "shape-label")
+  assert.equal(block.x, 0)
+  assert.ok(block.y >= 0)
+  assert.ok(block.width > 0)
+  assert.ok(block.height > 0)
+  assert.ok(block.backgroundColor.r <= 1)
+  assert.ok(block.backgroundColor.g <= 1)
+  assert.ok(block.backgroundColor.b <= 1)
+  assert.equal(block.vision, true)
+})
+
+test("PDF background sampling uses dominant light color and falls back to white", () => {
+  const image = solidRenderedImage(10, 10, 240, 224, 160)
+  for (let y = 3; y < 7; y += 1) {
+    for (let x = 3; x < 7; x += 1) {
+      const offset = (y * image.width + x) * 4
+      image.data[offset] = 0
+      image.data[offset + 1] = 0
+      image.data[offset + 2] = 0
+    }
+  }
+  const sampled = runtime.samplePdfBlockBackground(image, { width: 100, height: 100 }, { x: 0, y: 0, width: 100, height: 100 })
+  const fallback = runtime.samplePdfBlockBackground(null, { width: 100, height: 100 }, { x: 0, y: 0, width: 100, height: 100 })
+
+  assert.ok(sampled.r > 0.85)
+  assert.ok(sampled.g > 0.75)
+  assert.ok(sampled.b > 0.5)
+  assert.deepEqual(fallback, { r: 1, g: 1, b: 1 })
+})
+
+test("PDF text-layer page does not call vision for plain text", async () => {
+  const project = tempProject()
+  const input = path.join(project, "text-only.pdf")
+  const source = await PDFDocument.create()
+  const page = source.addPage([320, 180])
+  const font = await source.embedFont(StandardFonts.Helvetica)
+  page.drawText("Plain text page", { x: 40, y: 120, size: 18, font })
+  fs.writeFileSync(input, await source.save())
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    {
+      translateSegments: mockTranslation,
+      visionBlocks: () => {
+        throw new Error("vision should not be called for plain text pages")
+      }
+    }
+  )
+
+  assert.equal(fs.existsSync(result.metadata.artifacts[0].path), true)
+  assert.doesNotMatch(result.metadata.warnings.join("\n"), /vision fallback/)
+})
+
+test("PDF mixed text and image page adds OCR overlay blocks", async () => {
+  const project = tempProject()
+  const input = path.join(project, "mixed.pdf")
+  const source = await PDFDocument.create()
+  const page = source.addPage([420, 260])
+  const font = await source.embedFont(StandardFonts.Helvetica)
+  page.drawText("Visible title", { x: 32, y: 220, size: 18, font })
+  const image = await source.embedPng(solidPngBuffer(240, 120, 120, 170, 220))
+  page.drawImage(image, { x: 80, y: 50, width: 260, height: 130 })
+  fs.writeFileSync(input, await source.save())
+  let calls = 0
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    {
+      translateSegments: mockTranslation,
+      visionBlocks: (renderedPage) => {
+        calls += 1
+        assert.ok(renderedPage.existingTextRegions.length > 0)
+        return [{
+          kind: "shape-label",
+          pageIndex: renderedPage.pageIndex,
+          text: "Nội dung trong ảnh",
+          x: 130,
+          y: 92,
+          width: 120,
+          height: 34,
+          fontSize: 12,
+          vision: true,
+          backgroundColor: { r: 0.47, g: 0.67, b: 0.86 }
+        }]
+      }
+    }
+  )
+
+  const translated = await PDFDocument.load(fs.readFileSync(result.metadata.artifacts[0].path))
+  assert.equal(calls, 1)
+  assert.equal(translated.getPageCount(), 1)
+  assert.deepEqual(translated.getPage(0).getSize(), { width: 420, height: 260 })
+  assert.doesNotMatch(result.metadata.warnings.join("\n"), /vision fallback/)
+})
+
+test("PDF OCR blocks overlapping text layer are suppressed", () => {
+  const textBlocks = [{ x: 20, y: 140, width: 160, height: 24, text: "Title" }]
+  const filtered = runtime.suppressVisionBlockOverlaps([
+    { x: 22, y: 141, width: 150, height: 20, text: "Duplicate title", vision: true },
+    { x: 40, y: 40, width: 120, height: 30, text: "Image text", vision: true }
+  ], textBlocks)
+
+  assert.deepEqual(filtered.map((block) => block.text), ["Image text"])
 })
 
 test("PDF text-layer translation keeps page count and page size", async () => {
@@ -235,20 +406,9 @@ test("PDF translation skips numeric-only blocks and preserves source bullet mark
         const body = JSON.parse(request.body)
         const content = JSON.parse(body.messages[1].content)
         requested.push(...content.segments.map((segment) => segment.text))
-        return {
-          ok: true,
-          async json() {
-            return {
-              choices: [{
-                message: {
-                  content: JSON.stringify({
-                    segments: content.segments.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
-                  })
-                }
-              }]
-            }
-          }
-        }
+        return gatewayResponse(JSON.stringify({
+          segments: content.segments.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
+        }))
       }
     }
   )
@@ -289,20 +449,9 @@ test("PDF gateway retries by splitting batches that omit segment IDs", async () 
         assert.ok(content.segments.length <= 80)
         assert.ok(content.segments.reduce((sum, segment) => sum + segment.text.length, 0) <= 4000)
         const returned = content.segments.length > 1 ? content.segments.slice(0, -1) : content.segments
-        return {
-          ok: true,
-          async json() {
-            return {
-              choices: [{
-                message: {
-                  content: JSON.stringify({
-                    segments: returned.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
-                  })
-                }
-              }]
-            }
-          }
-        }
+        return gatewayResponse(JSON.stringify({
+          segments: returned.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
+        }))
       }
     }
   )
@@ -331,7 +480,12 @@ test("PPTX translation preserves package parts and creates a presentation artifa
   const result = await runtime.translateDocument(
     { inputPath: input, targetLanguage: "Vietnamese" },
     { directory: project },
-    { translateSegments: mockTranslation }
+    {
+      translateSegments: mockTranslation,
+      pptxVisionBlocks: () => {
+        throw new Error("vision should not be called for PPTX without slide pictures")
+      }
+    }
   )
 
   const output = result.metadata.artifacts[0].path
@@ -346,6 +500,69 @@ test("PPTX translation preserves package parts and creates a presentation artifa
   assert.equal(result.metadata.artifacts[0].mime, "application/vnd.openxmlformats-officedocument.presentationml.presentation")
   assert.equal(result.metadata.quality, "warning")
   assert.match(result.metadata.warnings.join("\n"), /Chart text/)
+})
+
+test("PPTX large raster image receives translated OCR overlay text", async () => {
+  const project = tempProject()
+  const input = path.join(project, "image-slide.pptx")
+  const image = solidPngBuffer(200, 120, 230, 240, 255)
+  const zip = new AdmZip()
+  zip.addFile("[Content_Types].xml", Buffer.from("<Types/>"))
+  zip.addFile("ppt/presentation.xml", Buffer.from("<p:presentation><p:sldSz cx=\"1000000\" cy=\"600000\"/></p:presentation>"))
+  zip.addFile("ppt/slides/slide1.xml", Buffer.from("<p:sld><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:pic><p:nvPicPr><p:cNvPr id=\"2\" name=\"screenshot\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId1\"/></p:blipFill><p:spPr><a:xfrm><a:off x=\"100000\" y=\"100000\"/><a:ext cx=\"700000\" cy=\"350000\"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"))
+  zip.addFile("ppt/slides/_rels/slide1.xml.rels", Buffer.from("<Relationships><Relationship Id=\"rId1\" Target=\"../media/image1.png\"/></Relationships>"))
+  zip.addFile("ppt/media/image1.png", image)
+  zip.writeZip(input)
+  let calls = 0
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    {
+      pptxVisionBlocks: (picture) => {
+        calls += 1
+        assert.equal(picture.target, "ppt/media/image1.png")
+        return [{ text: "Nội dung ảnh", x: 0.1, y: 0.2, width: 0.4, height: 0.2, kind: "shape-label" }]
+      }
+    }
+  )
+
+  const translated = new AdmZip(result.metadata.artifacts[0].path)
+  const slideXml = translated.readAsText("ppt/slides/slide1.xml")
+  assert.equal(calls, 1)
+  assert.deepEqual(translated.readFile("ppt/media/image1.png"), image)
+  assert.match(slideXml, /Translated image text/)
+  assert.match(slideXml, /<a:t>Nội dung ảnh<\/a:t>/)
+  assert.match(slideXml, /<a:off x="170000" y="170000"\/>/)
+  assert.match(slideXml, /<a:ext cx="280000" cy="70000"\/>/)
+})
+
+test("PPTX small raster logos are not OCR translated", async () => {
+  const project = tempProject()
+  const input = path.join(project, "small-logo.pptx")
+  const zip = new AdmZip()
+  zip.addFile("[Content_Types].xml", Buffer.from("<Types/>"))
+  zip.addFile("ppt/presentation.xml", Buffer.from("<p:presentation><p:sldSz cx=\"1000000\" cy=\"600000\"/></p:presentation>"))
+  zip.addFile("ppt/slides/slide1.xml", Buffer.from("<p:sld><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"title\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:txBody><a:p><a:r><a:t>Hello slide</a:t></a:r></a:p></p:txBody></p:sp><p:pic><p:nvPicPr><p:cNvPr id=\"3\" name=\"logo\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId1\"/></p:blipFill><p:spPr><a:xfrm><a:off x=\"800000\" y=\"20000\"/><a:ext cx=\"80000\" cy=\"50000\"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"))
+  zip.addFile("ppt/slides/_rels/slide1.xml.rels", Buffer.from("<Relationships><Relationship Id=\"rId1\" Target=\"../media/logo.png\"/></Relationships>"))
+  zip.addFile("ppt/media/logo.png", solidPngBuffer(40, 20, 20, 120, 200))
+  zip.writeZip(input)
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    {
+      translateSegments: mockTranslation,
+      pptxVisionBlocks: () => {
+        throw new Error("vision should not be called for small logos")
+      }
+    }
+  )
+
+  const translated = new AdmZip(result.metadata.artifacts[0].path)
+  const slideXml = translated.readAsText("ppt/slides/slide1.xml")
+  assert.match(slideXml, /VI Hello slide/)
+  assert.doesNotMatch(slideXml, /Translated image text/)
 })
 
 test("PPTX gateway retries by splitting batches that omit segment IDs", async () => {
@@ -371,20 +588,9 @@ test("PPTX gateway retries by splitting batches that omit segment IDs", async ()
         assert.ok(content.segments.length <= 80)
         assert.ok(content.segments.reduce((sum, segment) => sum + segment.text.length, 0) <= 4000)
         const returned = content.segments.length > 1 ? content.segments.slice(0, -1) : content.segments
-        return {
-          ok: true,
-          async json() {
-            return {
-              choices: [{
-                message: {
-                  content: JSON.stringify({
-                    segments: returned.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
-                  })
-                }
-              }]
-            }
-          }
-        }
+        return gatewayResponse(JSON.stringify({
+          segments: returned.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
+        }))
       }
     }
   )
@@ -498,20 +704,9 @@ test("XLSX gateway batches stay small and translate all cells", async () => {
         batches.push(content.segments)
         assert.ok(content.segments.length <= 80)
         assert.ok(content.segments.reduce((sum, segment) => sum + segment.text.length, 0) <= 4000)
-        return {
-          ok: true,
-          async json() {
-            return {
-              choices: [{
-                message: {
-                  content: JSON.stringify({
-                    segments: content.segments.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
-                  })
-                }
-              }]
-            }
-          }
-        }
+        return gatewayResponse(JSON.stringify({
+          segments: content.segments.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
+        }))
       }
     }
   )
@@ -542,20 +737,9 @@ test("XLSX gateway retries by splitting batches that omit segment IDs", async ()
         const content = JSON.parse(body.messages[1].content)
         requestedBatchSizes.push(content.segments.length)
         const returned = content.segments.length > 1 ? content.segments.slice(0, -1) : content.segments
-        return {
-          ok: true,
-          async json() {
-            return {
-              choices: [{
-                message: {
-                  content: JSON.stringify({
-                    segments: returned.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
-                  })
-                }
-              }]
-            }
-          }
-        }
+        return gatewayResponse(JSON.stringify({
+          segments: returned.map((segment) => ({ id: segment.id, text: `VI ${segment.text}` }))
+        }))
       }
     }
   )
@@ -620,6 +804,144 @@ test("XLSX translation writes artifact next to input when input is outside proje
   assert.match(new AdmZip(output).readAsText("xl/sharedStrings.xml"), /VI Hello outside/)
 })
 
+test("XLSX inplace mode keeps the original sheets and adds a translated sheet beside each one", async () => {
+  const project = tempProject()
+  const input = path.join(project, "QA sheet.xlsx")
+  const zip = new AdmZip()
+  zip.addFile("[Content_Types].xml", Buffer.from("<Types><Override PartName=\"/xl/workbook.xml\" ContentType=\"x\"/></Types>"))
+  zip.addFile("xl/workbook.xml", Buffer.from("<workbook><sheets><sheet name=\"Source A\" sheetId=\"1\" r:id=\"rId1\"/><sheet name=\"Source B\" sheetId=\"2\" r:id=\"rId2\"/></sheets></workbook>"))
+  zip.addFile("xl/_rels/workbook.xml.rels", Buffer.from("<Relationships><Relationship Id=\"rId1\" Target=\"worksheets/sheet1.xml\"/><Relationship Id=\"rId2\" Target=\"worksheets/sheet2.xml\"/></Relationships>"))
+  zip.addFile("xl/sharedStrings.xml", Buffer.from("<sst><si><t>Header JP</t></si></sst>"))
+  zip.addFile("xl/worksheets/sheet1.xml", Buffer.from("<worksheet><cols><col min=\"1\" max=\"1\" width=\"20\"/></cols><sheetData><row><c r=\"A1\" s=\"3\" t=\"s\"><v>0</v></c><c r=\"B1\" t=\"inlineStr\"><is><t>Inline JP</t></is></c><c r=\"C1\"><f>SUM(A1:B1)</f><v>5</v></c></row></sheetData></worksheet>"))
+  zip.addFile("xl/worksheets/sheet2.xml", Buffer.from("<worksheet><sheetData><row><c r=\"A1\" t=\"inlineStr\"><is><t>Second sheet JP</t></is></c></row></sheetData></worksheet>"))
+  zip.writeZip(input)
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese", mode: "inplace" },
+    { directory: project },
+    { translateSegments: mockTranslation }
+  )
+
+  // The artifact is the original file, overwritten in place.
+  assert.equal(result.metadata.artifacts[0].path, input)
+  const out = new AdmZip(input)
+  const workbook = out.readAsText("xl/workbook.xml")
+  // Original sheets are kept and the translated copies sit immediately after each one.
+  assert.match(workbook, /name="Source A"[^>]*\/><sheet name="Source A \(VI\)"/)
+  assert.match(workbook, /name="Source B"[^>]*\/><sheet name="Source B \(VI\)"/)
+
+  // Source worksheets are untouched: still shared-string reference, no translation.
+  const sourceSheet1 = out.readAsText("xl/worksheets/sheet1.xml")
+  assert.match(sourceSheet1, /t="s"><v>0<\/v>/)
+  assert.doesNotMatch(sourceSheet1, /VI /)
+  // The global shared string table is never translated (it is shared with the originals).
+  assert.equal(out.readAsText("xl/sharedStrings.xml"), "<sst><si><t>Header JP</t></si></sst>")
+
+  // The two new worksheets carry translated, self-contained text and preserve formulas + styles.
+  const copies = out.getEntries().map((entry) => entry.entryName).filter((name) => /^xl\/worksheets\/sheet[34]\.xml$/.test(name))
+  assert.equal(copies.length, 2)
+  const copy1 = out.readAsText("xl/worksheets/sheet3.xml")
+  assert.match(copy1, /VI Header JP/)            // shared string inlined then translated
+  assert.match(copy1, /VI Inline JP/)            // inline string translated
+  assert.match(copy1, /<f>SUM\(A1:B1\)<\/f>/)    // formula preserved
+  assert.match(copy1, /s="3"/)                   // cell style preserved
+  assert.match(copy1, /width="20"/)              // column width preserved
+  assert.match(out.readAsText("xl/worksheets/sheet4.xml"), /VI Second sheet JP/)
+
+  // The copies are registered in rels and content types.
+  assert.match(out.readAsText("xl/_rels/workbook.xml.rels"), /Target="worksheets\/sheet3\.xml"/)
+  assert.match(out.readAsText("[Content_Types].xml"), /PartName="\/xl\/worksheets\/sheet3\.xml"/)
+})
+
+test("XLSX inplace mode creates workbook rels when the package omitted them", async () => {
+  const project = tempProject()
+  const input = path.join(project, "missing-rels.xlsx")
+  const zip = new AdmZip()
+  zip.addFile("xl/workbook.xml", Buffer.from("<workbook><sheets><sheet name=\"Source\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"))
+  zip.addFile("xl/worksheets/sheet1.xml", Buffer.from("<worksheet><sheetData><row><c r=\"A1\" t=\"inlineStr\"><is><t>Needs rels</t></is></c></row></sheetData></worksheet>"))
+  zip.writeZip(input)
+
+  await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese", mode: "inplace" },
+    { directory: project },
+    { translateSegments: mockTranslation }
+  )
+
+  const out = new AdmZip(input)
+  assert.match(out.readAsText("xl/workbook.xml"), /<sheet name="Source \(VI\)" sheetId="2" r:id="rId2"\/>/)
+  assert.match(out.readAsText("xl/_rels/workbook.xml.rels"), /Target="worksheets\/sheet2\.xml"/)
+  assert.match(out.readAsText("xl/worksheets/sheet2.xml"), /VI Needs rels/)
+})
+
+test("XLSX inplace mode writes a backup of the original before overwriting", async () => {
+  const project = tempProject()
+  const input = path.join(project, "books.xlsx")
+  const zip = new AdmZip()
+  zip.addFile("[Content_Types].xml", Buffer.from("<Types/>"))
+  zip.addFile("xl/workbook.xml", Buffer.from("<workbook><sheets><sheet name=\"S\" sheetId=\"1\" r:id=\"rId1\"/></sheets></workbook>"))
+  zip.addFile("xl/_rels/workbook.xml.rels", Buffer.from("<Relationships><Relationship Id=\"rId1\" Target=\"worksheets/sheet1.xml\"/></Relationships>"))
+  zip.addFile("xl/worksheets/sheet1.xml", Buffer.from("<worksheet><sheetData><row><c r=\"A1\" t=\"inlineStr\"><is><t>Backup me</t></is></c></row></sheetData></worksheet>"))
+  zip.writeZip(input)
+  const original = fs.readFileSync(input)
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese", mode: "inplace" },
+    { directory: project },
+    { translateSegments: mockTranslation }
+  )
+
+  const backupPath = result.metadata.backupPath
+  assert.equal(backupPath, `${input}.bak`)
+  assert.deepEqual(fs.readFileSync(backupPath), original)
+  assert.match(result.output, /backup was saved/)
+  // The live file now contains the translated sheet.
+  assert.match(new AdmZip(input).readAsText("xl/worksheets/sheet2.xml"), /VI Backup me/)
+})
+
+test("XLSX default mode (no mode arg) still replaces text into a new file", async () => {
+  const project = tempProject()
+  const input = path.join(project, "legacy.xlsx")
+  const zip = new AdmZip()
+  zip.addFile("[Content_Types].xml", Buffer.from("<Types/>"))
+  zip.addFile("xl/workbook.xml", Buffer.from("<workbook><sheets><sheet name=\"S\" sheetId=\"1\"/></sheets></workbook>"))
+  zip.addFile("xl/sharedStrings.xml", Buffer.from("<sst><si><t>Legacy JP</t></si></sst>"))
+  zip.addFile("xl/worksheets/sheet1.xml", Buffer.from("<worksheet><sheetData><row><c t=\"s\"><v>0</v></c></row></sheetData></worksheet>"))
+  zip.writeZip(input)
+  const original = fs.readFileSync(input)
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    { translateSegments: mockTranslation }
+  )
+
+  const output = result.metadata.artifacts[0].path
+  // New file, original untouched, shared strings translated in place (the legacy behavior).
+  assert.equal(output, path.join(project, "legacy-translated-vietnamese.xlsx"))
+  assert.deepEqual(fs.readFileSync(input), original)
+  assert.equal(result.metadata.backupPath, undefined)
+  assert.match(new AdmZip(output).readAsText("xl/sharedStrings.xml"), /VI Legacy JP/)
+})
+
+test("uniqueSheetName appends a (VI) suffix, truncates to 31 chars and dedupes", () => {
+  const used = new Set()
+  assert.equal(runtime.uniqueSheetName("QA", used), "QA (VI)")
+  assert.equal(runtime.uniqueSheetName("QA", used), "QA (VI)2")
+  const long = runtime.uniqueSheetName("This sheet name is way too long for excel", used)
+  assert.ok(long.length <= 31)
+  assert.ok(long.endsWith(" (VI)"))
+})
+
+test("inlineSharedStringsInWorksheet rewrites only shared-string cells", () => {
+  const xml = "<worksheet><sheetData><row><c r=\"A1\" s=\"2\" t=\"s\"><v>1</v></c><c r=\"B1\"><v>9</v></c><c r=\"C1\" t=\"inlineStr\"><is><t>keep</t></is></c></row></sheetData></worksheet>"
+  const out = runtime.inlineSharedStringsInWorksheet(xml, ["zero JP", "one JP"])
+  // Shared-string cell becomes a self-contained inlineStr with the resolved value, style kept.
+  assert.match(out, /<c r="A1" s="2" t="inlineStr"><is><t xml:space="preserve">one JP<\/t><\/is><\/c>/)
+  // Numeric and existing inline cells are left alone.
+  assert.match(out, /<c r="B1"><v>9<\/v><\/c>/)
+  assert.match(out, /<c r="C1" t="inlineStr"><is><t>keep<\/t><\/is><\/c>/)
+})
+
 test("translation output increments suffix next to input when artifact exists", async () => {
   const project = tempProject()
   const input = path.join(project, "budget.xlsx")
@@ -658,28 +980,66 @@ test("scanned PDF fallback reports a fidelity warning", async () => {
       gateway: { baseURL: "https://gateway.invalid", apiKey: "secret", model: "model" },
       fetch: async (_url, request) => {
         const body = JSON.parse(request.body)
+        assert.equal(body.stream, false)
         const content = body.messages[1].content
         assert.match(content[1].image_url.url, /^data:image\/png;base64,/)
-        return {
-          ok: true,
-          async json() {
-            return {
-              choices: [{
-                message: {
-                  content: JSON.stringify({
-                    blocks: [{ text: "Xin chao", x: 0.1, y: 0.2, width: 0.4, height: 0.1 }]
-                  })
-                }
-              }]
-            }
-          }
-        }
+        return gatewayResponse(JSON.stringify({
+          blocks: [{ text: "Xin chao", x: 0.1, y: 0.2, width: 0.4, height: 0.1 }]
+        }))
       }
     }
   )
 
   assert.equal(result.metadata.quality, "warning")
   assert.match(result.metadata.warnings.join("\n"), /used vision fallback/)
+})
+
+test("vision PDF overlay preserves page geometry without overflow for fitted labels", async () => {
+  const project = tempProject()
+  const input = path.join(project, "flowchart.pdf")
+  const source = await PDFDocument.create()
+  const page = source.addPage([320, 220])
+  page.drawRectangle({ x: 40, y: 150, width: 90, height: 36, color: rgb(1, 0.94, 0.72) })
+  page.drawRectangle({ x: 170, y: 55, width: 110, height: 64, color: rgb(0.94, 0.62, 0.08) })
+  fs.writeFileSync(input, await source.save())
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    {
+      visionBlocks: (renderedPage) => [
+        {
+          kind: "shape-label",
+          pageIndex: renderedPage.pageIndex,
+          text: "Trang chủ",
+          x: 40,
+          y: 150,
+          width: 90,
+          height: 36,
+          fontSize: 24,
+          vision: true,
+          backgroundColor: { r: 1, g: 0.94, b: 0.72 }
+        },
+        {
+          kind: "callout",
+          pageIndex: renderedPage.pageIndex,
+          text: "Nội dung ghi chú dài hơn nhưng cần tự co lại trong khung.",
+          x: 170,
+          y: 55,
+          width: 110,
+          height: 64,
+          fontSize: 22,
+          vision: true,
+          backgroundColor: { r: 0.94, g: 0.62, b: 0.08 }
+        }
+      ]
+    }
+  )
+
+  const translated = await PDFDocument.load(fs.readFileSync(result.metadata.artifacts[0].path))
+  assert.equal(translated.getPageCount(), 1)
+  assert.deepEqual(translated.getPage(0).getSize(), { width: 320, height: 220 })
+  assert.doesNotMatch(result.metadata.warnings.join("\n"), /may overflow/)
 })
 
 test("gateway translation retries malformed JSON without dropping a segment", async () => {
@@ -690,26 +1050,57 @@ test("gateway translation retries malformed JSON without dropping a segment", as
     undefined,
     {
       gateway: { baseURL: "https://gateway.invalid", apiKey: "secret", model: "model" },
-      fetch: async () => ({
-        ok: true,
-        async json() {
-          calls += 1
-          return {
-            choices: [{
-              message: {
-                content: calls < 3
-                  ? "not-json"
-                  : JSON.stringify({ segments: [{ id: "segment-1", text: "Xin chao" }] })
-              }
-            }]
-          }
-        }
-      })
+      fetch: async () => {
+        calls += 1
+        return gatewayResponse(calls < 3
+          ? "not-json"
+          : JSON.stringify({ segments: [{ id: "segment-1", text: "Xin chao" }] }))
+      }
     }
   )
 
   assert.equal(calls, 3)
   assert.equal(result.get("segment-1"), "Xin chao")
+})
+
+test("gateway JSON requests non-stream responses and parses response text", async () => {
+  const result = await runtime.gatewayJson(
+    [{ role: "user", content: "Return JSON" }],
+    {
+      gateway: { baseURL: "https://gateway.invalid", apiKey: "secret", model: "model" },
+      fetch: async (_url, request) => {
+        const body = JSON.parse(request.body)
+        assert.equal(body.stream, false)
+        assert.deepEqual(body.response_format, { type: "json_object" })
+        return gatewayResponse(JSON.stringify({ ok: true }))
+      }
+    }
+  )
+
+  assert.deepEqual(result, { ok: true })
+})
+
+test("gateway JSON rejects stream responses with a clear error", async () => {
+  await assert.rejects(
+    () => runtime.gatewayJson(
+      [{ role: "user", content: "Return JSON" }],
+      {
+        gateway: { baseURL: "https://gateway.invalid", apiKey: "secret", model: "model" },
+        fetch: async (_url, request) => {
+          const body = JSON.parse(request.body)
+          assert.equal(body.stream, false)
+          return {
+            ok: true,
+            headers: { get: () => "text/event-stream" },
+            async text() {
+              return "data: {\"choices\":[]}"
+            }
+          }
+        }
+      }
+    ),
+    /expected non-stream JSON, got stream response/
+  )
 })
 
 test("translate_document rejects missing target language and unsupported files", async () => {

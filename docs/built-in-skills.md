@@ -16,7 +16,7 @@ OpenWorking ships fourteen native OpenCode skills offline:
 | `xlsx` | Read, create, edit and validate spreadsheet workbooks. |
 | `docx` | Read, create, edit and visually validate Word documents. |
 | `translate-document` | Translate PDF and DOCX files into new layout-preserving artifacts. |
-| `translate-office-document` | Translate PPTX and XLSX files into new layout-preserving Office artifacts. |
+| `translate-office-document` | Translate PPTX and XLSX files. For XLSX, either create a new translated workbook (default) or edit the original file in place by adding a translated sheet next to each original sheet. |
 | `webapp-testing` | Test local web applications with focused browser automation. |
 
 ## Source And Sync

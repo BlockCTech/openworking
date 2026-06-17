@@ -13,6 +13,7 @@ The bundled translator always creates a new file in the same directory as the in
 
 - Keeps the original page count and page dimensions.
 - Uses the original PDF as the visual background and places opaque translated text overlays into detected regions.
+- For mixed text+image PDFs, translates the real PDF text layer and uses vision OCR best-effort for large raster diagrams, screenshots, or scanned regions on the same page.
 - Skips numeric-only regions to avoid damaging tables and metrics.
 - Preserves common source bullet markers and shrinks text within a limited range when translated text is longer.
 - Reports warnings when text does not fit, when complex tables may need review, or when the source app file would provide better fidelity.
@@ -21,7 +22,7 @@ The bundled translator always creates a new file in the same directory as the in
 ## Scanned PDF
 
 - Renders pages locally and asks the configured multimodal gateway to identify and translate visible text regions.
-- Reports a warning because vision-based region detection is best-effort.
+- Reports a warning for fully vision-based pages because region detection is best-effort.
 
 ## Example Requests
 

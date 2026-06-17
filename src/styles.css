@@ -212,8 +212,8 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .new-session {
   display: flex; align-items: center; gap: 11px; width: 100%;
   margin: 2px 0 12px; padding: 7px 10px;
-  background: var(--surface-2); color: var(--text);
-  border: 1px solid var(--border);
+  background: transparent; color: var(--text);
+  border: 1px solid transparent;
   border-radius: var(--radius); font-weight: 500; font-size: 13px;
   text-align: left;
   transition: background .12s, border-color .12s, transform .04s;
