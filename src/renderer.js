@@ -20,7 +20,7 @@ const BUILT_IN_SKILLS = [
 const icons = {
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
   folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
-  gear: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg>',
+  gear: '<svg viewBox="0 0 24 24"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg>',
   edit: '<svg viewBox="0 0 24 24"><path d="M12 5H6.5A2.5 2.5 0 0 0 4 7.5v10A2.5 2.5 0 0 0 6.5 20h10a2.5 2.5 0 0 0 2.5-2.5V12"/><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L12.8 15l-3.8 1 1-3.8z"/></svg>',
   chevRight: '<svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>',
   chevDown: '<svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>',
@@ -28,6 +28,7 @@ const icons = {
   agent: '<svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6"/></svg>',
   ask: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.5 9.5a2.5 2.5 0 0 1 4.5 1.5c0 1.5-2 1.8-2 3M12 16.5h.01"/></svg>',
   sparkle: '<svg viewBox="0 0 24 24"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/></svg>',
+  blocks: '<svg viewBox="0 0 24 24"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>',
   arrowUp: '<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
   book: '<svg viewBox="0 0 24 24"><path d="M5 4h11a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2z"/><path d="M5 18a2 2 0 0 1 2-2h11"/></svg>',
   bolt: '<svg viewBox="0 0 24 24"><path d="M13 3 4 14h6l-1 7 9-11h-6z"/></svg>',
@@ -46,7 +47,9 @@ const icons = {
   sidebarRight: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>',
   chevUpDown: '<svg viewBox="0 0 24 24"><path d="m8 9 4-4 4 4"/><path d="m16 15-4 4-4-4"/></svg>',
   cloud: '<svg viewBox="0 0 24 24"><path d="M7 18a4.2 4.2 0 0 1-.4-8.38 5 5 0 0 1 9.61-1.1A3.8 3.8 0 0 1 17.5 18z"/></svg>',
-  logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>'
+  logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
+  server: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'
 }
 
 const modes = [
@@ -97,6 +100,14 @@ const state = {
   configPath: "",
   config: null,
   customSkills: [],
+  mcpServers: [],
+  skillsTab: "skills",             // skills | mcp
+  mcpModalOpen: false,
+  mcpSaving: false,
+  mcpError: null,
+  mcpDraft: null,                  // { name, type, url, command, oauth, headers: [{key,value}] }
+  mcpDeleteTarget: null,           // { name } của MCP server chờ xác nhận xóa
+  mcpRemoving: false,
   modalityErrors: {},
   providerId: "gateway",
   mode: "agent",
@@ -117,6 +128,14 @@ const state = {
   sessionRenaming: false,
   sessionRenameAutoFocus: false,
   sessionRenameFocusId: null,
+  projectMenu: null,          // projectId đang mở menu "...", hoặc null
+  projectRenameTarget: null,  // { projectId, name } của project đang đổi tên
+  projectRenameDraft: "",
+  projectRenameError: null,
+  projectRenaming: false,
+  projectRenameAutoFocus: false,
+  projectDeleteTarget: null,  // { id, name } của project chờ xác nhận gỡ trong modal
+  projectRemoving: false,
   sidebarCollapsed: false,
   rightSidebarOpen: false,
   fileTreeProjectId: null,
@@ -134,6 +153,12 @@ const state = {
   skillUploadOpen: false,
   skillUploading: false,
   skillUploadError: null,
+  settingsSection: "provider",     // provider | account | advanced
+  skillPreview: null,              // { name, builtIn } của skill đang xem, hoặc null
+  skillPreviewContent: null,
+  skillPreviewLoading: false,
+  skillPreviewError: null,
+  skillUninstalling: false,
   // Per-question multi-select draft state, keyed by `${requestID}:${questionIndex}`:
   // { selected: Set<value>, other: string }
   questionDrafts: new Map()
@@ -257,10 +282,6 @@ function currentProvider() {
     state.providerId = Object.keys(providers)[0] || "gateway"
   }
   return providers[state.providerId] || null
-}
-
-function skillEnabled(name) {
-  return state.config?.permission?.skill?.[name] !== "deny"
 }
 
 function modelOptions() {
@@ -392,6 +413,7 @@ async function loadInitialState() {
   state.configPath = activeConfig.path
   state.config = activeConfig.config
   state.customSkills = activeConfig.customSkills || []
+  state.mcpServers = activeConfig.mcp || []
   state.providerId = Object.keys(state.config.provider || {})[0] || "gateway"
   state.runtime = runtime
   selectedModel()
@@ -681,6 +703,10 @@ function render({ threadScroll = "preserve" } = {}) {
       ${renderSkillUploadModal()}
       ${renderDeleteSessionModal()}
       ${renderRenameSessionModal()}
+      ${renderProjectDeleteModal()}
+      ${renderProjectRenameModal()}
+      ${renderMcpModal()}
+      ${renderMcpDeleteModal()}
       <div id="toastHost"></div>
     </div>
   `
@@ -793,6 +819,56 @@ function renderRenameSessionModal() {
   `
 }
 
+function renderProjectDeleteModal() {
+  const target = state.projectDeleteTarget
+  if (!target) return ""
+  const disableActions = state.projectRemoving ? " disabled" : ""
+  return `
+    <div class="update-backdrop" ${state.projectRemoving ? "" : 'data-action="cancelRemoveProject"'}>
+      <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="removeProjectTitle" data-stop-click>
+        <div class="confirm-title" id="removeProjectTitle">Remove project?</div>
+        <p>“${escapeHtml(target.name)}” will be removed from this list. Your files on disk are not deleted.</p>
+        <div class="confirm-actions">
+          <button class="secondary-btn${disableActions}" data-action="cancelRemoveProject">Cancel</button>
+          <button class="danger-btn${disableActions}" data-action="confirmRemoveProject">Remove</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderProjectRenameModal() {
+  const target = state.projectRenameTarget
+  if (!target) return ""
+  const disableActions = state.projectRenaming ? " disabled" : ""
+  return `
+    <div class="update-backdrop" ${state.projectRenaming ? "" : 'data-action="cancelRenameProject"'}>
+      <div class="confirm-modal rename-modal" role="dialog" aria-modal="true" aria-labelledby="renameProjectTitle" data-stop-click>
+        <div class="confirm-title" id="renameProjectTitle">Rename project</div>
+        <div class="rename-modal-body">
+          <p>Current name: “${escapeHtml(target.name)}”</p>
+          <label for="renameProjectInput">
+            Project name
+            <input
+              id="renameProjectInput"
+              type="text"
+              value="${escapeHtml(state.projectRenameDraft)}"
+              placeholder="Project name"
+              data-project-rename-input
+              ${state.projectRenaming ? "disabled" : ""}
+            >
+          </label>
+          <div class="field-error">${state.projectRenameError ? escapeHtml(state.projectRenameError) : ""}</div>
+        </div>
+        <div class="confirm-actions">
+          <button class="secondary-btn${disableActions}" data-action="cancelRenameProject">Cancel</button>
+          <button class="primary-btn${disableActions}" data-action="confirmRenameProject">Rename</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 function renderUpdatePill() {
   const gate = state.versionGate
   if (gate?.status !== "soft") return ""
@@ -821,8 +897,8 @@ function renderSidebar() {
         <button class="nav-item ${state.nav === "projects" ? "active" : ""}" data-nav="projects">
           ${icon("folder")}<span>Projects</span><span class="count">${state.projects.length}</span>
         </button>
-        <button class="nav-item ${state.nav === "config" ? "active" : ""}" data-nav="config">
-          ${icon("gear")}<span>Config</span>
+        <button class="nav-item ${state.nav === "skills" ? "active" : ""}" data-nav="skills">
+          ${icon("blocks")}<span>Skills</span>
         </button>
         <div class="side-label">
           <span class="sl-title">Projects</span>
@@ -834,7 +910,7 @@ function renderSidebar() {
         ${state.projects.map(renderProjectGroup).join("")}
       </div>
       <div class="side-foot">
-        <div class="side-user">
+        <button class="side-user ${state.nav === "config" ? "active" : ""}" data-nav="config">
           <span class="su-av">OW</span>
           <span class="su-meta">
             <span class="su-name">OpenWorking</span>
@@ -907,36 +983,29 @@ function renderFileTreeRows(directoryPath, depth) {
   }).join("")
 }
 
-function renderAccountPopover() {
-  const user = state.auth?.user
-  const name = userLabel(user)
-  const email = user?.email && user.email !== name ? user.email : ""
-  return `
-    <div class="pop pop-up account-pop">
-      <div class="account-head">
-        <span class="su-av">${escapeHtml(userInitials(user))}</span>
-        <span class="account-id">
-          <span class="account-name">${escapeHtml(name)}</span>
-          ${email ? `<span class="account-email">${escapeHtml(email)}</span>` : ""}
-        </span>
-      </div>
-      <div class="pop-divider"></div>
-      <button class="pop-item account-logout" data-action="authLogout">${icon("logout")}<span>Logout</span></button>
-    </div>
-  `
-}
-
 function renderProjectGroup(project) {
   const sessions = projectSessions(project.id)
   const open = state.expanded.has(project.id)
   const shown = state.showAll.has(project.id) ? sessions : sessions.slice(0, 5)
   return `
     <div class="proj-group">
-      <button class="proj-head ${open ? "open" : ""} ${project.id === state.activeProjectId ? "active-proj" : ""}" data-open-project="${escapeHtml(project.id)}">
-        <span class="fic">${icon("folder")}</span>
-        <span class="pname">${escapeHtml(project.name)}</span>
+      <div class="proj-head-wrap">
+        <button class="proj-head ${open ? "open" : ""} ${project.id === state.activeProjectId ? "active-proj" : ""}" data-open-project="${escapeHtml(project.id)}">
+          <span class="fic">${icon("folder")}</span>
+          <span class="pname">${escapeHtml(project.name)}</span>
+        </button>
         <span class="padd" title="New session" data-new-session="${escapeHtml(project.id)}">${icon("plus")}</span>
-      </button>
+        <button class="proj-kebab" data-project-menu="${escapeHtml(project.id)}" title="Options">${icon("dots")}</button>
+        ${state.projectMenu === project.id ? `
+          <div class="pop project-pop">
+            <button class="pop-item" data-project-rename="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}">
+              ${icon("edit")}<span>Rename</span>
+            </button>
+            <button class="pop-item danger" data-project-delete="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}">
+              ${icon("trash")}<span>Remove</span>
+            </button>
+          </div>` : ""}
+      </div>
       ${open ? `
         <div class="sessions">
           ${sessions.length ? shown.map((session) => `
@@ -967,7 +1036,8 @@ function renderProjectGroup(project) {
 
 function renderMain() {
   if (state.nav === "projects") return renderProjectsScreen()
-  if (state.nav === "config") return renderConfigScreen()
+  if (state.nav === "settings" || state.nav === "config") return renderSettingsScreen()
+  if (state.nav === "skills") return renderSkillsScreen()
   return renderSessionScreen()
 }
 
@@ -1790,8 +1860,8 @@ function renderProjectsScreen() {
             ${state.projects.length ? state.projects.map((project) => `
               <article class="project-card ${project.id === state.activeProjectId ? "active" : ""}">
                 <button class="project-main" data-open-project="${escapeHtml(project.id)}"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.path)}</span></button>
-                <button class="small-icon-btn" data-rename-project="${escapeHtml(project.id)}" title="Rename">${icon("edit")}</button>
-                <button class="small-icon-btn danger" data-remove-project="${escapeHtml(project.id)}" title="Remove">${icon("trash")}</button>
+                <button class="small-icon-btn" data-rename-project="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}" title="Rename">${icon("edit")}</button>
+                <button class="small-icon-btn danger" data-remove-project="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}" title="Remove">${icon("trash")}</button>
               </article>
             `).join("") : `<div class="admin-empty">Add a folder to start.</div>`}
           </div>
@@ -1801,77 +1871,254 @@ function renderProjectsScreen() {
   `
 }
 
-function renderConfigScreen() {
-  const provider = currentProvider()
-  const modelLines = Object.entries(provider?.models || {}).map(([id, model]) => `${id}${model?.name && model.name !== id ? ` = ${model.name}` : ""}`).join("\n")
-  const pluginLines = Array.isArray(state.config?.plugin) ? state.config.plugin.join("\n") : ""
-  const configJson = redactedConfigJson()
+const SETTINGS_SECTIONS = [
+  { id: "provider", label: "Provider & Model", icon: "gear" },
+  { id: "advanced", label: "Advanced", icon: "book" }
+]
+
+function renderSettingsScreen() {
+  const section = SETTINGS_SECTIONS.some((entry) => entry.id === state.settingsSection) ? state.settingsSection : "provider"
   return `
     <main class="main">
-      ${renderHeader("Config", state.configPath)}
-      <div class="admin-content config-grid">
-        <section class="admin-panel">
-          <div class="panel-head"><div><h1>Provider</h1><p>OpenAI-compatible local config</p></div><button class="primary-btn" data-action="saveConfig">${icon("save")}Save</button></div>
-          <div class="form">
-            <label>Provider ID<input readonly value="${escapeHtml(state.providerId)}"></label>
-            <label>NPM package<input readonly value="${escapeHtml(provider?.npm || "@ai-sdk/openai-compatible")}"></label>
-            <label>Name<input readonly value="${escapeHtml(provider?.name || "")}"></label>
-            <label>baseURL<input data-field="providerBaseURL" value="${escapeHtml(provider?.options?.baseURL || "")}"></label>
-            <label>apiKey<input type="password" autocomplete="off" data-field="providerApiKey" value="${escapeHtml(provider?.options?.apiKey || "")}"></label>
-            <label>Models<textarea readonly rows="5">${escapeHtml(modelLines)}</textarea></label>
-            <div class="model-capabilities">
-              <div><strong>Model capabilities</strong><small>Comma-separated OpenCode modalities. Include <code>pdf</code> to send PDF attachments directly.</small></div>
-              ${Object.entries(provider?.models || {}).map(([id, model]) => `
-                <div class="model-capability">
-                  <strong>${escapeHtml(id)}</strong>
-                  <label>Input modalities<input data-model-id="${escapeHtml(id)}" data-model-modalities="input" value="${escapeHtml(modalityList(model, "input"))}"><small class="field-error" data-model-error="${escapeHtml(id)}">${escapeHtml(modalityError(id))}</small></label>
-                  <label>Output modalities<input readonly value="${escapeHtml(modalityList(model, "output"))}"></label>
-                </div>
-              `).join("") || `<div class="config-note">Add a model to configure its modalities.</div>`}
-            </div>
-          </div>
-        </section>
-        <section class="admin-panel">
-          <div class="panel-head"><div><h1>Plugins</h1><p>${providerEntries().length} configured provider${providerEntries().length === 1 ? "" : "s"}</p></div><button class="secondary-btn" data-action="addSuperpowers">${icon("plus")}Superpowers</button></div>
-          <div class="provider-tabs">${providerEntries().map(([id]) => `<button class="${id === state.providerId ? "active" : ""}" data-provider="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join("")}</div>
-          <label>Plugin list<textarea data-field="plugins" rows="9">${escapeHtml(pluginLines)}</textarea></label>
-          <div class="config-note">Config file: ${escapeHtml(state.configPath)}</div>
-        </section>
-        <section class="admin-panel skills-panel">
-          <div class="panel-head"><div><h1>Skills</h1><p>Bundled and custom OpenCode skills loaded from this app profile.</p></div><button class="secondary-btn" data-action="openSkillUpload">${icon("arrowUp")}Upload skill</button></div>
-          <div class="skill-groups">
-            <div class="skill-group">
-              <div class="skill-group-title"><strong>Built-in skills</strong><small>Bundled locally and available offline.</small></div>
-              <div class="skill-list">
-                ${BUILT_IN_SKILLS.map((skill) => `
-                  <label class="skill-row">
-                    <span><strong>${escapeHtml(skill.name)}</strong><small>${escapeHtml(skill.description)}</small></span>
-                    <input type="checkbox" data-skill-toggle="${escapeHtml(skill.name)}" ${skillEnabled(skill.name) ? "checked" : ""}>
-                  </label>
-                `).join("")}
-              </div>
-            </div>
-            <div class="skill-group">
-              <div class="skill-group-title"><strong>Custom skills</strong><small>Installed under the app-managed OpenCode profile.</small></div>
-              <div class="skill-list">
-                ${state.customSkills.length ? state.customSkills.map((skill) => `
-                  <div class="skill-row custom-skill-row">
-                    <span><strong>${escapeHtml(skill.name)}</strong><small>${escapeHtml(skill.description || skill.path || "")}</small></span>
-                    <span class="skill-status">${icon("check")}Installed</span>
-                  </div>
-                `).join("") : `<div class="admin-empty">Upload a .zip or .skill archive to add a custom skill.</div>`}
-              </div>
-            </div>
-          </div>
-          <div class="config-note">Profile skills directory: ${escapeHtml(state.configPath.replace(/opencode\.json$/, "skills"))}</div>
-        </section>
-        <section class="admin-panel config-json-panel">
-          <div class="panel-head"><div><h1>App profile JSON</h1><p>Complete OpenCode config managed by this desktop app.</p></div></div>
-          <label>Effective config<textarea class="config-json" readonly rows="20">${escapeHtml(configJson)}</textarea></label>
-          <div class="config-note">Save the form above to write this profile at ${escapeHtml(state.configPath)}.</div>
-        </section>
+      ${renderHeader("Settings", state.configPath)}
+      <div class="settings-screen">
+        <nav class="settings-sidebar">
+          ${SETTINGS_SECTIONS.map((entry) => `
+            <button class="settings-nav-item ${entry.id === section ? "active" : ""}" data-settings-section="${entry.id}">
+              ${icon(entry.icon)}<span>${escapeHtml(entry.label)}</span>
+            </button>
+          `).join("")}
+        </nav>
+        <div class="settings-content admin-content">
+          ${section === "provider" ? renderSettingsProvider() : ""}
+          ${section === "advanced" ? renderSettingsAdvanced() : ""}
+        </div>
       </div>
     </main>
+  `
+}
+
+function renderSettingsProvider() {
+  const provider = currentProvider()
+  const modelLines = Object.entries(provider?.models || {}).map(([id, model]) => `${id}${model?.name && model.name !== id ? ` = ${model.name}` : ""}`).join("\n")
+  return `
+    <section class="admin-panel">
+      <div class="panel-head"><div><h1>Provider</h1><p>OpenAI-compatible local config</p></div><button class="primary-btn" data-action="saveConfig">${icon("save")}Save</button></div>
+      <div class="form">
+        <label>Provider ID<input readonly value="${escapeHtml(state.providerId)}"></label>
+        <label>NPM package<input readonly value="${escapeHtml(provider?.npm || "@ai-sdk/openai-compatible")}"></label>
+        <label>Name<input readonly value="${escapeHtml(provider?.name || "")}"></label>
+        <label>baseURL<input data-field="providerBaseURL" value="${escapeHtml(provider?.options?.baseURL || "")}"></label>
+        <label>apiKey<input type="password" autocomplete="off" data-field="providerApiKey" value="${escapeHtml(provider?.options?.apiKey || "")}"></label>
+        <label>Models<textarea readonly rows="5">${escapeHtml(modelLines)}</textarea></label>
+        <div class="model-capabilities">
+          <div><strong>Model capabilities</strong><small>Comma-separated OpenCode modalities. Include <code>pdf</code> to send PDF attachments directly.</small></div>
+          ${Object.entries(provider?.models || {}).map(([id, model]) => `
+            <div class="model-capability">
+              <strong>${escapeHtml(id)}</strong>
+              <label>Input modalities<input data-model-id="${escapeHtml(id)}" data-model-modalities="input" value="${escapeHtml(modalityList(model, "input"))}"><small class="field-error" data-model-error="${escapeHtml(id)}">${escapeHtml(modalityError(id))}</small></label>
+              <label>Output modalities<input readonly value="${escapeHtml(modalityList(model, "output"))}"></label>
+            </div>
+          `).join("") || `<div class="config-note">Add a model to configure its modalities.</div>`}
+        </div>
+      </div>
+    </section>
+  `
+}
+
+function renderSettingsAdvanced() {
+  const configJson = redactedConfigJson()
+  return `
+    <section class="admin-panel config-json-panel">
+      <div class="panel-head"><div><h1>App profile JSON</h1><p>Complete OpenCode config managed by this desktop app.</p></div></div>
+      <label>Effective config<textarea class="config-json" readonly rows="18">${escapeHtml(configJson)}</textarea></label>
+      <div class="config-note">Save the Provider form to write this profile at ${escapeHtml(state.configPath)}.</div>
+    </section>
+    <section class="admin-panel">
+      <div class="panel-head"><div><h1>Runtime diagnostics</h1><p>Live OpenCode server status for this session.</p></div></div>
+      ${renderDiagnostics()}
+    </section>
+  `
+}
+
+function renderSkillsScreen() {
+  const tab = state.skillsTab === "mcp" ? "mcp" : "skills"
+  return `
+    <main class="main">
+      ${renderHeader("Skills", "Bundled and custom OpenCode skills")}
+      <div class="admin-content skills-screen">
+        <div class="skills-tabs">
+          <button class="skills-tab ${tab === "skills" ? "active" : ""}" data-skills-tab="skills">${icon("blocks")}<span>Skills</span></button>
+          <button class="skills-tab ${tab === "mcp" ? "active" : ""}" data-skills-tab="mcp">${icon("server")}<span>MCP Servers</span></button>
+        </div>
+        ${tab === "mcp" ? renderMcpPanel() : renderSkillsPanel()}
+      </div>
+      ${renderSkillPreviewModal()}
+    </main>
+  `
+}
+
+function renderSkillsPanel() {
+  const builtIn = BUILT_IN_SKILLS.map((skill) => ({ ...skill, builtIn: true }))
+  const custom = state.customSkills.map((skill) => ({ ...skill, builtIn: false }))
+  return `
+    <section class="admin-panel skills-panel">
+      <div class="panel-head"><div><h1>Skills</h1><p>Click a skill to preview its SKILL.md. Custom skills can be uninstalled.</p></div><button class="secondary-btn" data-action="openSkillUpload">${icon("arrowUp")}Upload skill</button></div>
+      <div class="skill-list">
+        ${[...builtIn, ...custom].map((skill) => `
+          <button class="skill-list-item" data-skill-open="${escapeHtml(skill.name)}" data-skill-builtin="${skill.builtIn ? "1" : "0"}">
+            <span class="sli-text">
+              <strong>${escapeHtml(skill.name)}</strong>
+              <small>${escapeHtml(skill.description || skill.path || "")}</small>
+            </span>
+            <span class="sli-badge ${skill.builtIn ? "builtin" : "custom"}">${skill.builtIn ? "Built-in" : "Installed"}</span>
+          </button>
+        `).join("")}
+      </div>
+      <div class="config-note">Profile skills directory: ${escapeHtml(state.configPath.replace(/opencode\.json$/, "skills"))}</div>
+    </section>
+  `
+}
+
+function mcpServerSubtitle(server) {
+  if (server.type === "local") return Array.isArray(server.command) ? server.command.join(" ") : ""
+  return server.url || ""
+}
+
+function renderMcpPanel() {
+  const servers = state.mcpServers || []
+  return `
+    <section class="admin-panel skills-panel">
+      <div class="panel-head"><div><h1>MCP Servers</h1><p>Connect custom MCP servers by URL or local command.</p></div><button class="secondary-btn" data-action="openMcpModal">${icon("plus")}Add MCP server</button></div>
+      <div class="skill-list">
+        ${servers.length ? servers.map((server) => `
+          <div class="skill-list-item mcp-list-item">
+            <span class="sli-icon">${icon("server")}</span>
+            <span class="sli-text">
+              <strong>${escapeHtml(server.name)}</strong>
+              <small>${escapeHtml(mcpServerSubtitle(server))}</small>
+            </span>
+            <span class="sli-badge ${server.type === "remote" ? "builtin" : "custom"}">${server.type === "remote" ? "Remote" : "Local"}</span>
+            <button class="switch ${server.enabled ? "on" : ""}" role="switch" aria-checked="${server.enabled ? "true" : "false"}" data-mcp-toggle="${escapeHtml(server.name)}" data-mcp-enabled="${server.enabled ? "1" : "0"}" title="${server.enabled ? "Disable" : "Enable"}"></button>
+            <button class="small-icon-btn mcp-delete" data-action="removeMcp" data-mcp-name="${escapeHtml(server.name)}" aria-label="Remove ${escapeHtml(server.name)}">${icon("trash")}</button>
+          </div>
+        `).join("") : `<div class="config-note">No MCP servers yet. Click "Add MCP server" to connect one.</div>`}
+      </div>
+    </section>
+  `
+}
+
+function renderMcpModal() {
+  const draft = state.mcpDraft
+  if (!state.mcpModalOpen || !draft) return ""
+  const disable = state.mcpSaving ? " disabled" : ""
+  const isRemote = draft.type !== "local"
+  const headers = Array.isArray(draft.headers) ? draft.headers : []
+  return `
+    <div class="update-backdrop" ${state.mcpSaving ? "" : 'data-action="closeMcpModal"'}>
+      <div class="confirm-modal rename-modal mcp-modal" role="dialog" aria-modal="true" aria-labelledby="mcpModalTitle" data-stop-click>
+        <div class="confirm-title" id="mcpModalTitle">Add MCP Server</div>
+        <p>Connect a custom MCP server by URL or local command.</p>
+        <div class="rename-modal-body">
+          <label for="mcpName">
+            App name
+            <input id="mcpName" type="text" value="${escapeHtml(draft.name)}" placeholder="sentry-mcp" data-mcp-field="name" ${state.mcpSaving ? "disabled" : ""}>
+          </label>
+          <div class="mcp-field-label">Type</div>
+          <div class="mcp-type-toggle">
+            <button class="mcp-type-opt ${isRemote ? "active" : ""}" data-mcp-type="remote" ${disable}>Remote (URL)</button>
+            <button class="mcp-type-opt ${isRemote ? "" : "active"}" data-mcp-type="local" ${disable}>Local (command)</button>
+          </div>
+          ${isRemote ? `
+            <label for="mcpUrl">
+              Server URL
+              <input id="mcpUrl" type="text" value="${escapeHtml(draft.url)}" placeholder="https://mcp.sentry.dev/mcp" data-mcp-field="url" ${state.mcpSaving ? "disabled" : ""}>
+            </label>
+            <label class="mcp-checkbox">
+              <input type="checkbox" data-mcp-field="oauth" ${draft.oauth ? "checked" : ""} ${state.mcpSaving ? "disabled" : ""}>
+              <span>Requires OAuth sign-in</span>
+            </label>
+            <div class="mcp-headers">
+              <div class="mcp-field-label">Custom headers</div>
+              ${headers.map((header, index) => `
+                <div class="mcp-headers-row">
+                  <input type="text" value="${escapeHtml(header.key)}" placeholder="Header" data-mcp-header="key" data-mcp-header-index="${index}" ${state.mcpSaving ? "disabled" : ""}>
+                  <input type="text" value="${escapeHtml(header.value)}" placeholder="Value" data-mcp-header="value" data-mcp-header-index="${index}" ${state.mcpSaving ? "disabled" : ""}>
+                  <button class="small-icon-btn" data-action="removeMcpHeader" data-mcp-header-index="${index}" aria-label="Remove header" ${disable}>${icon("x")}</button>
+                </div>
+              `).join("")}
+              <button class="link-btn" data-action="addMcpHeader" ${disable}>${icon("plus")}Add header</button>
+            </div>
+          ` : `
+            <label for="mcpCommand">
+              Command
+              <input id="mcpCommand" type="text" value="${escapeHtml(draft.command)}" placeholder="npx -y some-mcp-server" data-mcp-field="command" ${state.mcpSaving ? "disabled" : ""}>
+            </label>
+          `}
+          <div class="field-error">${state.mcpError ? escapeHtml(state.mcpError) : ""}</div>
+        </div>
+        <div class="confirm-actions">
+          <button class="secondary-btn${disable}" data-action="closeMcpModal">Cancel</button>
+          <button class="primary-btn${disable}" data-action="submitMcpServer">${icon("plus")}${state.mcpSaving ? "Adding…" : "Add server"}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderMcpDeleteModal() {
+  const target = state.mcpDeleteTarget
+  if (!target) return ""
+  const disableActions = state.mcpRemoving ? " disabled" : ""
+  return `
+    <div class="update-backdrop" ${state.mcpRemoving ? "" : 'data-action="cancelRemoveMcp"'}>
+      <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="removeMcpTitle" data-stop-click>
+        <div class="confirm-title" id="removeMcpTitle">Remove MCP server?</div>
+        <p>“${escapeHtml(target.name)}” will be disconnected and removed from your config.</p>
+        <div class="confirm-actions">
+          <button class="secondary-btn${disableActions}" data-action="cancelRemoveMcp">Cancel</button>
+          <button class="danger-btn${disableActions}" data-action="confirmRemoveMcp">Remove</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function stripSkillFrontmatter(markdown) {
+  const text = String(markdown || "")
+  const match = text.match(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/)
+  return match ? text.slice(match[0].length).replace(/^\s+/, "") : text
+}
+
+function renderSkillPreviewModal() {
+  const preview = state.skillPreview
+  if (!preview) return ""
+  let body
+  if (state.skillPreviewLoading) {
+    body = `<div class="skill-preview-state">Loading SKILL.md...</div>`
+  } else if (state.skillPreviewError) {
+    body = `<div class="skill-preview-state error">${escapeHtml(state.skillPreviewError)}</div>`
+  } else {
+    body = `<div class="skill-preview-md assistant-text">${renderMarkdown(stripSkillFrontmatter(state.skillPreviewContent))}</div>`
+  }
+  return `
+    <div class="update-backdrop" ${state.skillUninstalling ? "" : 'data-action="closeSkillPreview"'}>
+      <div class="skill-preview-modal" role="dialog" aria-modal="true" aria-labelledby="skillPreviewTitle" data-stop-click>
+        <div class="skill-preview-head">
+          <div class="sph-title">
+            <span class="sli-icon">${icon("sparkle")}</span>
+            <div><h1 id="skillPreviewTitle">${escapeHtml(preview.name)}</h1><small>${preview.builtIn ? "Built-in skill" : "Custom skill"}</small></div>
+          </div>
+          <button class="small-icon-btn" data-action="closeSkillPreview" aria-label="Close preview">${icon("x")}</button>
+        </div>
+        <div class="skill-preview-body">${body}</div>
+        <div class="skill-preview-foot">
+          <button class="danger-btn ${state.skillUninstalling ? "disabled" : ""}" data-action="uninstallSkill" data-skill-name="${escapeHtml(preview.name)}" ${preview.builtIn ? "disabled" : ""}>
+            ${icon("trash")}<span>${state.skillUninstalling ? "Uninstalling..." : "Uninstall"}</span>
+          </button>
+        </div>
+      </div>
+    </div>
   `
 }
 
@@ -2120,6 +2367,47 @@ function bindEvents() {
     trigger?.focus()
     state.sessionRenameFocusId = null
   }
+  document.querySelectorAll("[data-project-menu]").forEach((element) => element.addEventListener("click", (event) => {
+    event.stopPropagation()
+    const id = element.dataset.projectMenu
+    state.projectMenu = state.projectMenu === id ? null : id
+    render()
+  }))
+  document.querySelectorAll("[data-project-rename]").forEach((element) => element.addEventListener("click", (event) => {
+    event.stopPropagation()
+    openRenameProjectModal(element.dataset.projectRename, element.dataset.projectName || "")
+  }))
+  document.querySelectorAll("[data-project-delete]").forEach((element) => element.addEventListener("click", (event) => {
+    event.stopPropagation()
+    state.projectDeleteTarget = { id: element.dataset.projectDelete, name: element.dataset.projectName || "this project" }
+    state.projectRemoving = false
+    state.projectMenu = null
+    render()
+  }))
+  document.querySelectorAll("[data-project-rename-input]").forEach((element) => {
+    element.addEventListener("input", () => {
+      state.projectRenameDraft = element.value
+      state.projectRenameError = null
+    })
+    element.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault()
+        confirmRenameProject().catch((error) => showToast(error.message))
+      }
+      if (event.key === "Escape" && !state.projectRenaming) {
+        event.preventDefault()
+        closeRenameProjectModal()
+      }
+    })
+  })
+  if (state.projectRenameTarget && state.projectRenameAutoFocus) {
+    const input = document.querySelector("[data-project-rename-input]")
+    if (input) {
+      input.focus()
+      input.select()
+    }
+    state.projectRenameAutoFocus = false
+  }
   document.querySelectorAll("[data-stop-click]").forEach((element) => element.addEventListener("click", (event) => event.stopPropagation()))
   document.querySelectorAll("[data-show-all]").forEach((element) => element.addEventListener("click", () => {
     const id = element.dataset.showAll
@@ -2143,13 +2431,43 @@ function bindEvents() {
   }))
   document.querySelectorAll("[data-field]").forEach((element) => element.addEventListener("input", () => updateConfigField(element.dataset.field, element.value)))
   document.querySelectorAll("[data-model-modalities]").forEach((element) => element.addEventListener("input", () => updateModelModalities(element.dataset.modelId, element.dataset.modelModalities, element.value)))
-  document.querySelectorAll("[data-skill-toggle]").forEach((element) => element.addEventListener("change", () => {
-    state.config.permission ||= {}
-    state.config.permission.skill ||= {}
-    state.config.permission.skill[element.dataset.skillToggle] = element.checked ? "allow" : "deny"
+  document.querySelectorAll("[data-settings-section]").forEach((element) => element.addEventListener("click", () => {
+    state.settingsSection = element.dataset.settingsSection
+    render()
   }))
-  document.querySelectorAll("[data-rename-project]").forEach((element) => element.addEventListener("click", () => renameProject(element.dataset.renameProject)))
-  document.querySelectorAll("[data-remove-project]").forEach((element) => element.addEventListener("click", () => removeProject(element.dataset.removeProject)))
+  document.querySelectorAll("[data-skill-open]").forEach((element) => element.addEventListener("click", () => {
+    openSkillPreview(element.dataset.skillOpen, element.dataset.skillBuiltin === "1")
+  }))
+  document.querySelectorAll("[data-skills-tab]").forEach((element) => element.addEventListener("click", () => {
+    state.skillsTab = element.dataset.skillsTab
+    render()
+  }))
+  document.querySelectorAll("[data-mcp-type]").forEach((element) => element.addEventListener("click", () => {
+    if (state.mcpSaving || !state.mcpDraft) return
+    state.mcpDraft.type = element.dataset.mcpType
+    state.mcpError = null
+    render()
+  }))
+  document.querySelectorAll("[data-mcp-toggle]").forEach((element) => element.addEventListener("click", () => {
+    toggleMcpEnabled(element.dataset.mcpToggle, element.dataset.mcpEnabled !== "1")
+  }))
+  document.querySelectorAll("[data-mcp-field]").forEach((element) => element.addEventListener("input", () => {
+    if (!state.mcpDraft) return
+    const field = element.dataset.mcpField
+    state.mcpDraft[field] = field === "oauth" ? element.checked : element.value
+  }))
+  document.querySelectorAll("[data-mcp-header]").forEach((element) => element.addEventListener("input", () => {
+    if (!state.mcpDraft) return
+    const index = Number(element.dataset.mcpHeaderIndex)
+    const row = state.mcpDraft.headers?.[index]
+    if (row) row[element.dataset.mcpHeader] = element.value
+  }))
+  document.querySelectorAll("[data-rename-project]").forEach((element) => element.addEventListener("click", () => openRenameProjectModal(element.dataset.renameProject, element.dataset.projectName || "")))
+  document.querySelectorAll("[data-remove-project]").forEach((element) => element.addEventListener("click", () => {
+    state.projectDeleteTarget = { id: element.dataset.removeProject, name: element.dataset.projectName || "this project" }
+    state.projectRemoving = false
+    render()
+  }))
   document.querySelectorAll("[data-remove-attachment]").forEach((element) => element.addEventListener("click", () => removeAttachment(element.dataset.removeAttachment)))
   bindMessageActions()
   bindArtifactActions()
@@ -2384,6 +2702,39 @@ async function handleAction(event) {
       render()
     }
     if (action === "chooseSkillArchive") await uploadSkill()
+    if (action === "closeSkillPreview") {
+      if (state.skillUninstalling) return
+      state.skillPreview = null
+      state.skillPreviewContent = null
+      state.skillPreviewError = null
+      render()
+    }
+    if (action === "uninstallSkill") {
+      await uninstallSkill(event.currentTarget.dataset.skillName)
+    }
+    if (action === "openMcpModal") openMcpModal()
+    if (action === "closeMcpModal") closeMcpModal()
+    if (action === "submitMcpServer") await submitMcpServer()
+    if (action === "addMcpHeader") {
+      state.mcpDraft.headers = [...(state.mcpDraft.headers || []), { key: "", value: "" }]
+      render()
+    }
+    if (action === "removeMcpHeader") {
+      const index = Number(event.currentTarget.dataset.mcpHeaderIndex)
+      state.mcpDraft.headers = (state.mcpDraft.headers || []).filter((_, i) => i !== index)
+      render()
+    }
+    if (action === "removeMcp") {
+      state.mcpDeleteTarget = { name: event.currentTarget.dataset.mcpName }
+      state.mcpRemoving = false
+      render()
+    }
+    if (action === "cancelRemoveMcp") {
+      if (state.mcpRemoving) return
+      state.mcpDeleteTarget = null
+      render()
+    }
+    if (action === "confirmRemoveMcp") await confirmRemoveMcp()
     if (action === "cancelDeleteSession") {
       state.sessionDeleteTarget = null
       render()
@@ -2396,6 +2747,18 @@ async function handleAction(event) {
     }
     if (action === "cancelRenameSession") closeRenameSessionModal()
     if (action === "confirmRenameSession") await confirmRenameSession()
+    if (action === "cancelRemoveProject") {
+      state.projectDeleteTarget = null
+      render()
+    }
+    if (action === "confirmRemoveProject") {
+      const target = state.projectDeleteTarget
+      state.projectDeleteTarget = null
+      render()
+      if (target) await removeProject(target.id)
+    }
+    if (action === "cancelRenameProject") closeRenameProjectModal()
+    if (action === "confirmRenameProject") await confirmRenameProject()
     if (action === "toggleDiagnostics") {
       state.diagnosticsOpen = !state.diagnosticsOpen
       render()
@@ -2764,13 +3127,48 @@ async function sendPrompt(rawPrompt) {
   }
 }
 
-async function renameProject(projectId) {
-  const project = state.projects.find((item) => item.id === projectId)
-  const name = window.prompt("Project name", project?.name || "")
-  if (name === null) return
-  await window.openworking.projects.rename(projectId, name)
-  state.projects = await window.openworking.projects.list()
+function openRenameProjectModal(projectId, name) {
+  state.projectRenameTarget = { projectId, name: name || "" }
+  state.projectRenameDraft = name || ""
+  state.projectRenameError = null
+  state.projectRenaming = false
+  state.projectRenameAutoFocus = true
+  state.projectMenu = null
   render()
+}
+
+function closeRenameProjectModal() {
+  state.projectRenameTarget = null
+  state.projectRenameDraft = ""
+  state.projectRenameError = null
+  state.projectRenaming = false
+  state.projectRenameAutoFocus = false
+  render()
+}
+
+async function confirmRenameProject() {
+  const target = state.projectRenameTarget
+  if (!target?.projectId) {
+    closeRenameProjectModal()
+    return
+  }
+  const trimmedName = state.projectRenameDraft.trim()
+  if (!trimmedName) {
+    state.projectRenameError = "Project name is required."
+    render()
+    return
+  }
+  state.projectRenaming = true
+  render()
+  try {
+    await window.openworking.projects.rename(target.projectId, trimmedName)
+    state.projects = await window.openworking.projects.list()
+    closeRenameProjectModal()
+  } catch (error) {
+    state.projectRenaming = false
+    state.projectRenameError = error.message
+    render()
+  }
 }
 
 async function removeProject(projectId) {
@@ -2893,11 +3291,145 @@ async function uploadSkill(filePath = null) {
   }
 }
 
+async function openSkillPreview(name, builtIn) {
+  state.skillPreview = { name, builtIn: !!builtIn }
+  state.skillPreviewContent = null
+  state.skillPreviewError = null
+  state.skillPreviewLoading = true
+  render()
+  try {
+    const result = await window.openworking.skills.read(name)
+    state.skillPreviewContent = result?.content || ""
+  } catch (error) {
+    state.skillPreviewError = error.message
+  } finally {
+    state.skillPreviewLoading = false
+    render()
+  }
+}
+
+async function uninstallSkill(name) {
+  if (state.skillUninstalling || !name) return
+  state.skillUninstalling = true
+  render()
+  try {
+    const result = await window.openworking.skills.uninstall(name)
+    state.customSkills = result?.customSkills || state.customSkills.filter((skill) => skill.name !== name)
+    state.skillPreview = null
+    state.skillPreviewContent = null
+    state.skillPreviewError = null
+    showToast(`Uninstalled ${name}`)
+  } catch (error) {
+    state.skillPreviewError = error.message
+  } finally {
+    state.skillUninstalling = false
+    render()
+  }
+}
+
+function openMcpModal() {
+  state.mcpModalOpen = true
+  state.mcpSaving = false
+  state.mcpError = null
+  state.mcpDraft = { name: "", type: "remote", url: "", command: "", oauth: true, headers: [] }
+  render()
+}
+
+function closeMcpModal() {
+  if (state.mcpSaving) return
+  state.mcpModalOpen = false
+  state.mcpDraft = null
+  state.mcpError = null
+  render()
+}
+
+function serializeMcpDraft(draft) {
+  if (draft.type === "local") {
+    return { name: draft.name.trim(), type: "local", command: draft.command }
+  }
+  const headers = {}
+  for (const row of draft.headers || []) {
+    const key = String(row.key || "").trim()
+    if (key) headers[key] = String(row.value ?? "")
+  }
+  return {
+    name: draft.name.trim(),
+    type: "remote",
+    url: draft.url,
+    oauth: !!draft.oauth,
+    headers
+  }
+}
+
+async function submitMcpServer() {
+  const draft = state.mcpDraft
+  if (state.mcpSaving || !draft) return
+  if (!draft.name.trim()) {
+    state.mcpError = "App name is required."
+    render()
+    return
+  }
+  if (draft.type === "remote" && !draft.url.trim()) {
+    state.mcpError = "Server URL is required."
+    render()
+    return
+  }
+  if (draft.type === "local" && !draft.command.trim()) {
+    state.mcpError = "Command is required."
+    render()
+    return
+  }
+  state.mcpSaving = true
+  state.mcpError = null
+  render()
+  try {
+    const result = await window.openworking.mcp.add(serializeMcpDraft(draft))
+    state.mcpServers = result?.servers || state.mcpServers
+    state.mcpModalOpen = false
+    state.mcpDraft = null
+    showToast(`Added ${draft.name.trim()}`)
+  } catch (error) {
+    state.mcpError = error.message
+  } finally {
+    state.mcpSaving = false
+    render()
+  }
+}
+
+async function toggleMcpEnabled(name, enabled) {
+  try {
+    const result = await window.openworking.mcp.setEnabled(name, enabled)
+    state.mcpServers = result?.servers || state.mcpServers
+    render()
+  } catch (error) {
+    showToast(error.message)
+  }
+}
+
+async function confirmRemoveMcp() {
+  const target = state.mcpDeleteTarget
+  if (!target?.name || state.mcpRemoving) return
+  state.mcpRemoving = true
+  render()
+  try {
+    const result = await window.openworking.mcp.remove(target.name)
+    state.mcpServers = result?.servers || state.mcpServers.filter((server) => server.name !== target.name)
+    state.mcpDeleteTarget = null
+    showToast(`Removed ${target.name}`)
+  } catch (error) {
+    showToast(error.message)
+  } finally {
+    state.mcpRemoving = false
+    render()
+  }
+}
+
 async function reloadConfig() {
   const configResult = await window.openworking.config.get()
   state.configPath = configResult.path
   state.config = configResult.config
   state.customSkills = configResult.customSkills || []
+  state.mcpServers = configResult.mcp || []
   state.providerId = Object.keys(state.config.provider || {})[0] || "gateway"
   selectedModel()
 }
@@ -2920,6 +3452,7 @@ async function login() {
 
 async function logout() {
   state.popover = null
+  state.accountMenuOpen = false
   state.authLoading = true
   render()
   try {
@@ -2939,6 +3472,10 @@ document.addEventListener("click", (event) => {
   let dirty = false
   if (state.sessionMenu && !event.target.closest(".session-row-wrap")) {
     state.sessionMenu = null
+    dirty = true
+  }
+  if (state.projectMenu && !event.target.closest(".proj-head-wrap")) {
+    state.projectMenu = null
     dirty = true
   }
   if (state.popover && !event.target.closest(".popover-anchor")) {

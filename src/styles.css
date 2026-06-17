@@ -210,11 +210,11 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 }
 
 .new-session {
-  display: flex; align-items: center; gap: 10px; width: 100%;
-  margin: 2px 0 12px; padding: 8px 11px;
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  margin: 2px 0 12px; padding: 7px 10px;
   background: var(--surface-2); color: var(--text);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius); font-weight: 600; font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius); font-weight: 500; font-size: 13px;
   text-align: left;
   transition: background .12s, border-color .12s, transform .04s;
 }
@@ -225,7 +225,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 
 .nav-item {
   display: flex; align-items: center; gap: 11px; width: 100%;
-  padding: 8px 10px; margin-bottom: 2px;
+  padding: 7px 10px; margin-bottom: 2px;
   border: 1px solid transparent; border-radius: var(--radius);
   color: var(--text-2); font-size: 13px; font-weight: 500;
   transition: background .1s, color .1s, border-color .1s;
@@ -234,7 +234,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .nav-item svg { color: var(--text-3); flex-shrink: 0; transition: color .1s; }
 .nav-item:hover { background: var(--sidebar-hover); color: var(--text); }
 .nav-item:hover svg { color: var(--text-2); }
-.nav-item.active { background: var(--surface-2); color: var(--text); font-weight: 600; border-color: var(--border-strong); box-shadow: var(--shadow-sm); }
+.nav-item.active { background: var(--surface-2); color: var(--text); font-weight: 600; }
 .nav-item.active svg { color: var(--text); }
 .count { margin-left: auto; font-size: 12px; color: var(--text-3); font-weight: 500; }
 
@@ -247,8 +247,9 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 
 /* project accordion */
 .proj-group { margin-bottom: 2px; }
+.proj-head-wrap { position: relative; display: flex; align-items: center; gap: 4px; }
 .proj-head {
-  display: flex; align-items: center; gap: 8px; width: 100%;
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
   padding: 7px 9px; border-radius: var(--radius-sm);
   color: var(--text); text-align: left;
   transition: background .1s;
@@ -261,9 +262,28 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
   width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center;
   color: var(--text-3); opacity: 0; transition: opacity .12s, background .12s, color .12s; flex-shrink: 0;
 }
-.proj-head:hover .padd { opacity: 1; }
+.proj-head-wrap:hover .padd { opacity: 1; }
 .padd:hover { background: var(--accent-soft); color: var(--accent); }
 .padd svg { width: 14px; height: 14px; }
+.proj-kebab {
+  width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center;
+  color: var(--text-3); opacity: 0; transition: opacity .12s, background .12s, color .12s; flex-shrink: 0;
+}
+.proj-kebab svg { width: 15px; height: 15px; }
+.proj-head-wrap:hover .proj-kebab { opacity: 1; }
+.proj-kebab:hover { background: var(--surface-2); color: var(--text); }
+.pop.project-pop {
+  position: absolute;
+  right: 6px;
+  top: calc(100% - 2px);
+  z-index: 20;
+  min-width: 0;
+  width: fit-content;
+  max-width: min(200px, calc(100vw - 32px));
+}
+.project-pop .pop-item.danger { color: var(--red); }
+.project-pop .pop-item.danger svg { color: var(--red); }
+.project-pop .pop-item.danger:hover { background: var(--red-soft); }
 
 .sessions { padding-bottom: 4px; }
 .session-row-wrap { position: relative; border-radius: var(--radius-sm); }
@@ -328,11 +348,12 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 /* footer profile chip */
 .side-foot { padding: 8px 10px; }
 .side-user {
-  display: flex; align-items: center; gap: 10px; width: 100%;
-  padding: 7px 8px; border-radius: var(--radius);
-  text-align: left; transition: background .12s;
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 7px 10px; border-radius: var(--radius);
+  color: var(--text-2); font-size: 13px; font-weight: 500;
+  text-align: left; transition: background .12s, color .1s;
 }
-.side-user:hover { background: var(--sidebar-hover); }
+.side-user:hover { background: var(--sidebar-hover); color: var(--text); }
 .su-av {
   width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
   display: grid; place-items: center;
@@ -340,10 +361,33 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
   border: 1px solid var(--accent-soft-2);
   font-size: 11px; font-weight: 700; letter-spacing: .02em;
 }
-.su-meta { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
-.su-name { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.su-sub { font-size: 11px; color: var(--text-3); }
+.su-name { font-size: 13px; font-weight: 500; color: inherit; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .su-chev { margin-left: auto; color: var(--text-4); flex-shrink: 0; }
+
+.account-menu-anchor { position: relative; }
+.account-menu {
+  position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; z-index: 50;
+  padding: 6px; display: grid; gap: 2px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+}
+.account-menu-head { display: flex; align-items: center; gap: 10px; padding: 8px 8px 6px; }
+.account-menu-id { display: grid; min-width: 0; }
+.account-menu-name { font-size: 13px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.account-menu-sub { font-size: 11.5px; color: var(--text-3); }
+.account-menu-sep { height: 1px; background: var(--border); margin: 4px 0; }
+.account-menu-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px; border-radius: 8px; text-align: left;
+  color: var(--text-2); font-size: 13px; font-weight: 500;
+  transition: background .12s, color .1s;
+}
+.account-menu-item svg { width: 16px; height: 16px; color: var(--text-3); flex-shrink: 0; transition: color .1s; }
+.account-menu-item:hover { background: var(--sidebar-hover); color: var(--text); }
+.account-menu-item:hover svg { color: var(--text-2); }
+.account-menu-logout:hover { background: var(--red-soft); color: var(--red); }
+.account-menu-logout:hover svg { color: var(--red); }
 
 /* ============================================================
    Main / work screen
@@ -762,6 +806,102 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .custom-skill-row { background: rgba(255,255,255,.02); }
 .skill-status { display: inline-flex !important; grid-auto-flow: column; align-items: center; gap: 6px; color: var(--green); font-size: 12px; font-weight: 600; white-space: nowrap; }
 .skill-status svg { width: 14px; height: 14px; }
+
+/* Settings screen: left section nav + content */
+.settings-screen { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px 1fr; overflow: hidden; }
+.settings-sidebar { display: flex; flex-direction: column; gap: 2px; padding: 18px 12px; border-right: 1px solid var(--border); overflow-y: auto; }
+.settings-nav-item {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  padding: 8px 10px; border-radius: var(--radius);
+  text-align: left; font-size: 13.5px; color: var(--text-2);
+  border: 1px solid transparent; transition: background .1s, color .1s;
+}
+.settings-nav-item svg { width: 18px; height: 18px; color: var(--text-3); flex-shrink: 0; }
+.settings-nav-item:hover { background: var(--sidebar-hover); color: var(--text); }
+.settings-nav-item.active { background: var(--surface-2); color: var(--text); font-weight: 600; border-color: var(--border-strong); }
+.settings-nav-item.active svg { color: var(--text); }
+.settings-content { display: grid; gap: 18px; align-content: start; }
+.settings-content .diagnostics { position: static; width: auto; top: auto; right: auto; box-shadow: none; border: 1px solid var(--border); }
+
+/* Skills screen: clickable list rows */
+.skills-screen .skills-panel { grid-column: auto; }
+.skill-list-item {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  padding: 11px 12px; border: 0; border-radius: var(--radius);
+  background: transparent; transition: background .12s;
+}
+.skill-list-item:hover { background: var(--surface-2); }
+.sli-icon { display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: var(--radius); background: var(--accent-soft); }
+.sli-icon svg { width: 16px; height: 16px; color: var(--accent-text); }
+.sli-text { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.sli-text strong { font-size: 13.5px; }
+.sli-text small { color: var(--text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sli-badge { flex-shrink: 0; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 999px; }
+.sli-badge.builtin { color: var(--text-3); background: var(--surface-2); border: 1px solid var(--border); }
+.sli-badge.custom { color: var(--green); background: var(--green-soft, var(--accent-soft)); }
+
+/* Skill preview modal */
+.skill-preview-modal {
+  width: min(720px, calc(100vw - 56px)); max-height: calc(100vh - 80px);
+  display: flex; flex-direction: column;
+  border-radius: var(--radius-xl); background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); box-shadow: var(--shadow-pop);
+}
+.skill-preview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 22px 14px; border-bottom: 1px solid var(--border); }
+.sph-title { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.sph-title h1 { font-size: 18px; line-height: 1.2; overflow-wrap: anywhere; }
+.sph-title small { color: var(--text-3); font-size: 12px; }
+.skill-preview-body { flex: 1; overflow-y: auto; padding: 16px 22px; }
+.skill-preview-md { overflow-wrap: anywhere; color: var(--text-2); font-size: 13.5px; line-height: 1.6; }
+.skill-preview-md > :first-child { margin-top: 0; }
+.skill-preview-md > :last-child { margin-bottom: 0; }
+.skill-preview-state { color: var(--text-3); font-size: 13.5px; padding: 12px 0; }
+.skill-preview-state.error { color: var(--red); }
+.skill-preview-foot { display: flex; justify-content: flex-end; padding: 14px 22px; border-top: 1px solid var(--border); }
+.skill-preview-foot .danger-btn:disabled, .danger-btn.disabled { opacity: .45; pointer-events: none; }
+
+/* Skills screen tabs (Skills / MCP Servers) */
+.skills-tabs { display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.skills-tab {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 12px; border-radius: var(--radius-sm);
+  font-size: 13px; font-weight: 600; color: var(--text-2);
+  border: 1px solid transparent; transition: background .12s, color .12s;
+}
+.skills-tab svg { width: 16px; height: 16px; color: var(--text-3); }
+.skills-tab:hover { color: var(--text); }
+.skills-tab.active { background: var(--surface); color: var(--text); border-color: var(--border-strong); }
+.skills-tab.active svg { color: var(--accent-text); }
+
+/* MCP server rows */
+.mcp-list-item { cursor: default; }
+.mcp-list-item:hover { background: transparent; }
+.mcp-list-item .switch { flex-shrink: 0; cursor: pointer; }
+.mcp-delete { flex-shrink: 0; }
+
+/* Add MCP server modal */
+.mcp-modal { width: min(560px, calc(100vw - 56px)); }
+.mcp-field-label { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.mcp-type-toggle { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.mcp-type-opt { padding: 6px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600; color: var(--text-2); transition: background .12s, color .12s; }
+.mcp-type-opt:hover { color: var(--text); }
+.mcp-type-opt.active { background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); }
+.mcp-checkbox { display: flex; flex-direction: row !important; align-items: center; gap: 8px; font-size: 13.5px; color: var(--text); cursor: pointer; }
+.mcp-checkbox input { width: 17px; height: 17px; flex-shrink: 0; accent-color: var(--accent); }
+.mcp-headers { display: grid; gap: 8px; }
+.mcp-headers-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
+.mcp-headers-row input { width: 100%; }
+.link-btn { display: inline-flex; align-items: center; gap: 6px; align-self: start; padding: 4px 2px; font-size: 13px; font-weight: 600; color: var(--accent-text); }
+.link-btn svg { width: 15px; height: 15px; }
+.link-btn:hover { text-decoration: underline; }
+
+/* footer settings button uses a flat icon, matching nav rows */
+.su-icon { display: grid; place-items: center; flex-shrink: 0; }
+.su-icon svg { width: 16px; height: 16px; color: var(--text-3); transition: color .1s; }
+.side-user:hover .su-icon svg { color: var(--text-2); }
+.side-user.active { background: var(--surface-2); }
+.side-user.active .su-icon svg { color: var(--text); }
+
 .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .panel-head h1 { font-size: 18px; }
 .panel-head p, .config-note { color: var(--text-3); font-size: 12px; }
