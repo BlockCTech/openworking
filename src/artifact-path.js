@@ -5,7 +5,7 @@ const { StringDecoder } = require("node:string_decoder")
 const TRANSLATION_ARTIFACT_EXTENSIONS = new Set([".docx", ".pdf", ".pptx", ".xlsx"])
 const TRANSLATION_ARTIFACT_NAME = /^.+-translated-[a-z0-9]+(?:-[a-z0-9]+)*(?:-\d+)?$/
 
-function assertTranslationArtifact(_projectPath, artifactPath) {
+function assertTranslationArtifact(projectPath, artifactPath) {
   const requestedArtifact = path.resolve(String(artifactPath))
   if (!fs.existsSync(requestedArtifact)) {
     throw new Error("Artifact does not exist.")
@@ -16,10 +16,29 @@ function assertTranslationArtifact(_projectPath, artifactPath) {
   }
   const parsed = path.parse(resolvedArtifact)
   const extension = parsed.ext.toLowerCase()
-  if (!TRANSLATION_ARTIFACT_EXTENSIONS.has(extension) || !TRANSLATION_ARTIFACT_NAME.test(parsed.name)) {
+  if (!TRANSLATION_ARTIFACT_EXTENSIONS.has(extension)) {
     throw new Error("Artifact path is not a translated document artifact.")
   }
-  return resolvedArtifact
+  // A translated artifact is either named "<base>-translated-<lang>" (the default
+  // new-file mode, which may live anywhere), or the in-place mode overwrites the
+  // original document, which keeps its original name. Allow the latter only when it
+  // resolves inside the current project root.
+  if (TRANSLATION_ARTIFACT_NAME.test(parsed.name)) {
+    return resolvedArtifact
+  }
+  if (projectPath) {
+    let projectRoot
+    try {
+      projectRoot = fs.realpathSync(path.resolve(projectPath))
+    } catch {
+      throw new Error("Artifact path is not a translated document artifact.")
+    }
+    const relative = path.relative(projectRoot, resolvedArtifact)
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+      return resolvedArtifact
+    }
+  }
+  throw new Error("Artifact path is not a translated document artifact.")
 }
 
 const VIEWABLE_FILE_EXTENSIONS = new Set([

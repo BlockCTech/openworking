@@ -1,6 +1,6 @@
 {
   "name": "openworking",
-  "version": "1.10.0",
+  "version": "1.10.5",
   "private": true,
   "description": "OpenWorking — a local-first desktop shell for OpenCode with a self-configured OpenAI-compatible API gateway.",
   "license": "MIT",
@@ -34,6 +34,12 @@
     "dist:mac": "electron-builder --mac dmg",
     "presmoke:packaged": "npm run build:document-tools",
     "smoke:packaged": "node scripts/packaged-smoke.js",
+    "pretest:e2e": "npm run build:document-tools",
+    "test:e2e": "playwright test",
+    "pretest:e2e:headed": "npm run build:document-tools",
+    "test:e2e:headed": "playwright test --headed",
+    "pretest:e2e:ui": "npm run build:document-tools",
+    "test:e2e:ui": "playwright test --ui",
     "preverify": "npm run build:document-tools",
     "verify": "node --test",
     "bump:patch": "npm version patch --no-git-tag-version",
@@ -44,6 +50,7 @@
   "devDependencies": {
     "@embedpdf/pdfium": "^2.14.3",
     "@pdf-lib/fontkit": "^1.1.1",
+    "@playwright/test": "^1.50.0",
     "electron": "^39.8.10",
     "electron-builder": "^26.8.1",
     "esbuild": "^0.28.0",

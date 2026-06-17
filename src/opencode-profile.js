@@ -20,7 +20,7 @@ const BUILT_IN_SKILLS = [
   { name: "xlsx", description: "Read, create, edit and validate spreadsheet workbooks." },
   { name: "docx", description: "Read, create, edit and visually validate Word documents." },
   { name: "translate-document", description: "Translate PDF and DOCX files into new layout-preserving document artifacts." },
-  { name: "translate-office-document", description: "Translate PPTX and XLSX files into new layout-preserving Office artifacts." },
+  { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
   { name: "webapp-testing", description: "Test local web applications with the project's existing tools or Playwright." }
 ]
 const BUILT_IN_TOOLS = ["translate_document.js"]

@@ -6,3 +6,7 @@ out/
 tmp-diagnostics/
 .claude/
 .opencode/
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/

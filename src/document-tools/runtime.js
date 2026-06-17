@@ -25,8 +25,15 @@ const PPTX_MAX_BATCH_SEGMENTS = 80
 const XLSX_MAX_BATCH_CHARS = 4000
 const XLSX_MAX_BATCH_SEGMENTS = 80
 const PDF_MIN_FONT_SIZE = 4
+const PDF_VISION_MIN_FONT_SIZE = 3
+const PDF_VISION_MAX_FONT_SIZE = 12
 const PDF_OVERLAY_OPACITY = 1
 const PDF_BULLET_PATTERN = /^(\s*)([■・•●○□▪▫◆◇▶▸-])(\s*)/u
+const PDF_BLOCK_KINDS = new Set(["shape-label", "callout", "paragraph", "connector-label"])
+const PDF_VISUAL_OCR_MIN_RATIO = 0.07
+const PPTX_SLIDE_PART = /^ppt\/slides\/slide\d+\.xml$/
+const PPTX_IMAGE_MIN_AREA_RATIO = 0.08
+const PPTX_DEFAULT_SLIDE_SIZE = { cx: 9144000, cy: 5143500 }
 let pdfiumPromise
 
 function xmlDecode(value) {
@@ -88,6 +95,10 @@ function parseJsonContent(value) {
   return JSON.parse(text)
 }
 
+function responseContentType(response) {
+  return String(response.headers?.get?.("content-type") || response.headers?.["content-type"] || "")
+}
+
 async function gatewayJson(messages, options = {}) {
   const config = options.gateway || gatewayConfig()
   const fetchImpl = options.fetch || fetch
@@ -101,13 +112,24 @@ async function gatewayJson(messages, options = {}) {
       model: config.model,
       messages,
       temperature: 0,
+      stream: false,
       response_format: { type: "json_object" }
     })
   })
   if (!response.ok) {
     throw new Error(`Translation gateway returned HTTP ${response.status}.`)
   }
-  const payload = await response.json()
+  const contentType = responseContentType(response)
+  if (/text\/event-stream/i.test(contentType)) {
+    throw new Error("Translation gateway expected non-stream JSON, got stream response.")
+  }
+  let payload
+  try {
+    payload = JSON.parse(await response.text())
+  } catch (error) {
+    const suffix = contentType ? ` (${contentType})` : ""
+    throw new Error(`Translation gateway returned invalid response JSON${suffix}: ${error.message}`)
+  }
   return parseJsonContent(payload.choices?.[0]?.message?.content)
 }
 
@@ -299,17 +321,197 @@ function warningsForParts(names, checks) {
   return warnings
 }
 
+function resolveOoxmlTarget(partName, target) {
+  const raw = String(target || "").replaceAll("\\", "/")
+  if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw)) return null
+  return raw.startsWith("/") ? raw.slice(1) : path.posix.normalize(path.posix.join(path.posix.dirname(partName), raw))
+}
+
+function ooxmlRelationships(zip, partName) {
+  const parsed = path.posix.parse(partName)
+  const relsPath = path.posix.join(parsed.dir, "_rels", `${parsed.base}.rels`)
+  const xml = zipEntryText(zip, relsPath)
+  const rels = new Map()
+  for (const match of xml.matchAll(/<Relationship\b([^>]*)\/?>/g)) {
+    const attrs = extractXmlAttrs(match[1])
+    const target = resolveOoxmlTarget(partName, attrs.Target)
+    if (attrs.Id && target) rels.set(attrs.Id, target)
+  }
+  return rels
+}
+
+function imageMimeType(name) {
+  const extension = path.extname(String(name || "")).toLowerCase()
+  if (extension === ".png") return "image/png"
+  if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg"
+  if (extension === ".gif") return "image/gif"
+  if (extension === ".webp") return "image/webp"
+  return ""
+}
+
+function pptxSlideSize(zip) {
+  const xml = zipEntryText(zip, "ppt/presentation.xml")
+  const attrs = extractXmlAttrs((xml.match(/<p:sldSz\b([^>]*)\/?>/) || [])[1] || "")
+  const cx = Number(attrs.cx)
+  const cy = Number(attrs.cy)
+  return Number.isFinite(cx) && Number.isFinite(cy) && cx > 0 && cy > 0 ? { cx, cy } : PPTX_DEFAULT_SLIDE_SIZE
+}
+
+function extractPptxPictures(slideXml, slidePart, rels, slideSize) {
+  const pictures = []
+  for (const match of String(slideXml || "").matchAll(/<p:pic\b[\s\S]*?<\/p:pic>/g)) {
+    const picXml = match[0]
+    const blipAttrs = extractXmlAttrs((picXml.match(/<a:blip\b([^>]*)\/?>/) || [])[1] || "")
+    const relId = blipAttrs["r:embed"] || blipAttrs.embed
+    const target = rels.get(relId)
+    const mime = imageMimeType(target)
+    if (!target || !mime) continue
+    const xfrm = (picXml.match(/<a:xfrm\b[\s\S]*?<\/a:xfrm>/) || [])[0] || ""
+    const off = extractXmlAttrs((xfrm.match(/<a:off\b([^>]*)\/?>/) || [])[1] || "")
+    const ext = extractXmlAttrs((xfrm.match(/<a:ext\b([^>]*)\/?>/) || [])[1] || "")
+    const picture = {
+      mime,
+      relId,
+      slidePart,
+      target,
+      x: Number(off.x),
+      y: Number(off.y),
+      width: Number(ext.cx),
+      height: Number(ext.cy)
+    }
+    if (![picture.x, picture.y, picture.width, picture.height].every(Number.isFinite) || picture.width <= 0 || picture.height <= 0) continue
+    const areaRatio = (picture.width * picture.height) / (slideSize.cx * slideSize.cy)
+    if (areaRatio < PPTX_IMAGE_MIN_AREA_RATIO) continue
+    pictures.push(picture)
+  }
+  return pictures
+}
+
+function normalizePptxVisionBlock(block, picture, index) {
+  const x = picture.x + Number(block.x) * picture.width
+  const y = picture.y + Number(block.y) * picture.height
+  const width = Number(block.width) * picture.width
+  const height = Number(block.height) * picture.height
+  if (![x, y, width, height].every(Number.isFinite)) return null
+  const left = clamp(x, picture.x, picture.x + picture.width)
+  const top = clamp(y, picture.y, picture.y + picture.height)
+  const right = clamp(x + width, picture.x, picture.x + picture.width)
+  const bottom = clamp(y + height, picture.y, picture.y + picture.height)
+  if (right - left < 1000 || bottom - top < 1000) return null
+  return {
+    id: `pptx:${picture.slidePart}:${picture.relId}:${index}`,
+    kind: normalizePdfBlockKind(block),
+    text: String(block.text || ""),
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top
+  }
+}
+
+async function pptxVisionBlocks(image, picture, args, options) {
+  if (options.pptxVisionBlocks) {
+    return dedupePdfBlocks(options.pptxVisionBlocks(picture, args).map((block, index) => normalizePptxVisionBlock(block, picture, index)).filter(Boolean))
+  }
+  const messages = [
+    {
+      role: "system",
+      content: "Identify logical visible text regions in this presentation image and translate them. Return JSON only as {\"blocks\":[{\"text\":\"translated text\",\"x\":0.0,\"y\":0.0,\"width\":0.0,\"height\":0.0,\"kind\":\"shape-label\"}]}. Coordinates are normalized 0..1 with a top-left origin relative to the image. Use kind as one of shape-label, callout, paragraph, connector-label. Ignore logos, decorative marks, and non-content branding. Do not return commentary."
+    },
+    {
+      role: "user",
+      content: [
+        { type: "text", text: `Translate visible image text to ${args.targetLanguage}. Source language: ${args.sourceLanguage || "auto-detect"}.` },
+        { type: "image_url", image_url: { url: `data:${picture.mime};base64,${image.toString("base64")}` } }
+      ]
+    }
+  ]
+  let blocks
+  let lastError
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const payload = await gatewayJson(messages, options)
+      if (!Array.isArray(payload.blocks)) throw new Error("Gateway response omitted vision blocks.")
+      blocks = payload.blocks
+      break
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (!blocks) throw new Error(`Translation gateway returned invalid PPTX image JSON after 3 attempts: ${lastError.message}`)
+  return dedupePdfBlocks(blocks.map((block, index) => normalizePptxVisionBlock(block, picture, index)).filter(Boolean))
+}
+
+function nextPptxShapeId(slideXml) {
+  let max = 0
+  for (const match of String(slideXml || "").matchAll(/<p:cNvPr\b([^>]*)\/?>/g)) {
+    const id = Number(extractXmlAttrs(match[1]).id)
+    if (Number.isFinite(id)) max = Math.max(max, id)
+  }
+  return max + 1
+}
+
+function pptxOverlayShapeXml(block, id) {
+  const text = xmlEncode(String(block.text || "").replace(/\s+/g, " ").trim())
+  if (!text) return ""
+  const kind = normalizePdfBlockKind(block)
+  const centered = kind === "shape-label" || kind === "connector-label"
+  const anchor = centered ? "ctr" : "t"
+  const align = centered ? "ctr" : "l"
+  const fontSize = Math.round(clamp((block.height / 12700) * 0.35, 6, 14) * 100)
+  return `<p:sp><p:nvSpPr><p:cNvPr id="${id}" name="Translated image text ${id}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="${Math.round(block.x)}" y="${Math.round(block.y)}"/><a:ext cx="${Math.round(block.width)}" cy="${Math.round(block.height)}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap="square" anchor="${anchor}"><a:normAutofit fontScale="60000"/></a:bodyPr><a:lstStyle/><a:p><a:pPr algn="${align}"/><a:r><a:rPr lang="vi-VN" sz="${fontSize}"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:latin typeface="Noto Sans"/><a:ea typeface="Noto Sans"/></a:rPr><a:t>${text}</a:t></a:r></a:p></p:txBody></p:sp>`
+}
+
+function insertPptxOverlayShapes(slideXml, shapes) {
+  const payload = shapes.filter(Boolean).join("")
+  if (!payload) return slideXml
+  if (String(slideXml).includes("</p:spTree>")) return String(slideXml).replace("</p:spTree>", `${payload}</p:spTree>`)
+  return String(slideXml).replace("</p:cSld>", `<p:spTree>${payload}</p:spTree></p:cSld>`)
+}
+
+async function addPptxImageOverlays(zip, args, options) {
+  const slideSize = pptxSlideSize(zip)
+  let overlayCount = 0
+  for (const entry of zip.getEntries().filter((candidate) => PPTX_SLIDE_PART.test(candidate.entryName))) {
+    const slidePart = entry.entryName
+    let slideXml = entry.getData().toString("utf8")
+    const rels = ooxmlRelationships(zip, slidePart)
+    const pictures = extractPptxPictures(slideXml, slidePart, rels, slideSize)
+    if (!pictures.length) continue
+    const shapes = []
+    let nextId = nextPptxShapeId(slideXml)
+    for (const picture of pictures) {
+      const media = zip.getEntry(picture.target)
+      if (!media) continue
+      const blocks = await pptxVisionBlocks(media.getData(), picture, args, options)
+      for (const block of blocks) {
+        const shape = pptxOverlayShapeXml(block, nextId++)
+        if (shape) {
+          shapes.push(shape)
+          overlayCount += 1
+        }
+      }
+    }
+    slideXml = insertPptxOverlayShapes(slideXml, shapes)
+    entry.setData(Buffer.from(slideXml, "utf8"))
+  }
+  return overlayCount
+}
+
 async function translatePptx(inputPath, outputPath, args, options) {
   const zip = new AdmZip(inputPath)
   const { parts, segments } = collectOoxmlSegments(zip, PPTX_PART, DRAWING_TEXT_NODE)
-  if (!segments.length) throw new Error("PPTX did not contain translatable presentation text nodes.")
-  const translated = await translateSegments(segments, args.targetLanguage, args.sourceLanguage, {
-    ...options,
-    maxBatchChars: PPTX_MAX_BATCH_CHARS,
-    maxBatchSegments: PPTX_MAX_BATCH_SEGMENTS,
-    splitFailedBatches: true
-  })
-  replaceOoxmlSegments(parts, DRAWING_TEXT_NODE, translated)
+  if (segments.length) {
+    const translated = await translateSegments(segments, args.targetLanguage, args.sourceLanguage, {
+      ...options,
+      maxBatchChars: PPTX_MAX_BATCH_CHARS,
+      maxBatchSegments: PPTX_MAX_BATCH_SEGMENTS,
+      splitFailedBatches: true
+    })
+    replaceOoxmlSegments(parts, DRAWING_TEXT_NODE, translated)
+  }
+  const imageOverlayCount = await addPptxImageOverlays(zip, args, options)
+  if (!segments.length && !imageOverlayCount) throw new Error("PPTX did not contain translatable presentation text nodes.")
   zip.writeZip(outputPath)
 
   const validated = new AdmZip(outputPath)
@@ -326,6 +528,16 @@ async function translatePptx(inputPath, outputPath, args, options) {
 function zipEntryText(zip, name) {
   const entry = zip.getEntry(name)
   return entry ? entry.getData().toString("utf8") : ""
+}
+
+function setZipEntryText(zip, name, text) {
+  const data = Buffer.from(text, "utf8")
+  const entry = zip.getEntry(name)
+  if (entry) {
+    entry.setData(data)
+  } else {
+    zip.addFile(name, data)
+  }
 }
 
 function normalizeXlsxTarget(target) {
@@ -407,6 +619,165 @@ async function translateXlsx(inputPath, outputPath, args, options) {
       ["Drawing text may require manual translation review.", (name) => name.startsWith("xl/drawings/")]
     ])
     if (formulaInWorksheet) warnings.unshift("Formula cells were preserved and may need recalculation in a spreadsheet app.")
+  } catch (error) {
+    warnings = ["Translated spreadsheet was created but its formatting warnings could not be inspected."]
+  }
+  return { warnings }
+}
+
+function uniqueSheetName(base, used) {
+  const suffix = " (VI)"
+  const room = 31 - suffix.length
+  const trimmed = base.length > room ? base.slice(0, room) : base
+  let candidate = `${trimmed}${suffix}`
+  let counter = 1
+  while (used.has(candidate)) {
+    counter += 1
+    const tail = `${suffix}${counter}`
+    const head = base.slice(0, Math.max(0, 31 - tail.length))
+    candidate = `${head}${tail}`
+  }
+  used.add(candidate)
+  return candidate
+}
+
+function inlineSharedStringsInWorksheet(xml, sharedStrings) {
+  // Cells with t="s" reference the shared (global) string table by index. Translating
+  // the shared table would also change the original Japanese sheets that point at the
+  // same indices, so the copy must own its text: rewrite each shared-string cell into a
+  // self-contained inlineStr carrying the resolved text. Inline strings are then matched
+  // by SPREADSHEET_TEXT_NODE and translated like any other <t> node.
+  return xml.replace(/<c\b([^>]*)>([\s\S]*?)<\/c>/g, (whole, attributes, body) => {
+    const attrs = extractXmlAttrs(attributes)
+    if (attrs.t !== "s") return whole
+    const index = Number((body.match(/<v(?:\s[^>]*)?>([\s\S]*?)<\/v>/) || [])[1])
+    const value = sharedStrings[index]
+    if (value == null) return whole
+    const cleaned = attributes.replace(/\s+t\s*=\s*(?:"[^"]*"|'[^']*')/g, "")
+    return `<c${cleaned} t="inlineStr"><is><t xml:space="preserve">${xmlEncode(value)}</t></is></c>`
+  })
+}
+
+function xlsxSharedStrings(zip) {
+  const xml = zipEntryText(zip, "xl/sharedStrings.xml")
+  if (!xml) return []
+  return [...xml.matchAll(/<si(?:\s[^>]*)?>([\s\S]*?)<\/si>/g)].map((match) => {
+    const texts = [...match[1].matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)].map((node) => xmlDecode(node[1]))
+    return texts.join("")
+  })
+}
+
+function nextWorksheetIndex(names) {
+  let max = 0
+  for (const name of names) {
+    const match = name.match(/^xl\/worksheets\/sheet(\d+)\.xml$/)
+    if (match) max = Math.max(max, Number(match[1]))
+  }
+  return max + 1
+}
+
+function nextRelIdFactory(relsXml) {
+  let max = 0
+  for (const match of relsXml.matchAll(/(?:Id|r:id)="rId(\d+)"/g)) max = Math.max(max, Number(match[1]))
+  let counter = max
+  return () => `rId${(counter += 1)}`
+}
+
+function xlsxOriginalSheets(zip) {
+  const workbook = zipEntryText(zip, "xl/workbook.xml")
+  const rels = xlsxWorkbookRels(zip)
+  const worksheetNames = zip.getEntries().map((entry) => entry.entryName).filter((name) => XLSX_WORKSHEET_PART.test(name)).sort()
+  const entriesByName = new Set(zip.getEntries().map((entry) => entry.entryName))
+  const sheets = []
+  let fallbackIndex = 0
+  for (const match of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+    const attrs = extractXmlAttrs(match[1])
+    const target = rels.get(attrs["r:id"]) || worksheetNames[fallbackIndex++]
+    if (target && entriesByName.has(target) && XLSX_WORKSHEET_PART.test(target)) {
+      sheets.push({ name: attrs.name || "", sheetId: Number(attrs.sheetId) || 0, target, tag: match[0] })
+    }
+  }
+  return { workbook, sheets }
+}
+
+async function translateXlsxInplaceBilingual(inputPath, outputPath, args, options) {
+  const zip = new AdmZip(inputPath)
+  const { workbook, sheets } = xlsxOriginalSheets(zip)
+  if (!sheets.length) throw new Error("XLSX did not contain worksheets to duplicate for in-place translation.")
+
+  const sharedStrings = xlsxSharedStrings(zip)
+  const existingNames = zip.getEntries().map((entry) => entry.entryName)
+  let worksheetIndex = nextWorksheetIndex(existingNames)
+  let maxSheetId = Math.max(0, ...sheets.map((sheet) => sheet.sheetId))
+  const usedNames = new Set(sheets.map((sheet) => sheet.name))
+
+  const relsPath = "xl/_rels/workbook.xml.rels"
+  let relsXml = zipEntryText(zip, relsPath) || "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"></Relationships>"
+  const nextRelId = nextRelIdFactory(`${relsXml}\n${workbook}`)
+  const contentTypesPath = "[Content_Types].xml"
+  let contentTypesXml = zipEntryText(zip, contentTypesPath)
+
+  const copyEntries = []
+  let workbookXml = workbook
+  for (const sheet of sheets) {
+    const copyName = `xl/worksheets/sheet${worksheetIndex++}.xml`
+    const sourceXml = zipEntryText(zip, sheet.target)
+    const copyXml = inlineSharedStringsInWorksheet(sourceXml, sharedStrings)
+    zip.addFile(copyName, Buffer.from(copyXml, "utf8"))
+    const copyEntry = zip.getEntry(copyName)
+    copyEntries.push(copyEntry)
+
+    const relId = nextRelId()
+    const relTarget = copyName.replace(/^xl\//, "")
+    relsXml = relsXml.replace(
+      /<\/Relationships>/,
+      `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="${relTarget}"/></Relationships>`
+    )
+
+    const translatedName = uniqueSheetName(sheet.name || `Sheet${sheet.sheetId}`, usedNames)
+    maxSheetId += 1
+    const newSheetTag = `<sheet name="${xmlEncode(translatedName)}" sheetId="${maxSheetId}" r:id="${relId}"/>`
+    // Place the translated sheet immediately after its source sheet ("bên cạnh").
+    workbookXml = workbookXml.replace(sheet.tag, `${sheet.tag}${newSheetTag}`)
+
+    if (contentTypesXml && !contentTypesXml.includes(`PartName="/${copyName}"`)) {
+      contentTypesXml = contentTypesXml.replace(
+        /<\/Types>/,
+        `<Override PartName="/${copyName}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`
+      )
+    }
+  }
+
+  setZipEntryText(zip, "xl/workbook.xml", workbookXml)
+  setZipEntryText(zip, relsPath, relsXml)
+  if (contentTypesXml) setZipEntryText(zip, contentTypesPath, contentTypesXml)
+
+  const { parts, segments } = collectOoxmlPartSegments(zip, copyEntries, SPREADSHEET_TEXT_NODE)
+  if (!segments.length) throw new Error("XLSX did not contain translatable spreadsheet text nodes.")
+  const translated = await translateSegments(segments, args.targetLanguage, args.sourceLanguage, {
+    ...options,
+    maxBatchChars: XLSX_MAX_BATCH_CHARS,
+    maxBatchSegments: XLSX_MAX_BATCH_SEGMENTS,
+    splitFailedBatches: true
+  })
+  assertTranslationsComplete(segments, translated, "XLSX")
+  replaceOoxmlSegments(parts, SPREADSHEET_TEXT_NODE, translated, { expectedIds: segments.map((segment) => segment.id) })
+  zip.writeZip(outputPath)
+
+  const validated = new AdmZip(outputPath)
+  if (!validated.getEntry("xl/workbook.xml")) throw new Error("Generated XLSX is missing xl/workbook.xml.")
+
+  let warnings = []
+  try {
+    const names = validated.getEntries().map((entry) => entry.entryName)
+    const formulaInCopy = parts.some((part) => /<f(?:\s|>)/.test(part.xml))
+    warnings = warningsForParts(names, [
+      ["Chart text may require manual translation review.", (name) => name.startsWith("xl/charts/")],
+      ["Pivot table labels may require manual translation review.", (name) => name.startsWith("xl/pivotTables/") || name.startsWith("xl/pivotCache/")],
+      ["Comments may require manual translation review.", (name) => name.startsWith("xl/comments")],
+      ["Drawing text may require manual translation review.", (name) => name.startsWith("xl/drawings/")]
+    ])
+    if (formulaInCopy) warnings.unshift("Formula cells were copied as-is; cross-sheet references on the translated sheets still point at the original sheets and may need review.")
   } catch (error) {
     warnings = ["Translated spreadsheet was created but its formatting warnings could not be inspected."]
   }
@@ -556,18 +927,171 @@ function renderPagePng(pdfium, document, pageIndex, pageWidth, pageHeight) {
   }
 }
 
+function ensurePdfPageRendered(pdfium, document, page) {
+  if (!page.renderedImageBuffer) {
+    page.renderedImageBuffer = renderPagePng(pdfium, document, page.pageIndex, page.width, page.height)
+    page.renderedImage = PNG.sync.read(page.renderedImageBuffer)
+  }
+  return page.renderedImageBuffer
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function pdfBlockToImageRect(page, block, padding = 0) {
+  const image = page.renderedImage
+  if (!image?.width || !image?.height || !page.width || !page.height) return null
+  const scaleX = image.width / page.width
+  const scaleY = image.height / page.height
+  return {
+    left: clamp(Math.floor((block.x - padding) * scaleX), 0, image.width),
+    right: clamp(Math.ceil((block.x + block.width + padding) * scaleX), 0, image.width),
+    top: clamp(Math.floor((page.height - block.y - block.height - padding) * scaleY), 0, image.height),
+    bottom: clamp(Math.ceil((page.height - block.y + padding) * scaleY), 0, image.height)
+  }
+}
+
+function pointInImageRects(x, y, rects) {
+  return rects.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+}
+
+function pdfTextRegions(page) {
+  return page.blocks.filter((block) => !block.vision).map((block) => ({
+    x: block.x / page.width,
+    y: (page.height - block.y - block.height) / page.height,
+    width: block.width / page.width,
+    height: block.height / page.height
+  }))
+}
+
+function pdfPageVisualContentRatio(page) {
+  const image = page.renderedImage
+  if (!image?.data || !page.width || !page.height) return 0
+  const textRects = page.blocks
+    .filter((block) => !block.vision)
+    .map((block) => pdfBlockToImageRect(page, block, Math.max(3, block.fontSize * 0.35)))
+    .filter(Boolean)
+  const step = Math.max(1, Math.floor(Math.max(image.width, image.height) / 220))
+  let sampled = 0
+  let visual = 0
+  for (let y = 0; y < image.height; y += step) {
+    for (let x = 0; x < image.width; x += step) {
+      if (pointInImageRects(x, y, textRects)) continue
+      sampled += 1
+      const offset = (y * image.width + x) * 4
+      const red = image.data[offset]
+      const green = image.data[offset + 1]
+      const blue = image.data[offset + 2]
+      const alpha = image.data[offset + 3]
+      if (alpha < 10) continue
+      const brightness = (red + green + blue) / 3
+      const spread = Math.max(red, green, blue) - Math.min(red, green, blue)
+      if (brightness < 245 || spread > 24) visual += 1
+    }
+  }
+  return sampled ? visual / sampled : 0
+}
+
+function normalizePdfBlockKind(block) {
+  const raw = String(block?.kind || block?.type || block?.category || "").trim().toLowerCase().replaceAll("_", "-")
+  if (PDF_BLOCK_KINDS.has(raw)) return raw
+  const text = String(block?.text || "")
+  if (text.length > 90 || Number(block?.height) > 70) return "paragraph"
+  if (Number(block?.width) > 140 && Number(block?.height) > 32) return "callout"
+  return "shape-label"
+}
+
+function normalizeVisionBlock(block, page, index) {
+  const x = Number(block.x) * page.width
+  const y = page.height - (Number(block.y) + Number(block.height)) * page.height
+  const width = Number(block.width) * page.width
+  const height = Number(block.height) * page.height
+  if (![x, y, width, height].every(Number.isFinite)) return null
+  const left = clamp(x, 0, page.width)
+  const bottom = clamp(y, 0, page.height)
+  const right = clamp(x + width, 0, page.width)
+  const top = clamp(y + height, 0, page.height)
+  if (right - left < 2 || top - bottom < 2) return null
+  const kind = normalizePdfBlockKind({ ...block, width: right - left, height: top - bottom })
+  let backgroundColor
+  if (block.backgroundColor && ["r", "g", "b"].every((channel) => Number.isFinite(Number(block.backgroundColor[channel])))) {
+    const color = {
+      r: Number(block.backgroundColor.r),
+      g: Number(block.backgroundColor.g),
+      b: Number(block.backgroundColor.b)
+    }
+    backgroundColor = Math.max(color.r, color.g, color.b) > 1
+      ? pdfColorFrom255(clamp(color.r, 0, 255), clamp(color.g, 0, 255), clamp(color.b, 0, 255))
+      : { r: clamp(color.r, 0, 1), g: clamp(color.g, 0, 1), b: clamp(color.b, 0, 1) }
+  }
+  return {
+    id: `pdf:${page.pageIndex}:vision:${index}`,
+    kind,
+    pageIndex: page.pageIndex,
+    text: String(block.text || ""),
+    x: left,
+    y: bottom,
+    width: right - left,
+    height: top - bottom,
+    fontSize: Math.max(PDF_VISION_MIN_FONT_SIZE, Math.min(PDF_VISION_MAX_FONT_SIZE, (top - bottom) * 0.52)),
+    ...(backgroundColor ? { backgroundColor } : {}),
+    vision: true
+  }
+}
+
+function normalizedBlockText(block) {
+  return String(block?.text || "").replace(/\s+/g, " ").trim().toLowerCase()
+}
+
+function blockOverlapRatio(left, right) {
+  const x1 = Math.max(left.x, right.x)
+  const y1 = Math.max(left.y, right.y)
+  const x2 = Math.min(left.x + left.width, right.x + right.width)
+  const y2 = Math.min(left.y + left.height, right.y + right.height)
+  const overlap = Math.max(0, x2 - x1) * Math.max(0, y2 - y1)
+  const minArea = Math.min(left.width * left.height, right.width * right.height)
+  return minArea > 0 ? overlap / minArea : 0
+}
+
+function blockOverlapFraction(block, candidate) {
+  const x1 = Math.max(block.x, candidate.x)
+  const y1 = Math.max(block.y, candidate.y)
+  const x2 = Math.min(block.x + block.width, candidate.x + candidate.width)
+  const y2 = Math.min(block.y + block.height, candidate.y + candidate.height)
+  const overlap = Math.max(0, x2 - x1) * Math.max(0, y2 - y1)
+  const area = block.width * block.height
+  return area > 0 ? overlap / area : 0
+}
+
+function dedupePdfBlocks(blocks) {
+  const kept = []
+  for (const block of blocks) {
+    const text = normalizedBlockText(block)
+    if (!text) continue
+    const duplicate = kept.some((candidate) => normalizedBlockText(candidate) === text && blockOverlapRatio(candidate, block) > 0.82)
+    if (!duplicate) kept.push(block)
+  }
+  return kept
+}
+
+function suppressVisionBlockOverlaps(blocks, textBlocks) {
+  return dedupePdfBlocks(blocks).filter((block) => !textBlocks.some((textBlock) => blockOverlapFraction(block, textBlock) > 0.35))
+}
+
 async function visionBlocks(pdfium, document, page, args, options) {
-  if (options.visionBlocks) return options.visionBlocks(page, args)
-  const image = renderPagePng(pdfium, document, page.pageIndex, page.width, page.height)
+  const image = ensurePdfPageRendered(pdfium, document, page)
+  page.existingTextRegions = pdfTextRegions(page)
+  if (options.visionBlocks) return dedupePdfBlocks(options.visionBlocks(page, args))
   const messages = [
     {
       role: "system",
-      content: "Identify visible text regions in this scanned document page and translate them. Return JSON only as {\"blocks\":[{\"text\":\"translated text\",\"x\":0.0,\"y\":0.0,\"width\":0.0,\"height\":0.0}]}. Coordinates are normalized 0..1 with a top-left origin. Do not return commentary."
+      content: "Identify logical visible text regions in this document page image and translate them. Return JSON only as {\"blocks\":[{\"text\":\"translated text\",\"x\":0.0,\"y\":0.0,\"width\":0.0,\"height\":0.0,\"kind\":\"shape-label\"}]}. Coordinates are normalized 0..1 with a top-left origin. Use kind as one of shape-label, callout, paragraph, connector-label. Prefer one block per logical label, callout, paragraph, table cell, or connector label rather than one block per glyph line. Ignore logos, page numbers, copyright notices, decorative branding, and text already covered by existingTextRegions. Do not return commentary."
     },
     {
       role: "user",
       content: [
-        { type: "text", text: `Translate the visible document text to ${args.targetLanguage}. Source language: ${args.sourceLanguage || "auto-detect"}.` },
+        { type: "text", text: `Translate the visible document text to ${args.targetLanguage}. Source language: ${args.sourceLanguage || "auto-detect"}. Only return text regions not covered by these existing normalized text-layer regions: ${JSON.stringify(page.existingTextRegions)}.` },
         { type: "image_url", image_url: { url: `data:image/png;base64,${image.toString("base64")}` } }
       ]
     }
@@ -585,33 +1109,142 @@ async function visionBlocks(pdfium, document, page, args, options) {
     }
   }
   if (!blocks) throw new Error(`Translation gateway returned invalid vision JSON after 3 attempts: ${lastError.message}`)
-  return blocks.map((block, index) => ({
-    id: `pdf:${page.pageIndex}:vision:${index}`,
-    pageIndex: page.pageIndex,
-    text: String(block.text || ""),
-    x: Number(block.x) * page.width,
-    y: page.height - (Number(block.y) + Number(block.height)) * page.height,
-    width: Number(block.width) * page.width,
-    height: Number(block.height) * page.height,
-    fontSize: Math.max(6, Number(block.height) * page.height * 0.65)
-  })).filter((block) => block.text.trim() && [block.x, block.y, block.width, block.height].every(Number.isFinite))
+  return dedupePdfBlocks(blocks.map((block, index) => normalizeVisionBlock(block, page, index)).filter(Boolean))
 }
 
 function wrapText(text, font, size, maxWidth) {
   const lines = []
   let current = ""
+  const pushLine = (line) => {
+    if (line) lines.push(line)
+  }
+  const splitLongWord = (word) => {
+    let chunk = ""
+    for (const char of [...word]) {
+      const next = `${chunk}${char}`
+      if (!chunk || font.widthOfTextAtSize(next, size) <= maxWidth) {
+        chunk = next
+      } else {
+        pushLine(chunk)
+        chunk = char
+      }
+    }
+    return chunk
+  }
   const pushWord = (word) => {
     const next = current ? `${current} ${word}` : word
     if (!current || font.widthOfTextAtSize(next, size) <= maxWidth) {
       current = next
       return
     }
-    lines.push(current)
-    current = word
+    pushLine(current)
+    current = font.widthOfTextAtSize(word, size) > maxWidth ? splitLongWord(word) : word
   }
   for (const word of String(text).split(/\s+/).filter(Boolean)) pushWord(word)
-  if (current) lines.push(current)
+  pushLine(current)
   return lines
+}
+
+function pdfOverlayPadding(block, size, vision) {
+  const maxPadding = Math.max(1, Math.min(block.width, block.height) * 0.12)
+  const preferred = vision ? size * 0.28 : 1.5
+  return Math.max(1, Math.min(maxPadding, preferred))
+}
+
+function pdfOverlayLineHeight(kind) {
+  return kind === "shape-label" || kind === "connector-label" ? 1.08 : 1.12
+}
+
+function fitPdfOverlayText(font, text, block, options = {}) {
+  const kind = normalizePdfBlockKind(block)
+  const vision = options.vision === true || block.vision === true
+  const minSize = vision ? PDF_VISION_MIN_FONT_SIZE : PDF_MIN_FONT_SIZE
+  const maxSize = vision ? PDF_VISION_MAX_FONT_SIZE : Number.POSITIVE_INFINITY
+  let size = Math.min(
+    Math.max(minSize, block.fontSize || block.height * 0.55),
+    Math.max(minSize, block.height * 0.76),
+    maxSize
+  )
+  let padding = pdfOverlayPadding(block, size, vision)
+  let availableWidth = Math.max(1, block.width - padding * 2)
+  let availableHeight = Math.max(1, block.height - padding * 2)
+  const lineHeight = pdfOverlayLineHeight(kind)
+  let lines = wrapText(text, font, size, availableWidth)
+  const totalHeight = () => lines.length ? size + (lines.length - 1) * size * lineHeight : 0
+  const overflows = () => totalHeight() > availableHeight || lines.some((line) => font.widthOfTextAtSize(line, size) > availableWidth)
+  while (size > minSize && overflows()) {
+    size = Math.max(minSize, size - 0.5)
+    padding = pdfOverlayPadding(block, size, vision)
+    availableWidth = Math.max(1, block.width - padding * 2)
+    availableHeight = Math.max(1, block.height - padding * 2)
+    lines = wrapText(text, font, size, availableWidth)
+  }
+  const textAlign = kind === "shape-label" || kind === "connector-label" ? "center" : "left"
+  const verticalAlign = kind === "shape-label" || kind === "connector-label" ? "middle" : "top"
+  const lineAdvance = size * lineHeight
+  const groupHeight = totalHeight()
+  const areaBottom = block.y + padding
+  const areaTop = block.y + block.height - padding
+  const firstY = verticalAlign === "middle"
+    ? Math.min(areaTop - size, areaBottom + (availableHeight + groupHeight) / 2 - size)
+    : areaTop - size
+  return {
+    availableWidth,
+    firstY,
+    kind,
+    lineAdvance,
+    lines,
+    overflow: overflows(),
+    padding,
+    size,
+    textAlign,
+    verticalAlign,
+    xForLine(line) {
+      const left = block.x + padding
+      if (textAlign !== "center") return left
+      return left + Math.max(0, (availableWidth - font.widthOfTextAtSize(line, size)) / 2)
+    }
+  }
+}
+
+function defaultPdfBackgroundColor() {
+  return { r: 1, g: 1, b: 1 }
+}
+
+function pdfColorFrom255(red, green, blue) {
+  return { r: red / 255, g: green / 255, b: blue / 255 }
+}
+
+function samplePdfBlockBackground(renderedImage, page, block) {
+  if (!renderedImage?.data || !page?.width || !page?.height) return defaultPdfBackgroundColor()
+  const scaleX = renderedImage.width / page.width
+  const scaleY = renderedImage.height / page.height
+  const left = clamp(Math.floor(block.x * scaleX), 0, renderedImage.width - 1)
+  const right = clamp(Math.ceil((block.x + block.width) * scaleX), left + 1, renderedImage.width)
+  const top = clamp(Math.floor((page.height - block.y - block.height) * scaleY), 0, renderedImage.height - 1)
+  const bottom = clamp(Math.ceil((page.height - block.y) * scaleY), top + 1, renderedImage.height)
+  const step = Math.max(1, Math.floor(Math.max(right - left, bottom - top) / 60))
+  const bins = new Map()
+  for (let y = top; y < bottom; y += step) {
+    for (let x = left; x < right; x += step) {
+      const offset = (y * renderedImage.width + x) * 4
+      const red = renderedImage.data[offset]
+      const green = renderedImage.data[offset + 1]
+      const blue = renderedImage.data[offset + 2]
+      const alpha = renderedImage.data[offset + 3]
+      const brightness = (red + green + blue) / 3
+      if (alpha < 10 || brightness < 130) continue
+      const key = `${Math.round(red / 16)},${Math.round(green / 16)},${Math.round(blue / 16)}`
+      bins.set(key, (bins.get(key) || 0) + 1)
+    }
+  }
+  let best = null
+  for (const entry of bins.entries()) {
+    if (!best || entry[1] > best[1]) best = entry
+  }
+  if (!best || best[1] < 3) return defaultPdfBackgroundColor()
+  const [red, green, blue] = best[0].split(",").map((value) => clamp(Number(value) * 16, 0, 255))
+  return pdfColorFrom255(red, green, blue)
 }
 
 function shouldTranslatePdfBlock(block) {
@@ -630,33 +1263,32 @@ function normalizePdfOverlayText(sourceText, translatedText) {
   return `${sourceBullet[1]}${sourceBullet[2]}${gap}${stripped}`
 }
 
-function drawOverlay(page, font, block, text, warnings) {
-  const padding = 1.5
-  const availableWidth = Math.max(1, block.width)
-  const availableHeight = Math.max(1, block.height)
-  let size = Math.min(Math.max(PDF_MIN_FONT_SIZE, block.fontSize), Math.max(PDF_MIN_FONT_SIZE, availableHeight * 0.76))
-  let lines = wrapText(text, font, size, availableWidth)
-  const overflows = () => lines.length * size * 1.08 > availableHeight || lines.some((line) => font.widthOfTextAtSize(line, size) > availableWidth)
-  while (size > PDF_MIN_FONT_SIZE && overflows()) {
-    size -= 0.5
-    lines = wrapText(text, font, size, availableWidth)
-  }
-  if (overflows()) {
+function drawOverlay(page, font, block, text, warnings, options = {}) {
+  const fit = fitPdfOverlayText(font, text, block, { vision: block.vision === true })
+  if (fit.overflow) {
     warnings.push(`Translated text may overflow on page ${block.pageIndex + 1}.`)
   }
+  const sourcePage = options.sourcePage
+  const background = block.backgroundColor || samplePdfBlockBackground(sourcePage?.renderedImage, sourcePage, block)
+  const erasePadding = Math.max(1, Math.min(fit.padding, 2.5))
+  const rectX = Math.max(0, block.x - erasePadding)
+  const rectY = Math.max(0, block.y - erasePadding)
+  const rectRight = sourcePage?.width ? Math.min(sourcePage.width, block.x + block.width + erasePadding) : block.x + block.width + erasePadding
+  const rectTop = sourcePage?.height ? Math.min(sourcePage.height, block.y + block.height + erasePadding) : block.y + block.height + erasePadding
   page.drawRectangle({
-    x: block.x - padding,
-    y: block.y - padding,
-    width: block.width + padding * 2,
-    height: block.height + padding * 2,
-    color: rgb(1, 1, 1),
+    x: rectX,
+    y: rectY,
+    width: Math.max(1, rectRight - rectX),
+    height: Math.max(1, rectTop - rectY),
+    color: rgb(background.r, background.g, background.b),
     opacity: PDF_OVERLAY_OPACITY
   })
-  let y = block.y + block.height - size
-  for (const line of lines) {
-    if (y < block.y - size) break
-    page.drawText(line, { x: block.x, y, size, font, color: rgb(0, 0, 0) })
-    y -= size * 1.15
+  let y = fit.firstY
+  const minY = block.y + fit.padding - fit.size * 0.2
+  for (const line of fit.lines) {
+    if (y < minY) break
+    page.drawText(line, { x: fit.xForLine(line), y, size: fit.size, font, color: rgb(0, 0, 0) })
+    y -= fit.lineAdvance
   }
 }
 
@@ -670,15 +1302,24 @@ async function translatePdf(inputPath, outputPath, args, options) {
       pages.push({ pageIndex, ...extractPageBlocks(pdfium, document, pageIndex) })
     }
     for (const page of pages) {
-      if (page.blocks.map((block) => block.text).join("").trim().length >= 5) continue
-      page.blocks = await visionBlocks(pdfium, document, page, args, options)
-      page.vision = true
-      warnings.push(`Page ${page.pageIndex + 1} used vision fallback because no reliable PDF text layer was found.`)
+      ensurePdfPageRendered(pdfium, document, page)
+      const sourceBlocks = page.blocks
+      const hasReliableTextLayer = sourceBlocks.map((block) => block.text).join("").trim().length >= 5
+      const needsVisualOcr = !hasReliableTextLayer || pdfPageVisualContentRatio(page) >= PDF_VISUAL_OCR_MIN_RATIO
+      if (!needsVisualOcr) continue
+      const visualBlocks = suppressVisionBlockOverlaps(await visionBlocks(pdfium, document, page, args, options), sourceBlocks)
+      if (hasReliableTextLayer) {
+        page.blocks = [...sourceBlocks, ...visualBlocks]
+      } else {
+        page.blocks = visualBlocks
+        page.vision = true
+        warnings.push(`Page ${page.pageIndex + 1} used vision fallback because no reliable PDF text layer was found.`)
+      }
     }
     return pages
   })
 
-  const textBlocks = extracted.flatMap((page) => page.vision ? [] : page.blocks).filter(shouldTranslatePdfBlock)
+  const textBlocks = extracted.flatMap((page) => page.blocks.filter((block) => !block.vision)).filter(shouldTranslatePdfBlock)
   const translated = await translateSegments(
     textBlocks.map((block) => ({ id: block.id, text: block.text })),
     args.targetLanguage,
@@ -696,9 +1337,9 @@ async function translatePdf(inputPath, outputPath, args, options) {
   const pages = document.getPages()
   for (const sourcePage of extracted) {
     for (const block of sourcePage.blocks) {
-      if (!sourcePage.vision && !translated.has(block.id)) continue
-      const text = sourcePage.vision ? block.text : normalizePdfOverlayText(block.text, translated.get(block.id))
-      drawOverlay(pages[sourcePage.pageIndex], font, block, text, warnings)
+      if (!block.vision && !translated.has(block.id)) continue
+      const text = block.vision ? block.text : normalizePdfOverlayText(block.text, translated.get(block.id))
+      drawOverlay(pages[sourcePage.pageIndex], font, block, text, warnings, { sourcePage })
     }
   }
   fs.writeFileSync(outputPath, await document.save())
@@ -707,25 +1348,36 @@ async function translatePdf(inputPath, outputPath, args, options) {
   return { warnings: [...new Set(warnings)] }
 }
 
-function artifact(outputPath, warnings) {
+function artifact(outputPath, warnings, options = {}) {
   const mimeTypes = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".pdf": "application/pdf",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
   }
+  const lead = options.backupPath
+    ? `Translated the original workbook in place at ${outputPath} (a backup was saved at ${options.backupPath})`
+    : `Translated document created at ${outputPath}`
   return {
-    output: `Translated document created at ${outputPath}${warnings.length ? `\nWarnings:\n- ${warnings.join("\n- ")}` : ""}`,
+    output: `${lead}${warnings.length ? `\nWarnings:\n- ${warnings.join("\n- ")}` : ""}`,
     metadata: {
       artifacts: [{
         path: outputPath,
         filename: path.basename(outputPath),
         mime: mimeTypes[path.extname(outputPath).toLowerCase()]
       }],
+      ...(options.backupPath ? { backupPath: options.backupPath } : {}),
       quality: warnings.length ? "warning" : "verified",
       warnings
     }
   }
+}
+
+function backupPathFor(inputPath) {
+  const candidate = `${inputPath}.bak`
+  if (!fs.existsSync(candidate)) return candidate
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+  return `${inputPath}.${stamp}.bak`
 }
 
 async function translateDocument(args, context = {}, options = {}) {
@@ -735,8 +1387,17 @@ async function translateDocument(args, context = {}, options = {}) {
   if (!fs.existsSync(inputPath) || !fs.statSync(inputPath).isFile()) throw new Error(`Input file does not exist: ${inputPath}`)
   const extension = path.extname(inputPath).toLowerCase()
   if (![".docx", ".pdf", ".pptx", ".xlsx"].includes(extension)) throw new Error("translate_document supports only .docx, .pdf, .pptx and .xlsx files.")
-  const outputPath = outputPathFor(inputPath, context.directory || process.cwd(), targetLanguage)
+  const inplace = extension === ".xlsx" && args.mode === "inplace"
   const normalized = { ...args, inputPath, targetLanguage }
+
+  if (inplace) {
+    const backupPath = backupPathFor(inputPath)
+    fs.copyFileSync(inputPath, backupPath)
+    const result = await translateXlsxInplaceBilingual(inputPath, inputPath, normalized, options)
+    return artifact(inputPath, result.warnings, { backupPath })
+  }
+
+  const outputPath = outputPathFor(inputPath, context.directory || process.cwd(), targetLanguage)
   const translators = {
     ".docx": translateDocx,
     ".pdf": translatePdf,
@@ -749,12 +1410,21 @@ async function translateDocument(args, context = {}, options = {}) {
 
 module.exports = {
   collectDocxSegments,
+  dedupePdfBlocks,
+  fitPdfOverlayText,
   gatewayJson,
+  inlineSharedStringsInWorksheet,
   normalizePdfOverlayText,
+  normalizePdfBlockKind,
+  normalizeVisionBlock,
   outputPathFor,
   parseJsonContent,
+  pdfPageVisualContentRatio,
+  samplePdfBlockBackground,
   schema,
   shouldTranslatePdfBlock,
+  suppressVisionBlockOverlaps,
   translateDocument,
-  translateSegments
+  translateSegments,
+  uniqueSheetName
 }

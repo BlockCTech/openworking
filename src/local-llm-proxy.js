@@ -79,7 +79,7 @@ function forceStreamingChatBody(req, body) {
   try {
     const payload = JSON.parse(body.toString("utf8"))
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return body
-    if (payload.stream === true) return body
+    if (Object.hasOwn(payload, "stream")) return body
     return Buffer.from(JSON.stringify({ ...payload, stream: true }))
   } catch {
     return body

@@ -10,7 +10,7 @@ Use the bundled `translate_document` tool for document translation. Do not write
 
 For `.pdf` and `.docx`, the tool prioritizes complete segment coverage over speed. It may split large translation batches and retry when the gateway returns malformed JSON or omits segment IDs, which can use more gateway calls and tokens.
 
-PDF translation is a best-effort visual overlay. For PDFs exported from PowerPoint or other Office apps, prefer translating the original `.pptx` or `.docx` file when the user needs strong table, slide, font, or bullet fidelity.
+PDF translation is a best-effort visual overlay. It translates PDF text layers and may also use vision OCR for scanned pages or large raster diagrams/screenshots on mixed text+image pages. For PDFs exported from PowerPoint or other Office apps, prefer translating the original `.pptx` or `.docx` file when the user needs strong table, slide, font, or bullet fidelity.
 
 ## Workflow
 

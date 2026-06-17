@@ -69,7 +69,7 @@ test("local proxy rejects invalid local tokens without exchanging a Gateway toke
   }
 })
 
-test("local proxy replaces caller auth, preserves streaming, and retries Gateway 401 once", async () => {
+test("local proxy replaces caller auth, defaults streaming, and retries Gateway 401 once", async () => {
   const gatewayRequests = []
   const gateway = http.createServer((req, res) => {
     let raw = ""
@@ -106,7 +106,7 @@ test("local proxy replaces caller auth, preserves streaming, and retries Gateway
         Authorization: `Bearer ${proxy.env().TECHTUS_LOCAL_PROXY_TOKEN}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ model: "gemma/model", stream: false })
+      body: JSON.stringify({ model: "gemma/model" })
     })
 
     assert.equal(response.statusCode, 200)
@@ -115,6 +115,49 @@ test("local proxy replaces caller auth, preserves streaming, and retries Gateway
     assert.deepEqual(gatewayRequests.map((item) => item.auth), ["Bearer gateway-1", "Bearer gateway-2"])
     assert.deepEqual(gatewayRequests.map((item) => item.url), ["/api/v1/chat/completions", "/api/v1/chat/completions"])
     assert.deepEqual(JSON.parse(gatewayRequests[1].body), { model: "gemma/model", stream: true })
+  } finally {
+    await proxy.stop()
+    await close(gateway)
+  }
+})
+
+test("local proxy preserves explicit stream flags", async () => {
+  const gatewayRequests = []
+  const gateway = http.createServer((req, res) => {
+    let raw = ""
+    req.setEncoding("utf8")
+    req.on("data", (chunk) => {
+      raw += chunk
+    })
+    req.on("end", () => {
+      gatewayRequests.push(JSON.parse(raw))
+      res.writeHead(200, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ ok: true }))
+    })
+  })
+  const gatewayPort = await listen(gateway)
+  const proxy = new LocalLlmProxy({
+    gatewayBaseURL: `http://127.0.0.1:${gatewayPort}/api/v1`,
+    getGatewayToken: async () => ({ accessToken: "gateway", expiresAt: Date.now() + 600000 })
+  })
+  await proxy.start()
+  try {
+    for (const stream of [false, true]) {
+      const response = await request({
+        url: `${proxy.baseURL}/chat/completions`,
+        headers: {
+          Authorization: `Bearer ${proxy.env().TECHTUS_LOCAL_PROXY_TOKEN}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ model: "gemma/model", stream })
+      })
+      assert.equal(response.statusCode, 200)
+    }
+
+    assert.deepEqual(gatewayRequests, [
+      { model: "gemma/model", stream: false },
+      { model: "gemma/model", stream: true }
+    ])
   } finally {
     await proxy.stop()
     await close(gateway)
