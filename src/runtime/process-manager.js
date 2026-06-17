@@ -1054,7 +1054,13 @@ class RuntimeProcessManager {
         field: p.field,
         deltaLen: typeof p.delta === "string" ? p.delta.length : undefined,
         deltaPreview: typeof p.delta === "string" ? p.delta.slice(0, 24) : undefined,
-        textLen: typeof p.part?.text === "string" ? p.part.text.length : undefined
+        textLen: typeof p.part?.text === "string" ? p.part.text.length : undefined,
+        textFull: typeof p.part?.text === "string" && p.part.text.length <= 200 ? p.part.text : undefined,
+        textTail: typeof p.part?.text === "string" && p.part.text.length > 200 ? p.part.text.slice(-60) : undefined,
+        deltaFull: typeof p.delta === "string" ? p.delta : undefined,
+        partKeys: p.part && p.part.type && !["text", "tool", "file", "reasoning", "error"].includes(p.part.type)
+          ? JSON.stringify(p.part).slice(0, 300)
+          : undefined
       }
       process.stderr.write(`[OW-EVENT] ${JSON.stringify(summary)}\n`)
     }
