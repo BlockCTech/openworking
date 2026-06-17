@@ -111,6 +111,12 @@ const state = {
   popover: null,
   sessionMenu: null,          // sessionId đang mở menu, hoặc null
   sessionDeleteTarget: null,  // { id, title } của session chờ xác nhận xóa trong modal
+  sessionRenameTarget: null,  // { sessionId, projectId, title, label } của session đang đổi tên
+  sessionRenameDraft: "",
+  sessionRenameError: null,
+  sessionRenaming: false,
+  sessionRenameAutoFocus: false,
+  sessionRenameFocusId: null,
   sidebarCollapsed: false,
   rightSidebarOpen: false,
   fileTreeProjectId: null,
@@ -302,6 +308,10 @@ function relativeTime(value) {
 
 function sessionUpdatedAt(session) {
   return session.time?.updated || session.time?.created || session.updatedAt || session.createdAt
+}
+
+function sessionDisplayTitle(session) {
+  return session?.title || session?.label || "Untitled session"
 }
 
 function hydrateActiveThread(messages, status) {
@@ -670,6 +680,7 @@ function render({ threadScroll = "preserve" } = {}) {
       ${renderForceUpdate()}
       ${renderSkillUploadModal()}
       ${renderDeleteSessionModal()}
+      ${renderRenameSessionModal()}
       <div id="toastHost"></div>
     </div>
   `
@@ -743,6 +754,39 @@ function renderDeleteSessionModal() {
         <div class="confirm-actions">
           <button class="secondary-btn" data-action="cancelDeleteSession">Cancel</button>
           <button class="danger-btn" data-action="confirmDeleteSession">Delete</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderRenameSessionModal() {
+  const target = state.sessionRenameTarget
+  if (!target) return ""
+  const disableActions = state.sessionRenaming ? " disabled" : ""
+  const currentLabel = sessionDisplayTitle(target)
+  return `
+    <div class="update-backdrop" ${state.sessionRenaming ? "" : 'data-action="cancelRenameSession"'}>
+      <div class="confirm-modal rename-modal" role="dialog" aria-modal="true" aria-labelledby="renameSessionTitle" data-stop-click>
+        <div class="confirm-title" id="renameSessionTitle">Rename session</div>
+        <div class="rename-modal-body">
+          <p>Current title: “${escapeHtml(currentLabel)}”</p>
+          <label for="renameSessionInput">
+            Session title
+            <input
+              id="renameSessionInput"
+              type="text"
+              value="${escapeHtml(state.sessionRenameDraft)}"
+              placeholder="Untitled session"
+              data-session-rename-input
+              ${state.sessionRenaming ? "disabled" : ""}
+            >
+          </label>
+          <div class="field-error">${state.sessionRenameError ? escapeHtml(state.sessionRenameError) : ""}</div>
+        </div>
+        <div class="confirm-actions">
+          <button class="secondary-btn${disableActions}" data-action="cancelRenameSession">Cancel</button>
+          <button class="primary-btn${disableActions}" data-action="confirmRenameSession">Rename</button>
         </div>
       </div>
     </div>
@@ -899,13 +943,16 @@ function renderProjectGroup(project) {
             <div class="session-row-wrap ${session.id === state.activeSessionId ? "active" : ""}" data-session-row="${escapeHtml(session.id)}">
               <button class="session-row" data-session-id="${escapeHtml(session.id)}" data-project-id="${escapeHtml(project.id)}">
                 <span class="session-busy-dot ${sessionBusy(session.id) ? "on" : ""}" title="Running"></span>
-                <span class="stitle">${escapeHtml(session.title || "Untitled session")}</span>
+                <span class="stitle">${escapeHtml(sessionDisplayTitle(session))}</span>
                 <span class="stime">${escapeHtml(relativeTime(sessionUpdatedAt(session)))}</span>
               </button>
               <button class="session-kebab" data-session-menu="${escapeHtml(session.id)}" title="Options">${icon("dots")}</button>
               ${state.sessionMenu === session.id ? `
                 <div class="pop session-pop">
-                  <button class="pop-item danger" data-session-delete="${escapeHtml(session.id)}" data-session-title="${escapeHtml(session.title || "Untitled session")}">
+                  <button class="pop-item" data-session-rename="${escapeHtml(session.id)}" data-session-project="${escapeHtml(project.id)}" data-session-title="${escapeHtml(session.title || "")}" data-session-label="${escapeHtml(sessionDisplayTitle(session))}">
+                    ${icon("edit")}<span>Rename</span>
+                  </button>
+                  <button class="pop-item danger" data-session-delete="${escapeHtml(session.id)}" data-session-title="${escapeHtml(sessionDisplayTitle(session))}">
                     ${icon("trash")}<span>Delete</span>
                   </button>
                 </div>` : ""}
@@ -2029,6 +2076,50 @@ function bindEvents() {
     state.sessionMenu = null
     render()
   }))
+  document.querySelectorAll("[data-session-rename]").forEach((element) => element.addEventListener("click", (event) => {
+    event.stopPropagation()
+    state.sessionRenameTarget = {
+      sessionId: element.dataset.sessionRename,
+      projectId: element.dataset.sessionProject,
+      title: element.dataset.sessionTitle || "",
+      label: element.dataset.sessionLabel || "Untitled session",
+    }
+    state.sessionRenameDraft = element.dataset.sessionTitle || ""
+    state.sessionRenameError = null
+    state.sessionRenaming = false
+    state.sessionRenameAutoFocus = true
+    state.sessionMenu = null
+    render()
+  }))
+  document.querySelectorAll("[data-session-rename-input]").forEach((element) => {
+    element.addEventListener("input", () => {
+      state.sessionRenameDraft = element.value
+      state.sessionRenameError = null
+    })
+    element.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault()
+        confirmRenameSession().catch((error) => showToast(error.message))
+      }
+      if (event.key === "Escape" && !state.sessionRenaming) {
+        event.preventDefault()
+        closeRenameSessionModal()
+      }
+    })
+  })
+  if (state.sessionRenameTarget && state.sessionRenameAutoFocus) {
+    const input = document.querySelector("[data-session-rename-input]")
+    if (input) {
+      input.focus()
+      input.select()
+    }
+    state.sessionRenameAutoFocus = false
+  }
+  if (state.sessionRenameFocusId) {
+    const trigger = [...document.querySelectorAll("[data-session-menu]")].find((element) => element.dataset.sessionMenu === state.sessionRenameFocusId)
+    trigger?.focus()
+    state.sessionRenameFocusId = null
+  }
   document.querySelectorAll("[data-stop-click]").forEach((element) => element.addEventListener("click", (event) => event.stopPropagation()))
   document.querySelectorAll("[data-show-all]").forEach((element) => element.addEventListener("click", () => {
     const id = element.dataset.showAll
@@ -2303,6 +2394,8 @@ async function handleAction(event) {
       render()
       if (target) await deleteSession(target.id)
     }
+    if (action === "cancelRenameSession") closeRenameSessionModal()
+    if (action === "confirmRenameSession") await confirmRenameSession()
     if (action === "toggleDiagnostics") {
       state.diagnosticsOpen = !state.diagnosticsOpen
       render()
@@ -2476,6 +2569,98 @@ async function deleteSession(sessionId) {
   }
   state.sessionMenu = null
   render()
+}
+
+function closeRenameSessionModal({ restoreFocus = true } = {}) {
+  if (restoreFocus && state.sessionRenameTarget?.sessionId) {
+    state.sessionRenameFocusId = state.sessionRenameTarget.sessionId
+  }
+  state.sessionRenameTarget = null
+  state.sessionRenameDraft = ""
+  state.sessionRenameError = null
+  state.sessionRenaming = false
+  state.sessionRenameAutoFocus = false
+  render()
+}
+
+async function runWithRuntimeProject(projectId, work) {
+  const project = state.projects.find((item) => item.id === projectId)
+  if (!project) throw new Error("Could not find that project.")
+
+  const previousRuntimeProjectId = state.runtime?.project?.id || null
+  const previousProject = state.projects.find((item) => item.id === previousRuntimeProjectId) || null
+  const shouldSwitch = previousRuntimeProjectId !== projectId || state.runtime?.status !== "running"
+  const shouldRestore = Boolean(previousProject && previousRuntimeProjectId !== projectId)
+
+  if (shouldSwitch) {
+    state.loading = true
+    render()
+    state.runtime = await window.openworking.runtime.openProject(project)
+    state.commands = await window.openworking.runtime.listCommands().catch(() => [])
+    state.commandMenu = { open: false, query: "", index: 0 }
+  }
+
+  try {
+    return await work()
+  } finally {
+    try {
+      if (shouldRestore && previousProject) {
+        state.runtime = await window.openworking.runtime.openProject(previousProject)
+        state.commands = await window.openworking.runtime.listCommands().catch(() => [])
+        state.commandMenu = { open: false, query: "", index: 0 }
+      }
+    } finally {
+      if (shouldSwitch) {
+        state.loading = false
+        render()
+      }
+    }
+  }
+}
+
+async function confirmRenameSession() {
+  const target = state.sessionRenameTarget
+  if (!target?.sessionId || !target.projectId) {
+    closeRenameSessionModal({ restoreFocus: false })
+    return
+  }
+  const trimmedTitle = state.sessionRenameDraft.trim()
+  if (!trimmedTitle) {
+    state.sessionRenameError = "Session title is required."
+    state.sessionRenameAutoFocus = true
+    render()
+    return
+  }
+  if (trimmedTitle === (target.title || "").trim()) {
+    closeRenameSessionModal()
+    return
+  }
+  if (target.projectId !== state.activeProjectId && threadIsBusy(activeThread())) {
+    state.sessionRenameError = "Finish the active session before renaming from another project."
+    state.sessionRenameAutoFocus = true
+    render()
+    return
+  }
+
+  state.sessionRenaming = true
+  state.sessionRenameError = null
+  render()
+
+  try {
+    await runWithRuntimeProject(target.projectId, async () => {
+      if (state.runtime?.project?.id !== target.projectId || state.runtime?.status !== "running") {
+        throw new Error("Could not open the session workspace.")
+      }
+      await window.openworking.runtime.renameSession({ sessionId: target.sessionId, title: trimmedTitle })
+      state.sessionsByProject[target.projectId] = await window.openworking.runtime.listSessions()
+    })
+    closeRenameSessionModal()
+  } catch (error) {
+    state.sessionRenaming = false
+    state.sessionRenameError = error.message || "Could not rename session."
+    state.sessionRenameAutoFocus = true
+    render()
+  }
 }
 
 async function acceptPlan() {

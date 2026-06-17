@@ -58,6 +58,7 @@ contextBridge.exposeInMainWorld("openworking", {
     listSessions: () => ipcRenderer.invoke("runtime:listSessions"),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     createSession: (payload) => ipcRenderer.invoke("runtime:createSession", payload),
+    renameSession: (payload) => ipcRenderer.invoke("runtime:renameSession", payload),
     sendPrompt: (payload) => ipcRenderer.invoke("runtime:sendPrompt", payload),
     sendCommand: (payload) => ipcRenderer.invoke("runtime:sendCommand", payload),
     abortSession: (payload) => ipcRenderer.invoke("runtime:abortSession", payload),

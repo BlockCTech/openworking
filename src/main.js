@@ -269,6 +269,7 @@ function registerIpc() {
   ipcMain.handle("runtime:listSessions", () => runtimeManager.listSessions())
   ipcMain.handle("runtime:listCommands", () => runtimeManager.listCommands())
   ipcMain.handle("runtime:createSession", (_event, payload) => runtimeManager.createSession(payload))
+  ipcMain.handle("runtime:renameSession", (_event, payload) => runtimeManager.renameSession(payload))
   ipcMain.handle("runtime:sendPrompt", async (_event, payload) => {
     const attachmentIds = Array.isArray(payload?.attachmentIds) ? payload.attachmentIds : []
     const attachments = attachmentRegistry.resolve(attachmentIds)

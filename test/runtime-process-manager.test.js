@@ -653,6 +653,80 @@ test("runtime manager deletes a session through opencode", async () => {
   }
 })
 
+test("runtime manager renames a session through opencode", async () => {
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/session/sess_new" && req.method === "PATCH") {
+      let raw = ""
+      req.on("data", (chunk) => {
+        raw += chunk
+      })
+      req.on("end", () => {
+        captured = {
+          method: req.method,
+          authorization: req.headers.authorization,
+          body: raw ? JSON.parse(raw) : null
+        }
+        res.end(JSON.stringify({ id: "sess_new", title: "Renamed session" }))
+      })
+      return
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = server.address().port
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-rename",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activeSessionId = "sess_new"
+  manager.state.runtime = {
+    serverUrl: `http://127.0.0.1:${port}`,
+    auth: { username: "opencode", password: "pw" }
+  }
+
+  try {
+    assert.deepEqual(await manager.renameSession({ sessionId: "sess_new", title: "  Renamed session  " }), {
+      id: "sess_new",
+      title: "Renamed session"
+    })
+    assert.deepEqual(captured, {
+      method: "PATCH",
+      authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`,
+      body: { title: "Renamed session" }
+    })
+    assert.equal(manager.snapshot().activeSessionId, "sess_new")
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("runtime manager validates session renames before sending a request", async () => {
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-rename-validate",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.runtime = {
+    serverUrl: "http://127.0.0.1:1",
+    auth: { username: "opencode", password: "pw" }
+  }
+
+  await assert.rejects(
+    () => manager.renameSession({ sessionId: "", title: "Renamed session" }),
+    /Select a session before renaming it\./
+  )
+  await assert.rejects(
+    () => manager.renameSession({ sessionId: "sess_new", title: "   " }),
+    /Session title is required\./
+  )
+})
+
 test("runtime manager surfaces delete failures without clearing the active session", async () => {
   const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json")
