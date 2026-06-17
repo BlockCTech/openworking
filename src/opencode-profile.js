@@ -4,6 +4,8 @@ const path = require("node:path")
 const AdmZip = require("adm-zip")
 const { defaultConfigPath, ensureDefaultAgentPrompt, ensureDefaultManagedModelConfig, ensureOpencodeConfig, readOpencodeConfig, writeOpencodeConfig } = require("./opencode-config")
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const MCP_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const MCP_SERVER_TYPES = ["remote", "local"]
 
 const BUILT_IN_SKILLS = [
   { name: "explain-project", description: "Explain the structure and main execution paths of the current project." },
@@ -250,6 +252,126 @@ function listCustomSkills(profile) {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
+function readSkillMarkdown(profile, skillName) {
+  const name = String(skillName || "")
+  assertValidSkillName(name)
+  const skillPath = path.join(profile.profileDir, "skills", name, "SKILL.md")
+  if (!fs.existsSync(skillPath)) throw new Error(`Skill "${name}" has no SKILL.md.`)
+  return { name, content: fs.readFileSync(skillPath, "utf8") }
+}
+
+function uninstallCustomSkill(profile, skillName) {
+  const name = String(skillName || "")
+  assertValidSkillName(name)
+  if (BUILT_IN_SKILLS.some((skill) => skill.name === name)) {
+    throw new Error(`Skill "${name}" is built in and cannot be uninstalled.`)
+  }
+  const targetDir = path.join(profile.profileDir, "skills", name)
+  if (!fs.existsSync(targetDir)) throw new Error(`Skill "${name}" is not installed.`)
+  fs.rmSync(targetDir, { force: true, recursive: true })
+
+  const config = readProfileConfig(profile).config
+  if (config.permission?.skill && name in config.permission.skill) {
+    delete config.permission.skill[name]
+    writeProfileConfig(profile, config)
+  }
+  return { name }
+}
+
+function assertValidMcpName(name) {
+  if (typeof name !== "string" || name.length < 1 || name.length > 64 || !MCP_NAME_PATTERN.test(name)) {
+    throw new Error("MCP server name must use lowercase ASCII letters, digits, and single hyphens only.")
+  }
+}
+
+function mcpServerView(name, server) {
+  const view = { name, type: server.type, enabled: server.enabled !== false }
+  if (server.type === "remote") {
+    view.url = server.url || ""
+    view.headers = server.headers && typeof server.headers === "object" ? { ...server.headers } : {}
+    view.oauth = server.oauth
+  } else {
+    view.command = Array.isArray(server.command) ? [...server.command] : []
+  }
+  return view
+}
+
+function listMcpServers(profile) {
+  const config = readProfileConfig(profile).config
+  return Object.entries(config.mcp || {})
+    .map(([name, server]) => (server && typeof server === "object" ? mcpServerView(name, server) : null))
+    .filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+function normalizeHeaders(headers) {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {}
+  const result = {}
+  for (const [key, value] of Object.entries(headers)) {
+    const trimmedKey = String(key || "").trim()
+    if (trimmedKey) result[trimmedKey] = String(value ?? "")
+  }
+  return result
+}
+
+function buildMcpServer(input) {
+  const type = input?.type
+  if (!MCP_SERVER_TYPES.includes(type)) throw new Error('MCP server type must be "remote" or "local".')
+
+  if (type === "remote") {
+    const url = String(input.url || "").trim()
+    if (!url) throw new Error("Remote MCP server requires a server URL.")
+    const server = { type: "remote", url, enabled: true }
+    const headers = normalizeHeaders(input.headers)
+    if (Object.keys(headers).length) server.headers = headers
+    // The OAuth checkbox is opt-in: when the user leaves it unchecked we explicitly
+    // disable OpenCode's OAuth auto-detection; when checked we omit `oauth` so the
+    // runtime negotiates OAuth on its own.
+    if (input.oauth === false) server.oauth = false
+    return server
+  }
+
+  const command = (Array.isArray(input.command)
+    ? input.command
+    : String(input.command || "").split(/\s+/))
+    .map((part) => String(part).trim())
+    .filter(Boolean)
+  if (!command.length) throw new Error("Local MCP server requires a command.")
+  return { type: "local", command, enabled: true }
+}
+
+function addMcpServer(profile, input) {
+  const name = String(input?.name || "").trim()
+  assertValidMcpName(name)
+  const config = readProfileConfig(profile).config
+  config.mcp ||= {}
+  if (config.mcp[name]) throw new Error(`MCP server "${name}" already exists.`)
+  const server = buildMcpServer(input)
+  config.mcp[name] = server
+  writeProfileConfig(profile, config)
+  return mcpServerView(name, server)
+}
+
+function setMcpServerEnabled(profile, name, enabled) {
+  const serverName = String(name || "")
+  assertValidMcpName(serverName)
+  const config = readProfileConfig(profile).config
+  if (!config.mcp || !config.mcp[serverName]) throw new Error(`MCP server "${serverName}" does not exist.`)
+  config.mcp[serverName].enabled = !!enabled
+  writeProfileConfig(profile, config)
+  return mcpServerView(serverName, config.mcp[serverName])
+}
+
+function removeMcpServer(profile, name) {
+  const serverName = String(name || "")
+  assertValidMcpName(serverName)
+  const config = readProfileConfig(profile).config
+  if (!config.mcp || !config.mcp[serverName]) throw new Error(`MCP server "${serverName}" does not exist.`)
+  delete config.mcp[serverName]
+  writeProfileConfig(profile, config)
+  return { name: serverName }
+}
+
 function syncBuiltInTools(profileDir, sourceDir = bundledOpencodeDir()) {
   const sourceToolsDir = path.join(sourceDir, "tools")
   const toolsDir = path.join(profileDir, "tools")
@@ -354,6 +476,12 @@ module.exports = {
   ensureSkillPermissions,
   installCustomSkillArchive,
   listCustomSkills,
+  readSkillMarkdown,
+  uninstallCustomSkill,
+  addMcpServer,
+  listMcpServers,
+  removeMcpServer,
+  setMcpServerEnabled,
   readProfileConfig,
   syncBuiltInSkills,
   syncBuiltInTools,

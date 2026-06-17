@@ -9,6 +9,12 @@ const {
   ensureOpenworkingProfile,
   installCustomSkillArchive,
   listCustomSkills,
+  readSkillMarkdown,
+  uninstallCustomSkill,
+  addMcpServer,
+  listMcpServers,
+  removeMcpServer,
+  setMcpServerEnabled,
   syncBuiltInSkills,
   syncBuiltInTools,
   writeEditableProfileConfig,
@@ -326,4 +332,132 @@ test("rejects duplicate custom skill archives and preserves custom skills during
 
   syncBuiltInSkills(profile.profileDir)
   assert.equal(fs.existsSync(path.join(profile.skills.skillsDir, "duplicate-skill", "SKILL.md")), true)
+})
+
+test("reads SKILL.md for built-in and custom skills and rejects invalid names", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-skill-read-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const archivePath = createSkillArchive(temp, "readable.zip", {
+    "SKILL.md": "---\nname: readable-skill\ndescription: Readable skill\n---\nBody text here.\n"
+  })
+  installCustomSkillArchive(profile, archivePath)
+
+  const custom = readSkillMarkdown(profile, "readable-skill")
+  assert.equal(custom.name, "readable-skill")
+  assert.equal(custom.content.includes("Body text here."), true)
+
+  const builtIn = readSkillMarkdown(profile, "pdf")
+  assert.equal(builtIn.content.startsWith("---"), true)
+
+  assert.throws(() => readSkillMarkdown(profile, "../escape"), /Skill name must use/)
+  assert.throws(() => readSkillMarkdown(profile, "not-installed"), /no SKILL\.md/)
+})
+
+test("uninstalls custom skills and refuses to remove built-ins", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-skill-uninstall-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const archivePath = createSkillArchive(temp, "removable.zip", {
+    "SKILL.md": "---\nname: removable-skill\ndescription: Removable skill\n---\n"
+  })
+  installCustomSkillArchive(profile, archivePath)
+  assert.equal(JSON.parse(fs.readFileSync(profile.configPath, "utf8")).permission.skill["removable-skill"], "allow")
+
+  const result = uninstallCustomSkill(profile, "removable-skill")
+  assert.equal(result.name, "removable-skill")
+  assert.equal(fs.existsSync(path.join(profile.skills.skillsDir, "removable-skill")), false)
+  assert.equal("removable-skill" in (JSON.parse(fs.readFileSync(profile.configPath, "utf8")).permission?.skill || {}), false)
+
+  assert.throws(() => uninstallCustomSkill(profile, "pdf"), /built in/)
+  assert.throws(() => uninstallCustomSkill(profile, "removable-skill"), /not installed/)
+})
+
+test("adds a remote MCP server and round-trips through listMcpServers", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  const added = addMcpServer(profile, {
+    name: "sentry-mcp",
+    type: "remote",
+    url: "https://mcp.sentry.dev/mcp",
+    oauth: true,
+    headers: { "X-Foo": "bar", "": "ignored" }
+  })
+
+  assert.equal(added.name, "sentry-mcp")
+  assert.equal(added.type, "remote")
+  assert.equal(added.enabled, true)
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.deepEqual(saved.mcp["sentry-mcp"], {
+    type: "remote",
+    url: "https://mcp.sentry.dev/mcp",
+    enabled: true,
+    headers: { "X-Foo": "bar" }
+  })
+  // OAuth checked → `oauth` omitted so the runtime auto-detects.
+  assert.equal("oauth" in saved.mcp["sentry-mcp"], false)
+
+  const listed = listMcpServers(profile)
+  assert.deepEqual(listed.map((server) => server.name), ["sentry-mcp"])
+  assert.deepEqual(listed[0].headers, { "X-Foo": "bar" })
+})
+
+test("disables OAuth auto-detection when the checkbox is unchecked", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  addMcpServer(profile, { name: "no-oauth", type: "remote", url: "https://example.test/mcp", oauth: false })
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(saved.mcp["no-oauth"].oauth, false)
+  assert.equal("headers" in saved.mcp["no-oauth"], false)
+})
+
+test("adds a local MCP server and splits the command into an array", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  const added = addMcpServer(profile, { name: "my-local", type: "local", command: "npx  -y   some-mcp-server" })
+  assert.deepEqual(added.command, ["npx", "-y", "some-mcp-server"])
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.deepEqual(saved.mcp["my-local"], {
+    type: "local",
+    command: ["npx", "-y", "some-mcp-server"],
+    enabled: true
+  })
+})
+
+test("rejects invalid MCP server input", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  assert.throws(() => addMcpServer(profile, { name: "Bad_Name", type: "remote", url: "https://x.test" }), /name must use/)
+  assert.throws(() => addMcpServer(profile, { name: "no-url", type: "remote", url: "  " }), /server URL/)
+  assert.throws(() => addMcpServer(profile, { name: "no-cmd", type: "local", command: "   " }), /requires a command/)
+  assert.throws(() => addMcpServer(profile, { name: "bad-type", type: "websocket", url: "https://x.test" }), /must be "remote" or "local"/)
+
+  addMcpServer(profile, { name: "dupe", type: "remote", url: "https://x.test/mcp" })
+  assert.throws(() => addMcpServer(profile, { name: "dupe", type: "remote", url: "https://y.test/mcp" }), /already exists/)
+})
+
+test("toggles enabled and removes MCP servers", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  addMcpServer(profile, { name: "toggle-me", type: "remote", url: "https://x.test/mcp" })
+
+  setMcpServerEnabled(profile, "toggle-me", false)
+  assert.equal(JSON.parse(fs.readFileSync(profile.configPath, "utf8")).mcp["toggle-me"].enabled, false)
+  assert.equal(listMcpServers(profile)[0].enabled, false)
+
+  setMcpServerEnabled(profile, "toggle-me", true)
+  assert.equal(listMcpServers(profile)[0].enabled, true)
+
+  const result = removeMcpServer(profile, "toggle-me")
+  assert.equal(result.name, "toggle-me")
+  assert.equal("toggle-me" in (JSON.parse(fs.readFileSync(profile.configPath, "utf8")).mcp || {}), false)
+
+  assert.throws(() => setMcpServerEnabled(profile, "toggle-me", false), /does not exist/)
+  assert.throws(() => removeMcpServer(profile, "toggle-me"), /does not exist/)
 })

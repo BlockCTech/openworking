@@ -3,7 +3,7 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { assertTranslationArtifact, assertProjectFile, listProjectDirectory, readProjectFileContent } = require("./artifact-path")
 const { AttachmentRegistry } = require("./attachment-registry")
-const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readProfileConfig, writeEditableProfileConfig } = require("./opencode-profile")
+const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, writeEditableProfileConfig } = require("./opencode-profile")
 const { ProjectRegistry } = require("./project-registry")
 const { RuntimeProcessManager } = require("./runtime/process-manager")
 const { checkDesktopVersion, downloadInstaller, installDmg, versionCheckConfigured } = require("./version-check")
@@ -146,7 +146,8 @@ function registerIpc() {
 
   ipcMain.handle("config:get", () => ({
     ...readProfileConfig(opencodeProfile),
-    customSkills: listCustomSkills(opencodeProfile)
+    customSkills: listCustomSkills(opencodeProfile),
+    mcp: listMcpServers(opencodeProfile)
   }))
   ipcMain.handle("config:save", async (_event, config) => {
     const result = writeEditableProfileConfig(opencodeProfile, config)
@@ -168,6 +169,29 @@ function registerIpc() {
     const installed = installCustomSkillArchive(opencodeProfile, String(filePath || ""))
     await runtimeManager.reload()
     return installed
+  })
+  ipcMain.handle("skills:read", (_event, skillName) => readSkillMarkdown(opencodeProfile, skillName))
+  ipcMain.handle("skills:uninstall", async (_event, skillName) => {
+    const result = uninstallCustomSkill(opencodeProfile, skillName)
+    await runtimeManager.reload()
+    return { ...result, customSkills: listCustomSkills(opencodeProfile) }
+  })
+
+  ipcMain.handle("mcp:list", () => listMcpServers(opencodeProfile))
+  ipcMain.handle("mcp:add", async (_event, server) => {
+    const added = addMcpServer(opencodeProfile, server)
+    await runtimeManager.reload()
+    return { server: added, servers: listMcpServers(opencodeProfile) }
+  })
+  ipcMain.handle("mcp:setEnabled", async (_event, { name, enabled }) => {
+    setMcpServerEnabled(opencodeProfile, name, enabled)
+    await runtimeManager.reload()
+    return { servers: listMcpServers(opencodeProfile) }
+  })
+  ipcMain.handle("mcp:remove", async (_event, name) => {
+    removeMcpServer(opencodeProfile, name)
+    await runtimeManager.reload()
+    return { servers: listMcpServers(opencodeProfile) }
   })
 
   ipcMain.handle("attachments:pick", async () => {

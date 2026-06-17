@@ -15,7 +15,15 @@ contextBridge.exposeInMainWorld("openworking", {
   skills: {
     upload: () => ipcRenderer.invoke("skills:upload"),
     installPath: (filePath) => ipcRenderer.invoke("skills:installPath", filePath),
+    read: (name) => ipcRenderer.invoke("skills:read", name),
+    uninstall: (name) => ipcRenderer.invoke("skills:uninstall", name),
     pathForFile: (file) => webUtils.getPathForFile(file)
+  },
+  mcp: {
+    list: () => ipcRenderer.invoke("mcp:list"),
+    add: (server) => ipcRenderer.invoke("mcp:add", server),
+    setEnabled: (name, enabled) => ipcRenderer.invoke("mcp:setEnabled", { name, enabled }),
+    remove: (name) => ipcRenderer.invoke("mcp:remove", name)
   },
   attachments: {
     pick: () => ipcRenderer.invoke("attachments:pick"),
