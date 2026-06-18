@@ -19,7 +19,7 @@ const BUILT_IN_SKILLS = [
   { name: "skill-creator", description: "Create and validate reusable OpenCode-native skills." },
   { name: "xlsx", description: "Read, create, edit and validate spreadsheet workbooks." },
   { name: "docx", description: "Read, create, edit and visually validate Word documents." },
-  { name: "translate-document", description: "Translate PDF and DOCX files into new layout-preserving document artifacts." },
+  { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
   { name: "webapp-testing", description: "Test local web applications with the project's existing tools or Playwright." }
 ]

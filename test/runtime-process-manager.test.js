@@ -241,7 +241,7 @@ test("prompt parts route an office attachment as a local path instead of a model
   assert.equal(parts.length, 1)
   assert.equal(parts[0].type, "text")
   assert.match(parts[0].text, /Hãy dịch file này sang tiếng Việt/)
-  assert.match(parts[0].text, /gateway accepts text\/images, not raw Office binaries/)
+  assert.match(parts[0].text, /gateway accepts text\/images, not raw document binaries/)
   assert.match(parts[0].text, /call the translate_document tool with the exact local inputPath/)
   assert.match(parts[0].text, /Do not claim an output path unless it is returned in translate_document metadata\.artifacts/)
   assert.match(parts[0].text, /Attached files \(local paths\):/)
@@ -249,6 +249,24 @@ test("prompt parts route an office attachment as a local path instead of a model
   assert.match(parts[0].text, /## XLSX attachment: 事業\.xlsx/)
   assert.match(parts[0].text, /Sheet: QA/)
   assert.match(parts[0].text, /確認事項/)
+})
+
+test("prompt parts route a markdown attachment as a local path instead of a model file part", () => {
+  const parts = buildPromptParts({
+    prompt: "Dịch file này sang tiếng Việt",
+    attachments: [{
+      url: "file:///tmp/template.md",
+      filename: "template.md",
+      mime: "text/markdown"
+    }]
+  })
+
+  assert.equal(parts.some((part) => part.type === "file"), false)
+  assert.equal(parts.length, 1)
+  assert.equal(parts[0].type, "text")
+  assert.match(parts[0].text, /Dịch file này sang tiếng Việt/)
+  assert.match(parts[0].text, /DOCX, Markdown, PDF, PPTX, or XLSX/)
+  assert.match(parts[0].text, /- \/tmp\/template\.md/)
 })
 
 test("prompt parts keep pdf and image attachments as model file parts", () => {

@@ -7,30 +7,33 @@ const { fileURLToPath } = require("node:url")
 const { defaultConfigPath, readOpencodeConfig } = require("../opencode-config")
 const { officeAttachmentContext } = require("../office-attachment-context")
 
-// Office formats the model/gateway cannot ingest as media. They are routed to the
-// bundled translate_document tool (via the translate-office-document skill) by their
-// local path instead of being sent as a `file` part — mirrors document-tools mimeTypes.
+// Document formats the model/gateway should translate through the bundled
+// translate_document tool by local path instead of ingesting as a raw `file` part.
 const OFFICE_ATTACHMENT_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",   // .docx
   "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"          // .xlsx
 ])
+const MARKDOWN_ATTACHMENT_MIMES = new Set(["text/markdown", "text/x-markdown"])
 const EXTRACTABLE_OFFICE_ATTACHMENT_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"          // .xlsx
 ])
 
 // Build the OpenCode prompt `parts`: media attachments (pdf/image/...) stay as `file`
-// parts the model can read; Office attachments are surfaced as local-path lines in the
-// text so the skill can pick them up as translate_document `inputPath`.
+// parts the model can read; translated document attachments are surfaced as
+// local-path lines in the text so the skill can pick them up as translate_document `inputPath`.
 function buildPromptParts({ prompt, attachments = [] }) {
-  const officePaths = []
+  const documentPaths = []
   const officeContexts = []
   const fileParts = []
   for (const attachment of attachments) {
-    if (OFFICE_ATTACHMENT_MIMES.has(attachment.mime)) {
-      const localPath = attachmentLocalPath(attachment)
-      officePaths.push(localPath)
+    const localPath = attachmentLocalPath(attachment)
+    const extension = path.extname(localPath || attachment.filename || "").toLowerCase()
+    const isOffice = OFFICE_ATTACHMENT_MIMES.has(attachment.mime)
+    const isMarkdown = MARKDOWN_ATTACHMENT_MIMES.has(attachment.mime) || extension === ".md" || extension === ".markdown"
+    if (isOffice || isMarkdown) {
+      documentPaths.push(localPath)
       if (EXTRACTABLE_OFFICE_ATTACHMENT_MIMES.has(attachment.mime)) {
         officeContexts.push(officeAttachmentContext({
           filePath: localPath,
@@ -48,12 +51,12 @@ function buildPromptParts({ prompt, attachments = [] }) {
     })
   }
   const base = String(prompt).trim()
-  const text = officePaths.length
+  const text = documentPaths.length
     ? [
       base,
-      "Attached Office files are provided as local paths plus extracted text context because the configured gateway accepts text/images, not raw Office binaries.",
-      "If the user asks to translate an Office file, call the translate_document tool with the exact local inputPath. Do not use shell/write scripts for translation artifacts. Do not claim an output path unless it is returned in translate_document metadata.artifacts.",
-      `Attached files (local paths):\n${officePaths.map((p) => `- ${p}`).join("\n")}`,
+      "Attached document files are provided as local paths plus extracted text context when available because the configured gateway accepts text/images, not raw document binaries.",
+      "If the user asks to translate a DOCX, Markdown, PDF, PPTX, or XLSX file, call the translate_document tool with the exact local inputPath. Do not use shell/write scripts for translation artifacts. Do not claim an output path unless it is returned in translate_document metadata.artifacts.",
+      `Attached files (local paths):\n${documentPaths.map((p) => `- ${p}`).join("\n")}`,
       officeContexts.filter(Boolean).length ? `Extracted Office context:\n${officeContexts.filter(Boolean).join("\n\n")}` : ""
     ].filter(Boolean).join("\n\n")
     : base

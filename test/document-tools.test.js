@@ -72,6 +72,49 @@ function crc32(buffer) {
   return (~crc) >>> 0
 }
 
+test("Markdown translation preserves frontmatter and fenced code while creating an artifact", async () => {
+  const project = tempProject()
+  const input = path.join(project, "notes.md")
+  fs.writeFileSync(input, [
+    "---",
+    "title: 元のタイトル",
+    "---",
+    "# 見出し",
+    "",
+    "本文です。",
+    "",
+    "- 項目",
+    "",
+    "| 列1 | 列2 |",
+    "| --- | --- |",
+    "| 値1 | 値2 |",
+    "",
+    "```js",
+    "const text = \"翻訳しない\"",
+    "```",
+    ""
+  ].join("\n"))
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    { translateSegments: mockTranslation }
+  )
+
+  const output = result.metadata.artifacts[0].path
+  assert.equal(output, path.join(project, "notes-translated-vietnamese.md"))
+  assert.equal(result.metadata.artifacts[0].mime, "text/markdown")
+  const translated = fs.readFileSync(output, "utf8")
+  assert.match(translated, /^---\ntitle: 元のタイトル\n---/m)
+  assert.match(translated, /^# VI 見出し$/m)
+  assert.match(translated, /^VI 本文です。$/m)
+  assert.match(translated, /^- VI 項目$/m)
+  assert.match(translated, /^\| VI 列1 \| VI 列2 \|$/m)
+  assert.match(translated, /^\| --- \| --- \|$/m)
+  assert.match(translated, /^\| VI 値1 \| VI 値2 \|$/m)
+  assert.match(translated, /```js\nconst text = "翻訳しない"\n```/)
+})
+
 // Build an OOXML zip whose entries set the data-descriptor flag (general-purpose
 // bit 3) the way Excel and other streaming writers do — and which is NOT created by
 // adm-zip. The bundled adm-zip can re-read such an input fine, but throws "No
@@ -1114,6 +1157,6 @@ test("translate_document rejects missing target language and unsupported files",
   )
   await assert.rejects(
     runtime.translateDocument({ inputPath: input, targetLanguage: "Vietnamese" }, { directory: project }),
-    /supports only \.docx, \.pdf, \.pptx and \.xlsx/
+    /supports only \.docx, \.md, \.markdown, \.pdf, \.pptx and \.xlsx/
   )
 })

@@ -12,7 +12,7 @@ const BUILT_IN_SKILLS = [
   { name: "skill-creator", description: "Create and validate reusable OpenCode-native skills." },
   { name: "xlsx", description: "Read, create, edit and validate spreadsheet workbooks." },
   { name: "docx", description: "Read, create, edit and visually validate Word documents." },
-  { name: "translate-document", description: "Translate PDF and DOCX files into new layout-preserving document artifacts." },
+  { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
   { name: "webapp-testing", description: "Test local web applications with focused browser automation." }
 ]
@@ -1214,6 +1214,7 @@ function messageFileRefs(message) {
   for (const part of message.parts || []) {
     if (part.type !== "tool") continue
     if (!MUTATING_FILE_TOOLS.has(part.tool)) continue
+    if (part.state?.status !== "completed") continue
     const candidates = []
     if (part.tool === "edit" || part.tool === "write") {
       candidates.push(part.state?.input?.filePath)

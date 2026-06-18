@@ -24,6 +24,8 @@ const PPTX_MAX_BATCH_CHARS = 4000
 const PPTX_MAX_BATCH_SEGMENTS = 80
 const XLSX_MAX_BATCH_CHARS = 4000
 const XLSX_MAX_BATCH_SEGMENTS = 80
+const MARKDOWN_MAX_BATCH_CHARS = 4000
+const MARKDOWN_MAX_BATCH_SEGMENTS = 80
 const PDF_MIN_FONT_SIZE = 4
 const PDF_VISION_MIN_FONT_SIZE = 3
 const PDF_VISION_MAX_FONT_SIZE = 12
@@ -214,6 +216,106 @@ async function translateSegments(segments, targetLanguage, sourceLanguage, optio
     for (const [id, text] of result) translated.set(id, text)
   }
   return translated
+}
+
+function splitMarkdownLines(markdown) {
+  const parts = String(markdown).split(/(\r\n|\n|\r)/)
+  const lines = []
+  for (let index = 0; index < parts.length; index += 2) {
+    if (index === parts.length - 1 && parts[index] === "") break
+    lines.push({ text: parts[index] || "", newline: parts[index + 1] || "" })
+  }
+  return lines
+}
+
+function isMarkdownTableSeparator(line) {
+  const trimmed = line.trim()
+  if (!trimmed.includes("|")) return false
+  const cells = trimmed.replace(/^\|/, "").replace(/\|$/, "").split("|")
+  return cells.length > 1 && cells.every((cell) => /^\s*:?-{3,}:?\s*$/.test(cell))
+}
+
+function markdownTextBounds(value) {
+  const match = String(value).match(/^(\s*)(.*?)(\s*)$/)
+  return { prefix: match[1], text: match[2], suffix: match[3] }
+}
+
+function collectMarkdownSegments(markdown) {
+  const lines = splitMarkdownLines(markdown)
+  const segments = []
+  const parts = []
+  let inFence = false
+  let fenceMarker = ""
+  let inFrontmatter = lines[0]?.text.trim() === "---"
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const { text: line, newline } = lines[lineIndex]
+    const trimmed = line.trim()
+
+    if (inFrontmatter) {
+      parts.push({ type: "raw", line, newline })
+      if (lineIndex > 0 && trimmed === "---") inFrontmatter = false
+      continue
+    }
+
+    const fence = line.match(/^\s{0,3}(`{3,}|~{3,})/)
+    if (fence) {
+      const marker = fence[1][0]
+      if (!inFence) {
+        inFence = true
+        fenceMarker = marker
+      } else if (marker === fenceMarker) {
+        inFence = false
+        fenceMarker = ""
+      }
+      parts.push({ type: "raw", line, newline })
+      continue
+    }
+
+    if (inFence || !trimmed || isMarkdownTableSeparator(line)) {
+      parts.push({ type: "raw", line, newline })
+      continue
+    }
+
+    if (line.includes("|")) {
+      const cells = line.split("|").map((cell, cellIndex) => {
+        const bounds = markdownTextBounds(cell)
+        if (!bounds.text.trim()) return { raw: cell }
+        const id = `markdown:${lineIndex}:${cellIndex}`
+        segments.push({ id, text: bounds.text })
+        return { id, prefix: bounds.prefix, suffix: bounds.suffix }
+      })
+      parts.push({ type: "table", cells, newline })
+      continue
+    }
+
+    const heading = line.match(/^(\s{0,3}#{1,6}\s+)(.*?)(\s+#+\s*)?$/)
+    const prefix = heading ? heading[1] : (line.match(/^(\s*(?:>\s*)*(?:(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s+)?)?)/) || ["", ""])[1]
+    const suffix = heading ? (heading[3] || "") : (line.match(/(\s*)$/) || ["", ""])[1]
+    const body = heading ? heading[2] : line.slice(prefix.length, line.length - suffix.length)
+    if (!body.trim()) {
+      parts.push({ type: "raw", line, newline })
+      continue
+    }
+    const id = `markdown:${lineIndex}:0`
+    segments.push({ id, text: body })
+    parts.push({ type: "line", id, prefix, suffix, newline })
+  }
+
+  return { parts, segments }
+}
+
+function renderMarkdownSegments(parts, translated) {
+  return parts.map((part) => {
+    if (part.type === "raw") return `${part.line}${part.newline}`
+    if (part.type === "table") {
+      return `${part.cells.map((cell) => {
+        if (cell.raw !== undefined) return cell.raw
+        return `${cell.prefix}${translated.get(cell.id) ?? ""}${cell.suffix}`
+      }).join("|")}${part.newline}`
+    }
+    return `${part.prefix}${translated.get(part.id) ?? ""}${part.suffix}${part.newline}`
+  }).join("")
 }
 
 function collectDocxSegments(zip) {
@@ -1348,9 +1450,26 @@ async function translatePdf(inputPath, outputPath, args, options) {
   return { warnings: [...new Set(warnings)] }
 }
 
+async function translateMarkdown(inputPath, outputPath, args, options) {
+  const markdown = fs.readFileSync(inputPath, "utf8")
+  const { parts, segments } = collectMarkdownSegments(markdown)
+  if (!segments.length) throw new Error("Markdown did not contain translatable text.")
+  const translated = await translateSegments(segments, args.targetLanguage, args.sourceLanguage, {
+    ...options,
+    maxBatchChars: MARKDOWN_MAX_BATCH_CHARS,
+    maxBatchSegments: MARKDOWN_MAX_BATCH_SEGMENTS,
+    splitFailedBatches: true
+  })
+  fs.writeFileSync(outputPath, renderMarkdownSegments(parts, translated), "utf8")
+  if (!fs.existsSync(outputPath) || !fs.statSync(outputPath).size) throw new Error("Generated Markdown artifact is empty.")
+  return { warnings: [] }
+}
+
 function artifact(outputPath, warnings, options = {}) {
   const mimeTypes = {
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
     ".pdf": "application/pdf",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1386,7 +1505,7 @@ async function translateDocument(args, context = {}, options = {}) {
   if (!targetLanguage) throw new Error("targetLanguage is required. Ask the user which language to translate into.")
   if (!fs.existsSync(inputPath) || !fs.statSync(inputPath).isFile()) throw new Error(`Input file does not exist: ${inputPath}`)
   const extension = path.extname(inputPath).toLowerCase()
-  if (![".docx", ".pdf", ".pptx", ".xlsx"].includes(extension)) throw new Error("translate_document supports only .docx, .pdf, .pptx and .xlsx files.")
+  if (![".docx", ".md", ".markdown", ".pdf", ".pptx", ".xlsx"].includes(extension)) throw new Error("translate_document supports only .docx, .md, .markdown, .pdf, .pptx and .xlsx files.")
   const inplace = extension === ".xlsx" && args.mode === "inplace"
   const normalized = { ...args, inputPath, targetLanguage }
 
@@ -1400,6 +1519,8 @@ async function translateDocument(args, context = {}, options = {}) {
   const outputPath = outputPathFor(inputPath, context.directory || process.cwd(), targetLanguage)
   const translators = {
     ".docx": translateDocx,
+    ".md": translateMarkdown,
+    ".markdown": translateMarkdown,
     ".pdf": translatePdf,
     ".pptx": translatePptx,
     ".xlsx": translateXlsx

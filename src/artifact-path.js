@@ -2,7 +2,7 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { StringDecoder } = require("node:string_decoder")
 
-const TRANSLATION_ARTIFACT_EXTENSIONS = new Set([".docx", ".pdf", ".pptx", ".xlsx"])
+const TRANSLATION_ARTIFACT_EXTENSIONS = new Set([".docx", ".md", ".markdown", ".pdf", ".pptx", ".xlsx"])
 const TRANSLATION_ARTIFACT_NAME = /^.+-translated-[a-z0-9]+(?:-[a-z0-9]+)*(?:-\d+)?$/
 
 function assertTranslationArtifact(projectPath, artifactPath) {

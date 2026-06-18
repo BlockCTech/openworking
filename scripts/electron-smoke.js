@@ -413,6 +413,45 @@ async function main() {
           type: "message.part.updated",
           sessionID: state.activeSessionId,
           part: {
+            id: "part_write_markdown",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "write",
+            state: {
+              status: "running",
+              input: { filePath: "_template_vi.md" }
+            }
+          }
+        })
+        await nextPaint()
+        const hidesRunningWriteFileRef =
+          ![...document.querySelectorAll(".file-ref-chip")]
+            .some((chip) => chip.textContent.includes("_template_vi.md"))
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_write_markdown",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "write",
+            state: {
+              status: "error",
+              input: { filePath: "_template_vi.md" },
+              error: "File does not exist"
+            }
+          }
+        })
+        await nextPaint()
+        const hidesErroredWriteFileRef =
+          ![...document.querySelectorAll(".file-ref-chip")]
+            .some((chip) => chip.textContent.includes("_template_vi.md"))
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
             id: "part_write_code",
             messageID: "msg_stream",
             type: "tool",
@@ -632,6 +671,8 @@ async function main() {
           completedStepCanReopen,
           hidesReadFileRef,
           hidesReadDiff,
+          hidesRunningWriteFileRef,
+          hidesErroredWriteFileRef,
           showsCodeFileRef,
           showsWriteDiff,
           rendersDiffViewer,
@@ -741,6 +782,8 @@ async function main() {
       !value.completedStepCanReopen ||
       !value.hidesReadFileRef ||
       !value.hidesReadDiff ||
+      !value.hidesRunningWriteFileRef ||
+      !value.hidesErroredWriteFileRef ||
       !value.showsCodeFileRef ||
       !value.showsWriteDiff ||
       !value.rendersDiffViewer ||

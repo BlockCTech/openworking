@@ -4,7 +4,7 @@
   if (root) root.OpenWorkingThreadStream = api
 })(typeof window === "object" ? window : globalThis, function createThreadStreamApi() {
   let optimisticId = 0
-  const OFFICE_ATTACHMENT_CONTEXT_MARKER = "Attached Office files are provided as local paths plus extracted text context"
+  const OFFICE_ATTACHMENT_CONTEXT_MARKER = "Attached document files are provided as local paths plus extracted text context"
   const NO_RESPONSE_DETAIL = "The request ended without a response. Check provider/model/API key or runtime diagnostics."
 
   function idleStatus() {

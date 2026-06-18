@@ -17,8 +17,8 @@ const {
 function officeContextText(prompt = "Hãy dịch file này sang tiếng Việt") {
   return [
     prompt,
-    "Attached Office files are provided as local paths plus extracted text context because the configured gateway accepts text/images, not raw Office binaries.",
-    "If the user asks to translate an Office file, call the translate_document tool with the exact local inputPath. Do not use shell/write scripts for translation artifacts. Do not claim an output path unless it is returned in translate_document metadata.artifacts.",
+    "Attached document files are provided as local paths plus extracted text context when available because the configured gateway accepts text/images, not raw document binaries.",
+    "If the user asks to translate a DOCX, Markdown, PDF, PPTX, or XLSX file, call the translate_document tool with the exact local inputPath. Do not use shell/write scripts for translation artifacts. Do not claim an output path unless it is returned in translate_document metadata.artifacts.",
     "Attached files (local paths):\n- /tmp/事業推進QA対応.xlsx",
     "Extracted Office context:\n## XLSX attachment: 事業推進QA対応.xlsx\n\nPath: /tmp/事業推進QA対応.xlsx\n\nSheet: QA\n確認事項"
   ].join("\n\n")
@@ -166,7 +166,7 @@ test("thread stream hides office attachment context in hydrated user messages", 
 
   assert.equal(messageText(thread.messages[0]), "Hãy dịch file này sang tiếng Việt")
   assert.equal(messageCopyText(thread.messages[0]), "@事業推進QA対応.xlsx\nHãy dịch file này sang tiếng Việt")
-  assert.equal(messageCopyText(thread.messages[0]).includes("Attached Office files"), false)
+  assert.equal(messageCopyText(thread.messages[0]).includes("Attached document files"), false)
   assert.equal(messageCopyText(thread.messages[0]).includes("確認事項"), false)
 })
 
@@ -266,7 +266,7 @@ test("thread stream keeps a real answer that merely contains the word tool_call 
 
 test("thread stream keeps assistant text even if it mentions the office context marker", () => {
   const thread = createThreadStream("sess_one")
-  const assistantText = "Attached Office files are provided as local paths plus extracted text context is an internal marker."
+  const assistantText = "Attached document files are provided as local paths plus extracted text context is an internal marker."
   hydrateThread(thread, "sess_one", [{
     info: { id: "msg_assistant", role: "assistant" },
     parts: [{ id: "part_reply", messageID: "msg_assistant", type: "text", text: assistantText }]
