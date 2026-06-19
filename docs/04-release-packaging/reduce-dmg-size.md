@@ -3,8 +3,34 @@
 > **Loại tài liệu:** Decision document (phân tích kỹ thuật + khuyến nghị).
 > **Phạm vi:** macOS arm64 build của `TechTusCoWork` (package `openworking`).
 > **Ràng buộc đã chốt:** Giữ nguyên tính năng (không bỏ skill, không bỏ document-tools, **giữ offline-first** — không tải runtime opencode sau khi cài). Chỉ loại trùng lặp / file thừa và nén tốt hơn.
-> **Trạng thái:** Phân tích & khuyến nghị — chưa áp dụng thay đổi code.
-> **Số liệu trong tài liệu này đo trực tiếp từ bản build `dist/` ngày 2026-06-03.**
+> **Trạng thái:** ĐÃ ÁP DỤNG (2026-06-19) — xem §0. Phần phân tích bên dưới giữ nguyên làm tham chiếu lịch sử.
+> **Số liệu phân tích gốc đo từ bản build `dist/` ngày 2026-06-03.**
+
+---
+
+## 0. Đã thực hiện (2026-06-19)
+
+Tất cả thay đổi nằm trong `package.json` (`build.files`). **Không sửa code app.** Verify bằng `npm test` (226 pass) + `npm run smoke:packaged` (pass, gồm `rendersMermaidDiagram=true`).
+
+| Hạng mục | Trạng thái | Ghi chú |
+|---|---|---|
+| A — document-tools deps → devDependencies | ✅ Phần lớn đã sẵn | `pdf-lib`, `@pdf-lib/fontkit`, `@embedpdf/pdfium`, `pngjs`, `zod` đã ở devDeps từ trước. **`adm-zip` GIỮ Ở `dependencies`** vì main process dùng (`src/opencode-profile.js`, `src/office-attachment-context.js`) — doc cũ liệt sai. |
+| B — trim `@highlightjs/cdn-assets` | ✅ Đã có sẵn | |
+| C — `electronLanguages: ["en"]` | ✅ Đã có sẵn | |
+| E — DMG `ULFO` | ✅ Đã có sẵn | |
+| D — siết `files` (`.map`/`.d.ts`/`.ts`, test/example dirs) | ✅ Mới | Cố ý **không** loại `.md`/`docs/` để tránh phá dep. |
+| 🆕 Trim `node_modules/mermaid` → chỉ `mermaid.min.js` | ✅ Mới | UMD bundle self-contained (0 dynamic import). |
+| 🆕 Loại transitive deps chỉ-của-mermaid | ✅ Mới | `d3*`, `cytoscape*`, `katex`, `es-toolkit`, `dompurify`, `@mermaid-js`, `lodash-es`, `roughjs`… — verified bằng `npm ls` chỉ thuộc mermaid; renderer load UMD nên không cần. |
+
+**Kết quả đo (arm64):**
+
+| Artifact | Trước (2026-06-03) | Sau (2026-06-19) | Giảm |
+|---|---|---|---|
+| `.app` | 409 MB | **348 MB** | −61 MB (~15%) |
+| `app.asar` | 42 MB | **5.4 MB** | −36 MB (~87%) |
+| `app.asar.unpacked` (binary opencode) | 103 MB | 123 MB | (trần cứng, không đụng) |
+
+Phần còn lại không giảm thêm được trong ràng buộc hiện tại: Electron Framework (~253 MB) + binary opencode (~108–123 MB).
 
 ---
 
