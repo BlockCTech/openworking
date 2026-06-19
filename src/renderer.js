@@ -73,6 +73,7 @@ const {
   hasRunningTool,
   hydrateThread,
   messageCopyText,
+  userMessageFileRefs,
   messageText,
   removeOptimisticUser,
   resetThread,
@@ -117,8 +118,10 @@ const state = {
   selectedModelKey: "",
   promptDraft: "",
   pendingAttachments: [],
+  pendingFileMentions: [],
   commands: [],
   commandMenu: { open: false, query: "", index: 0 },
+  fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
   popover: null,
   sessionMenu: null,          // sessionId đang mở menu, hoặc null
   sessionDeleteTarget: null,  // { id, title } của session chờ xác nhận xóa trong modal
@@ -235,6 +238,83 @@ function resetFileTree(projectId = state.activeProjectId) {
   state.fileTreeError = ""
   state.fileTreeExpanded.clear()
   state.fileTreeChildren.clear()
+  if (state.fileMentionMenu.projectId !== (projectId || null)) {
+    state.fileMentionMenu = { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: projectId || null, loadPromise: null }
+  }
+}
+
+function closeFileMentionMenu() {
+  state.fileMentionMenu.open = false
+  state.fileMentionMenu.query = ""
+  state.fileMentionMenu.index = 0
+  paintPromptAssistMenu()
+}
+
+function selectableProjectFiles() {
+  if (state.fileMentionMenu.projectId !== state.activeProjectId) return []
+  return state.fileMentionMenu.files
+}
+
+function fileMentionCandidates(query = "") {
+  const needle = String(query || "").toLowerCase()
+  const files = selectableProjectFiles()
+  if (!needle) return files.slice(0, 12)
+  const basenameStarts = []
+  const pathStarts = []
+  const basenameIncludes = []
+  const pathIncludes = []
+  for (const filePath of files) {
+    const lowerPath = filePath.toLowerCase()
+    const lowerName = filename(filePath).toLowerCase()
+    if (lowerName.startsWith(needle)) basenameStarts.push(filePath)
+    else if (lowerPath.startsWith(needle)) pathStarts.push(filePath)
+    else if (lowerName.includes(needle)) basenameIncludes.push(filePath)
+    else if (lowerPath.includes(needle)) pathIncludes.push(filePath)
+  }
+  return [...basenameStarts, ...pathStarts, ...basenameIncludes, ...pathIncludes].slice(0, 12)
+}
+
+async function ensureProjectFileCandidates() {
+  const project = selectedProject()
+  if (!project) return []
+  if (state.fileMentionMenu.projectId !== project.id) {
+    state.fileMentionMenu = { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: project.id, loadPromise: null }
+  }
+  if (state.fileMentionMenu.files.length) return state.fileMentionMenu.files
+  if (state.fileMentionMenu.loadPromise) return state.fileMentionMenu.loadPromise
+
+  const crawl = async (directoryPath = "") => {
+    const listing = await window.openworking.files.list({
+      directoryPath,
+      options: { mode: "visible-openable-files", recursive: true }
+    })
+    return (listing.children || []).filter((child) => child.type === "file" && child.openable).map((child) => child.path)
+  }
+
+  state.fileMentionMenu.loading = true
+  state.fileMentionMenu.error = ""
+  paintPromptAssistMenu()
+  state.fileMentionMenu.loadPromise = crawl("")
+    .then((files) => {
+      if (state.fileMentionMenu.projectId === project.id) {
+        state.fileMentionMenu.files = files.sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
+      }
+      return state.fileMentionMenu.files
+    })
+    .catch((error) => {
+      if (state.fileMentionMenu.projectId === project.id) {
+        state.fileMentionMenu.error = error.message || "Could not load project files."
+      }
+      return []
+    })
+    .finally(() => {
+      if (state.fileMentionMenu.projectId === project.id) {
+        state.fileMentionMenu.loading = false
+        state.fileMentionMenu.loadPromise = null
+      }
+      paintPromptAssistMenu()
+    })
+  return state.fileMentionMenu.loadPromise
 }
 
 function projectSessions(projectId) {
@@ -1154,10 +1234,12 @@ function pendingPrompts() {
 function renderThreadMessage(message) {
   const actions = renderMessageActions(message)
   if (message.role === "user") {
-    const text = messageText(message)
+    const projectFiles = selectableProjectFiles()
+    const text = messageText(message, projectFiles)
     const attachments = message.parts.filter((part) => part.type === "file")
-    return text || attachments.length
-      ? `<div class="msg-user"><div class="message-stack user-message"><div class="message-card bubble">${text ? `<div>${escapeHtml(text).replaceAll("\n", "<br>")}</div>` : ""}${renderAttachmentChips(attachments)}</div>${actions}</div></div>`
+    const fileMentions = userMessageFileRefs(message, projectFiles)
+    return text || attachments.length || fileMentions.length
+      ? `<div class="msg-user"><div class="message-stack user-message"><div class="message-card bubble">${text ? `<div>${renderTextWithFileMentions(text, fileMentions)}</div>` : ""}${renderAttachmentChips(attachments)}</div>${actions}</div></div>`
       : ""
   }
   const parts = message.parts.map(renderAssistantPart).join("")
@@ -1549,6 +1631,186 @@ function renderAttachmentChips(attachments, { removable = false } = {}) {
   `
 }
 
+function renderFileMentionChips(fileMentions, { removable = false } = {}) {
+  if (!fileMentions.length) return ""
+  return `
+    <div class="${removable ? "composer-file-mentions" : "message-file-mentions"}">
+      ${fileMentions.map((fileMention) => `
+        <span class="file-mention-chip" title="${escapeHtml(fileMention.path)}">
+          ${icon("doc")}<span>${escapeHtml(fileMention.token || `@${fileMention.name}`)}</span>
+          ${removable ? `<button data-remove-file-mention="${escapeHtml(fileMention.token)}" title="Remove ${escapeHtml(fileMention.token || fileMention.name)}">${icon("x")}</button>` : ""}
+        </span>
+      `).join("")}
+    </div>
+  `
+}
+
+function renderInlineFileMention(fileMention) {
+  const label = fileMention.token || `@${fileMention.name}`
+  return `<span class="file-mention-token" title="${escapeHtml(fileMention.path)}"><span>${escapeHtml(label)}</span></span>`
+}
+
+function findFileMentionMatches(text, fileMentions) {
+  const prompt = String(text || "")
+  const matches = []
+  for (const fileMention of fileMentions) {
+    const token = String(fileMention?.token || "")
+    if (!token) continue
+    const pattern = new RegExp(`(^|\\s)(${escapeRegex(token)})(?=$|\\s)`, "g")
+    let match = null
+    while ((match = pattern.exec(prompt))) {
+      const prefix = match[1] || ""
+      const start = match.index + prefix.length
+      matches.push({ start, end: start + token.length, fileMention })
+      if (pattern.lastIndex === match.index) pattern.lastIndex += 1
+    }
+  }
+  return matches.sort((left, right) => left.start - right.start || left.end - right.end)
+}
+
+function renderTextWithFileMentions(text, fileMentions) {
+  const message = String(text || "")
+  const matches = findFileMentionMatches(message, fileMentions)
+  if (!matches.length) return escapeHtml(message).replaceAll("\n", "<br>")
+
+  let html = ""
+  let cursor = 0
+  for (const match of matches) {
+    if (match.start < cursor) continue
+    html += escapeHtml(message.slice(cursor, match.start)).replaceAll("\n", "<br>")
+    html += renderInlineFileMention(match.fileMention)
+    cursor = match.end
+  }
+  html += escapeHtml(message.slice(cursor)).replaceAll("\n", "<br>")
+  return html
+}
+
+function renderPromptOverlayHtml(promptText, fileMentions = []) {
+  const prompt = String(promptText || "")
+  const liveMentions = livePendingFileMentions(prompt, fileMentions)
+  if (!liveMentions.length) return escapeHtml(prompt).replaceAll("\n", "<br>")
+  return renderTextWithFileMentions(prompt, liveMentions)
+}
+
+function escapeRegex(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function fileMentionTokenPattern(token) {
+  return new RegExp(`(^|\\s)${escapeRegex(token)}(?=$|\\s)`)
+}
+
+function livePendingFileMentions(promptText, pendingFileMentions = state.pendingFileMentions) {
+  const prompt = String(promptText || "")
+  return pendingFileMentions.filter((fileMention) => fileMention?.token && fileMentionTokenPattern(fileMention.token).test(prompt))
+}
+
+function resolveFileMentionsFromPrompt(promptText, files = selectableProjectFiles()) {
+  const prompt = String(promptText || "")
+  if (!prompt.includes("@")) return []
+  const mentions = []
+  const seen = new Set()
+  const pattern = /(^|\s)@([^\s@]+)(?=$|\s)/g
+  let match = null
+  while ((match = pattern.exec(prompt))) {
+    const candidate = match[2]
+    const token = `@${candidate}`
+    if (seen.has(token)) continue
+    let filePath = files.includes(candidate) ? candidate : null
+    if (!filePath) {
+      const basenameMatches = files.filter((file) => filename(file) === candidate)
+      if (basenameMatches.length === 1) filePath = basenameMatches[0]
+    }
+    if (!filePath) continue
+    const resolvedToken = fileMentionTokenForPath(filePath, files)
+    if (!fileMentionTokenPattern(resolvedToken).test(prompt)) continue
+    seen.add(resolvedToken)
+    mentions.push({ token: resolvedToken, path: filePath, name: filename(filePath) })
+  }
+  return mentions
+}
+
+function collectLiveFileMentions(promptText, overrides = {}) {
+  const pendingFileMentions = overrides.pendingFileMentions ?? state.pendingFileMentions
+  const files = overrides.files ?? selectableProjectFiles()
+  const prompt = String(promptText || "")
+  const livePending = livePendingFileMentions(prompt, pendingFileMentions)
+  if (livePending.length !== pendingFileMentions.length && !overrides.pendingFileMentions) {
+    state.pendingFileMentions = livePending
+  }
+  const byToken = new Map()
+  for (const fileMention of [
+    ...livePending,
+    ...resolveFileMentionsFromPrompt(prompt, files)
+  ]) {
+    if (!fileMention?.token || !fileMentionTokenPattern(fileMention.token).test(prompt)) continue
+    byToken.set(fileMention.token, fileMention)
+  }
+  return [...byToken.values()]
+}
+
+async function fileMentionsForSubmit(prompt, command) {
+  if (command) return []
+  if (String(prompt || "").includes("@")) await ensureProjectFileCandidates()
+  return collectLiveFileMentions(prompt)
+}
+
+function syncPendingFileMentions(promptText, { rerender = false, promptInput = null } = {}) {
+  const live = livePendingFileMentions(promptText)
+  if (live.length === state.pendingFileMentions.length) return live
+  state.pendingFileMentions = live
+  if (rerender) {
+    const selectionStart = promptInput?.selectionStart ?? null
+    const selectionEnd = promptInput?.selectionEnd ?? selectionStart
+    render()
+    const freshInput = document.getElementById("promptInput")
+    if (freshInput && selectionStart !== null && selectionEnd !== null) {
+      freshInput.focus()
+      freshInput.setSelectionRange(selectionStart, selectionEnd)
+      freshInput.style.height = "auto"
+      freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
+      syncPromptOverlay(freshInput)
+    }
+  }
+  return live
+}
+
+function applyPendingFileMentions(promptText, fileMentions) {
+  let prompt = String(promptText || "")
+  for (const fileMention of fileMentions) {
+    if (!fileMention?.token || !fileMention?.path) continue
+    const pattern = new RegExp(`(^|\\s)(${escapeRegex(fileMention.token)})(?=$|\\s)`, "g")
+    prompt = prompt.replace(pattern, (_, prefix) => `${prefix}\`${fileMention.path}\``)
+  }
+  return prompt
+}
+
+function fileMentionTokenForPath(filePath, files = selectableProjectFiles()) {
+  const normalizedPath = String(filePath || "").trim()
+  if (!normalizedPath) return "@"
+  const basename = filename(normalizedPath)
+  const duplicates = files.filter((candidate) => filename(candidate) === basename)
+  return duplicates.length > 1 ? `@${normalizedPath}` : `@${basename}`
+}
+
+function filterPromptAttachments(attachments, fileMentions, { forceTextOnly = false } = {}) {
+  const pending = Array.isArray(attachments) ? attachments.slice() : []
+  if (!pending.length) return pending
+  if (forceTextOnly && Array.isArray(fileMentions) && fileMentions.length) return []
+  if (!Array.isArray(fileMentions) || !fileMentions.length) return pending
+  const mentionedNames = new Set(fileMentions.map((fileMention) => String(fileMention?.name || filename(fileMention?.path || "") || "").trim()).filter(Boolean))
+  // ponytail: stale attachment ids from the old @file flow are worse than dropping a duplicate of the same file name.
+  return pending.filter((attachment) => !mentionedNames.has(String(attachment?.filename || "").trim()))
+}
+
+function computePromptAttachments({ command, pendingAttachments, fileMentions }) {
+  return command
+    ? []
+    : filterPromptAttachments(pendingAttachments, fileMentions, {
+        forceTextOnly: true
+      })
+}
+
 function toolInfo(part) {
   const input = part.state?.input || {}
   const files = Array.isArray(input.files) ? input.files : []
@@ -1921,7 +2183,23 @@ function renderCommandMenu() {
           <span class="cmd-source">${escapeHtml(command.source)}</span>
         </button>`).join("")
     : `<div class="pop-empty">No matching commands.</div>`
-  return `<div class="pop pop-up cmd-pop"><div class="pop-label">Commands</div>${rows}</div>`
+  return `<div class="pop pop-up prompt-pop cmd-pop"><div class="pop-label">Commands</div>${rows}</div>`
+}
+
+function renderFileMentionMenu() {
+  if (!state.fileMentionMenu.open) return ""
+  const candidates = fileMentionCandidates(state.fileMentionMenu.query)
+  let rows = ""
+  if (state.fileMentionMenu.loading) rows = `<div class="pop-empty">Loading files…</div>`
+  else if (state.fileMentionMenu.error) rows = `<div class="pop-empty">${escapeHtml(state.fileMentionMenu.error)}</div>`
+  else if (candidates.length) {
+    rows = candidates.map((filePath, position) => `
+      <button class="pop-item cmd-item ${position === state.fileMentionMenu.index ? "active" : ""}" data-file-mention="${escapeHtml(filePath)}">
+        <span><strong>@${escapeHtml(filename(filePath))}</strong><small>${escapeHtml(filePath)}</small></span>
+        <span class="cmd-source">file</span>
+      </button>`).join("")
+  } else rows = `<div class="pop-empty">No matching files.</div>`
+  return `<div class="pop pop-up prompt-pop cmd-pop"><div class="pop-label">Project files</div>${rows}</div>`
 }
 
 function renderComposer(project, dock = false) {
@@ -1932,6 +2210,10 @@ function renderComposer(project, dock = false) {
     <div class="composer">
       <div class="ta-wrap">
         ${renderCommandMenu()}
+        ${renderFileMentionMenu()}
+        <div class="prompt-overlay" aria-hidden="true">
+          <div id="promptOverlay" class="prompt-overlay-text">${renderPromptOverlayHtml(state.promptDraft, state.pendingFileMentions)}</div>
+        </div>
         <textarea id="promptInput" rows="1" placeholder="${dock ? "Reply to" : "Describe a task for"} ${escapeHtml(project.name)}...">${escapeHtml(state.promptDraft)}</textarea>
       </div>
       ${renderAttachmentChips(state.pendingAttachments, { removable: true })}
@@ -2575,6 +2857,7 @@ function bindEvents() {
     render()
   }))
   document.querySelectorAll("[data-remove-attachment]").forEach((element) => element.addEventListener("click", () => removeAttachment(element.dataset.removeAttachment)))
+  document.querySelectorAll("[data-remove-file-mention]").forEach((element) => element.addEventListener("click", () => removeFileMention(element.dataset.removeFileMention)))
   bindMessageActions()
   bindArtifactActions()
   bindToolStepActions()
@@ -2588,13 +2871,22 @@ function bindEvents() {
   }))
   const promptInput = document.getElementById("promptInput")
   if (promptInput) {
+    promptInput.style.height = "auto"
+    promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
+    syncPromptOverlay(promptInput)
     promptInput.addEventListener("input", () => {
       state.promptDraft = promptInput.value
+      syncPendingFileMentions(promptInput.value, { rerender: true, promptInput })
+      const liveInput = document.getElementById("promptInput") || promptInput
       const send = document.querySelector(".send")
-      if (send) send.classList.toggle("disabled", !threadAbortable() && !promptInput.value.trim())
-      promptInput.style.height = "auto"
-      promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
-      syncCommandMenu(promptInput)
+      if (send) send.classList.toggle("disabled", !threadAbortable() && !liveInput.value.trim())
+      liveInput.style.height = "auto"
+      liveInput.style.height = `${Math.min(liveInput.scrollHeight, 200)}px`
+      syncPromptOverlay(liveInput)
+      syncPromptAssist(liveInput)
+    })
+    promptInput.addEventListener("scroll", () => {
+      syncPromptOverlay(promptInput)
     })
     promptInput.addEventListener("keydown", (event) => {
       if (state.commandMenu.open) {
@@ -2624,6 +2916,33 @@ function bindEvents() {
           return
         }
       }
+      if (state.fileMentionMenu.open) {
+        const candidates = fileMentionCandidates(state.fileMentionMenu.query)
+        if (event.key === "ArrowDown") {
+          event.preventDefault()
+          state.fileMentionMenu.index = Math.min(state.fileMentionMenu.index + 1, Math.max(candidates.length - 1, 0))
+          paintPromptAssistMenu()
+          return
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault()
+          state.fileMentionMenu.index = Math.max(state.fileMentionMenu.index - 1, 0)
+          paintPromptAssistMenu()
+          return
+        }
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault()
+          const choice = candidates[state.fileMentionMenu.index]
+          if (choice) selectFileMention(choice).catch((error) => showToast(error.message))
+          else closeFileMentionMenu()
+          return
+        }
+        if (event.key === "Escape") {
+          event.preventDefault()
+          closeFileMentionMenu()
+          return
+        }
+      }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault()
         sendPrompt(promptInput.value)
@@ -2635,32 +2954,71 @@ function bindEvents() {
 // Updates only the slash-command menu DOM in place, so the textarea value/caret/focus
 // survive (a full render() would rebuild the composer and drop the caret).
 function paintCommandMenu() {
+  paintPromptAssistMenu()
+}
+
+function paintPromptAssistMenu() {
   const wrap = document.querySelector(".ta-wrap")
   if (!wrap) return
-  const existing = wrap.querySelector(".cmd-pop")
+  const existing = wrap.querySelector(".prompt-pop")
   if (existing) existing.remove()
-  const html = renderCommandMenu()
+  const html = renderCommandMenu() || renderFileMentionMenu()
   if (html) wrap.insertAdjacentHTML("afterbegin", html)
   wrap.querySelectorAll("[data-command]").forEach((element) => element.addEventListener("mousedown", (event) => {
     event.preventDefault()
     selectCommand(element.dataset.command)
   }))
+  wrap.querySelectorAll("[data-file-mention]").forEach((element) => element.addEventListener("mousedown", (event) => {
+    event.preventDefault()
+    selectFileMention(element.dataset.fileMention).catch((error) => showToast(error.message))
+  }))
 }
 
-function syncCommandMenu(promptInput) {
+function syncPromptOverlay(promptInput) {
+  const overlay = document.getElementById("promptOverlay")
+  const overlayFrame = overlay?.parentElement
+  if (!overlay || !overlayFrame || !promptInput) return
+  overlay.innerHTML = renderPromptOverlayHtml(promptInput.value, state.pendingFileMentions)
+  overlayFrame.scrollTop = promptInput.scrollTop
+}
+
+function syncPromptAssist(promptInput) {
   const caret = promptInput.selectionStart ?? promptInput.value.length
-  const match = promptInput.value.slice(0, caret).match(/(?:^|\s)\/([\w-]*)$/)
-  if (!match) {
-    closeCommandMenu()
+  const beforeCaret = promptInput.value.slice(0, caret)
+  const commandMatch = beforeCaret.match(/(?:^|\s)\/([\w-]*)$/)
+  if (commandMatch) {
+    state.commandMenu = { open: true, query: commandMatch[1], index: 0 }
+    state.fileMentionMenu.open = false
+    paintPromptAssistMenu()
     return
   }
-  state.commandMenu = { open: true, query: match[1], index: 0 }
-  paintCommandMenu()
+  const fileMatch = beforeCaret.match(/(?:^|\s)@([^\s@]*)$/)
+  if (fileMatch) {
+    state.commandMenu = { open: false, query: "", index: 0 }
+    state.fileMentionMenu.open = true
+    state.fileMentionMenu.query = fileMatch[1]
+    state.fileMentionMenu.index = 0
+    if (state.fileMentionMenu.projectId !== state.activeProjectId) {
+      state.fileMentionMenu.files = []
+      state.fileMentionMenu.loading = false
+      state.fileMentionMenu.error = ""
+      state.fileMentionMenu.loadPromise = null
+      state.fileMentionMenu.projectId = state.activeProjectId
+    }
+    paintPromptAssistMenu()
+    ensureProjectFileCandidates().catch((error) => showToast(error.message))
+    return
+  }
+  state.commandMenu = { open: false, query: "", index: 0 }
+  state.fileMentionMenu.open = false
+  state.fileMentionMenu.query = ""
+  state.fileMentionMenu.index = 0
+  paintPromptAssistMenu()
 }
 
 function closeCommandMenu() {
   state.commandMenu = { open: false, query: "", index: 0 }
-  paintCommandMenu()
+  paintPromptAssistMenu()
 }
 
 function selectCommand(name) {
@@ -2676,14 +3034,47 @@ function selectCommand(name) {
   const next = `${before}${value.slice(caret)}`
   state.promptDraft = next
   state.commandMenu = { open: false, query: "", index: 0 }
+  state.fileMentionMenu.open = false
   promptInput.value = next
   promptInput.focus()
   promptInput.setSelectionRange(before.length, before.length)
   promptInput.style.height = "auto"
   promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
+  syncPromptOverlay(promptInput)
   const send = document.querySelector(".send")
   if (send) send.classList.toggle("disabled", !threadAbortable() && !next.trim())
-  paintCommandMenu()
+  paintPromptAssistMenu()
+}
+
+async function selectFileMention(filePath) {
+  const promptInput = document.getElementById("promptInput")
+  if (!filePath || !promptInput) {
+    closeFileMentionMenu()
+    return
+  }
+  const token = fileMentionTokenForPath(filePath)
+  const value = promptInput.value
+  const caret = promptInput.selectionStart ?? value.length
+  const before = value.slice(0, caret).replace(/(^|\s)@([^\s@]*)$/, `$1${token}`)
+  const after = value.slice(caret)
+  const spacer = after && /^\s/.test(after) ? "" : " "
+  const next = `${before}${spacer}${after}`
+  state.promptDraft = next
+  state.pendingFileMentions = [
+    ...state.pendingFileMentions.filter((fileMention) => fileMention.token !== token),
+    { token, path: filePath, name: filename(filePath) }
+  ]
+  closeFileMentionMenu()
+  render()
+  const freshInput = document.getElementById("promptInput")
+  if (freshInput) {
+    freshInput.focus()
+    const selection = before.length + spacer.length
+    freshInput.setSelectionRange(selection, selection)
+    freshInput.style.height = "auto"
+    freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
+    syncPromptOverlay(freshInput)
+  }
 }
 
 function startSidebarResize(event) {
@@ -2924,9 +3315,29 @@ async function removeAttachment(id) {
   await window.openworking.attachments.discard([id])
 }
 
+function removeFileMention(token) {
+  if (!token) return
+  const promptInput = document.getElementById("promptInput")
+  const currentValue = promptInput?.value ?? state.promptDraft
+  const next = currentValue.replace(token, "").replace(/\s{2,}/g, " ")
+  state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => fileMention.token !== token)
+  state.promptDraft = next
+  render()
+  const freshInput = document.getElementById("promptInput")
+  if (freshInput) {
+    freshInput.focus()
+    const caret = next.length
+    freshInput.setSelectionRange(caret, caret)
+    freshInput.style.height = "auto"
+    freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
+    syncPromptOverlay(freshInput)
+  }
+}
+
 async function clearPendingAttachments() {
   const ids = state.pendingAttachments.map((attachment) => attachment.id)
   state.pendingAttachments = []
+  state.pendingFileMentions = []
   if (ids.length) await window.openworking.attachments.discard(ids)
 }
 
@@ -2951,7 +3362,7 @@ async function openProject(projectId, { selectLatest = true } = {}) {
   await clearPendingAttachments()
   const switchingProject = state.activeProjectId !== projectId
   state.activeProjectId = projectId
-  if (switchingProject) resetFileTree(projectId)
+  resetFileTree(projectId)
   state.activeSessionId = null
   resetActiveThread()
   state.nav = "session"
@@ -2989,14 +3400,37 @@ function pruneThreads(keepSessionIds) {
   }
 }
 
+function chooseSessionAfterRuntimeReconnect(currentSessionId, sessions) {
+  if (!currentSessionId) return null
+  return sessions.some((session) => session.id === currentSessionId) ? currentSessionId : null
+}
+
+async function ensureRuntimeProject(projectId, { preserveSessionId = null } = {}) {
+  const project = state.projects.find((item) => item.id === projectId)
+  if (!project) return null
+
+  state.loading = true
+  render()
+  try {
+    state.runtime = await window.openworking.runtime.openProject(project)
+    state.commands = await window.openworking.runtime.listCommands().catch(() => [])
+    state.commandMenu = { open: false, query: "", index: 0 }
+    const sessions = await window.openworking.runtime.listSessions()
+    state.sessionsByProject[projectId] = sessions
+    return chooseSessionAfterRuntimeReconnect(preserveSessionId, sessions)
+  } finally {
+    state.loading = false
+    render()
+  }
+}
+
 async function newSession(projectId, { clearAttachments = true } = {}) {
   if (!projectId) return
   const project = state.projects.find((item) => item.id === projectId)
   if (!project) return
-  const switchingProject = state.activeProjectId !== projectId
   if (clearAttachments) await clearPendingAttachments()
   state.activeProjectId = projectId
-  if (switchingProject) resetFileTree(projectId)
+  resetFileTree(projectId)
   state.activeSessionId = null
   resetActiveThread()
   state.nav = "session"
@@ -3167,16 +3601,25 @@ async function rejectPlan() {
 
 async function sendPrompt(rawPrompt) {
   state.commandMenu = { open: false, query: "", index: 0 }
+  state.fileMentionMenu.open = false
+  state.fileMentionMenu.query = ""
+  state.fileMentionMenu.index = 0
   const prompt = String(rawPrompt || "").trim()
   const project = selectedProject()
   if (!prompt || !project) return
   const commandMatch = prompt.match(/^\/([\w-]+)(?:\s+([\s\S]*))?$/)
   const command = commandMatch && findCommand(commandMatch[1]) ? commandMatch[1] : null
   const commandArgs = command ? (commandMatch[2] || "") : ""
-  const attachments = command ? [] : state.pendingAttachments.slice()
+  const fileMentions = command ? [] : await fileMentionsForSubmit(prompt, command)
+  const attachments = computePromptAttachments({
+    command,
+    pendingAttachments: state.pendingAttachments,
+    fileMentions
+  })
+  const effectivePrompt = command ? prompt : applyPendingFileMentions(prompt, fileMentions)
   const mode = modes.find((item) => item.id === state.mode) || modes[0]
   if (state.runtime?.project?.id !== project.id || state.runtime.status !== "running") {
-    await newSession(project.id, { clearAttachments: false })
+    state.activeSessionId = await ensureRuntimeProject(project.id, { preserveSessionId: state.activeSessionId })
   }
   if (!state.activeSessionId) {
     const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
@@ -3190,7 +3633,10 @@ async function sendPrompt(rawPrompt) {
     resetActiveThread(session.id)
   }
   const thread = activeThread()
-  const optimisticId = addOptimisticUser(thread, prompt, attachments)
+  const optimisticId = addOptimisticUser(thread, prompt, attachments, {
+    fileRefs: fileMentions,
+    signatureText: command ? undefined : effectivePrompt
+  })
   if (mode.id === "plan") {
     const afterMessageIndex = thread.messages.findIndex((message) => message.id === optimisticId)
     state.planProposal = {
@@ -3208,6 +3654,7 @@ async function sendPrompt(rawPrompt) {
   if (!command && sentAttachmentIds.size) {
     state.pendingAttachments = state.pendingAttachments.filter((attachment) => !sentAttachmentIds.has(attachment.id))
   }
+  if (!command) state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => !fileMentions.some((sent) => sent.token === fileMention.token))
   render({ threadScroll: "latest" })
   const model = selectedModel()
   try {
@@ -3222,7 +3669,7 @@ async function sendPrompt(rawPrompt) {
     } else {
       await window.openworking.runtime.sendPrompt({
         sessionId: state.activeSessionId,
-        prompt,
+        prompt: effectivePrompt,
         attachmentIds: attachments.map((attachment) => attachment.id),
         agent: mode.agent,
         model: model ? { providerID: model.providerID, modelID: model.modelID } : undefined
@@ -3239,6 +3686,13 @@ async function sendPrompt(rawPrompt) {
       state.pendingAttachments = [
         ...attachments.filter((attachment) => !pendingIds.has(attachment.id)),
         ...state.pendingAttachments
+      ]
+    }
+    if (!command && fileMentions.length) {
+      const pendingTokens = new Set(state.pendingFileMentions.map((fileMention) => fileMention.token))
+      state.pendingFileMentions = [
+        ...fileMentions.filter((fileMention) => !pendingTokens.has(fileMention.token)),
+        ...state.pendingFileMentions
       ]
     }
     render({ threadScroll: "latest" })
@@ -3297,6 +3751,7 @@ async function removeProject(projectId) {
   delete state.sessionsByProject[projectId]
   if (state.activeProjectId === projectId) {
     state.activeProjectId = state.projects[0]?.id || null
+    resetFileTree(state.activeProjectId)
     state.activeSessionId = null
     state.threads.clear()
     resetActiveThread()
@@ -3586,24 +4041,50 @@ async function logout() {
   }
 }
 
-document.addEventListener("click", (event) => {
-  if (state.commandMenu.open && !event.target.closest(".composer")) closeCommandMenu()
-  let dirty = false
-  if (state.sessionMenu && !event.target.closest(".session-row-wrap")) {
-    state.sessionMenu = null
-    dirty = true
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    applyPendingFileMentions,
+    chooseSessionAfterRuntimeReconnect,
+    collectLiveFileMentions,
+    computePromptAttachments,
+    escapeRegex,
+    fileMentionTokenForPath,
+    fileMentionTokenPattern,
+    filterPromptAttachments,
+    livePendingFileMentions,
+    renderPromptOverlayHtml,
+    renderTextWithFileMentions,
+    resolveFileMentionsFromPrompt
   }
-  if (state.projectMenu && !event.target.closest(".proj-head-wrap")) {
-    state.projectMenu = null
-    dirty = true
-  }
-  if (state.popover && !event.target.closest(".popover-anchor")) {
-    state.popover = null
-    dirty = true
-  }
-  if (dirty) render()
-})
+}
 
-loadInitialState().catch((error) => {
-  document.getElementById("root").innerHTML = `<pre class="fatal">${escapeHtml(error.stack || error.message)}</pre>`
-})
+if (typeof document !== "undefined") {
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".composer")) {
+      if (state.commandMenu.open) closeCommandMenu()
+      if (state.fileMentionMenu.open) closeFileMentionMenu()
+    }
+    let dirty = false
+    if (state.sessionMenu && !event.target.closest(".session-row-wrap")) {
+      state.sessionMenu = null
+      dirty = true
+    }
+    if (state.projectMenu && !event.target.closest(".proj-head-wrap")) {
+      state.projectMenu = null
+      dirty = true
+    }
+    if (state.popover && !event.target.closest(".popover-anchor")) {
+      state.popover = null
+      dirty = true
+    }
+    if (state.accountMenuOpen && !event.target.closest(".account-menu-anchor")) {
+      state.accountMenuOpen = false
+      dirty = true
+    }
+    if (dirty) render()
+  })
+
+  loadInitialState().catch((error) => {
+    document.getElementById("root").innerHTML = `<pre class="fatal">${escapeHtml(error.stack || error.message)}</pre>`
+  })
+}

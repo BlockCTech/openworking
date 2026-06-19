@@ -269,6 +269,24 @@ test("prompt parts route a markdown attachment as a local path instead of a mode
   assert.match(parts[0].text, /- \/tmp\/template\.md/)
 })
 
+test("prompt parts downgrade application/octet-stream attachments to local path text", () => {
+  const parts = buildPromptParts({
+    prompt: "Read this file",
+    attachments: [{
+      url: "file:///tmp/app/api/api_v1/endpoints/health_check.py",
+      filename: "health_check.py",
+      mime: "application/octet-stream"
+    }]
+  })
+
+  assert.equal(parts.some((part) => part.type === "file"), false)
+  assert.equal(parts.length, 1)
+  assert.equal(parts[0].type, "text")
+  assert.match(parts[0].text, /Read this file/)
+  assert.match(parts[0].text, /cannot be sent to the model as a binary file part/)
+  assert.match(parts[0].text, /\/tmp\/app\/api\/api_v1\/endpoints\/health_check\.py/)
+})
+
 test("prompt parts keep pdf and image attachments as model file parts", () => {
   const parts = buildPromptParts({
     prompt: "Summarize",

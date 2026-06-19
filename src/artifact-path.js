@@ -1,5 +1,6 @@
 const fs = require("node:fs")
 const path = require("node:path")
+const { spawnSync } = require("node:child_process")
 const { StringDecoder } = require("node:string_decoder")
 const { pathToFileURL } = require("node:url")
 
@@ -81,6 +82,13 @@ function isViewableProjectFile(filePath) {
   return VIEWABLE_FILE_BASENAMES.has(parsed.base) || VIEWABLE_FILE_EXTENSIONS.has(parsed.ext.toLowerCase())
 }
 
+function isHiddenProjectPath(relativePath) {
+  return String(relativePath || "")
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .some((segment) => segment.startsWith("."))
+}
+
 function assertProjectFile(projectPath, filePath) {
   const projectRoot = fs.realpathSync(path.resolve(projectPath))
   const requestedInput = String(filePath)
@@ -124,21 +132,61 @@ function assertProjectDirectory(projectPath, directoryPath = "") {
   return { projectRoot, resolved, relative }
 }
 
-function listProjectDirectory(projectPath, directoryPath = "") {
+function ignoredRelativePaths(projectRoot, relativePaths) {
+  const candidates = relativePaths.filter((relativePath) => relativePath && !isHiddenProjectPath(relativePath))
+  if (!candidates.length) return new Set()
+  const result = spawnSync("git", ["-C", projectRoot, "check-ignore", "--stdin"], {
+    input: `${candidates.join("\n")}\n`,
+    encoding: "utf8"
+  })
+  if (result.status === 0 || result.status === 1) {
+    return new Set(String(result.stdout || "").split("\n").filter(Boolean))
+  }
+  return new Set()
+}
+
+function listProjectDirectory(projectPath, directoryPath = "", options = {}) {
   const { projectRoot, resolved, relative } = assertProjectDirectory(projectPath, directoryPath)
+  const mode = options && typeof options === "object" ? options.mode : ""
+  const recursive = Boolean(options && typeof options === "object" && options.recursive)
   const entries = fs.readdirSync(resolved, { withFileTypes: true })
-  const children = []
+  const relativePaths = []
+  const rawChildren = []
   for (const entry of entries) {
     const type = entry.isDirectory() ? "directory" : entry.isFile() ? "file" : null
     if (!type) continue
     if (type === "directory" && IGNORED_PROJECT_DIRECTORIES.has(entry.name)) continue
     const absolutePath = path.join(resolved, entry.name)
     const childRelativePath = path.relative(projectRoot, absolutePath)
+    rawChildren.push({ entry, type, absolutePath, childRelativePath })
+    relativePaths.push(childRelativePath)
+  }
+  const ignoredPaths = mode === "visible-openable-files" ? ignoredRelativePaths(projectRoot, relativePaths) : null
+  const children = []
+  for (const child of rawChildren) {
+    if (isHiddenProjectPath(child.childRelativePath)) continue
+    if (mode === "visible-openable-files") {
+      if (ignoredPaths?.has(child.childRelativePath)) continue
+      if (child.type === "directory") {
+        if (!recursive) continue
+        const nested = listProjectDirectory(projectRoot, child.childRelativePath, options)
+        children.push(...nested.children)
+        continue
+      }
+      if (!isViewableProjectFile(child.absolutePath)) continue
+      children.push({
+        name: child.entry.name,
+        path: child.childRelativePath,
+        type: child.type,
+        openable: true
+      })
+      continue
+    }
     children.push({
-      name: entry.name,
-      path: childRelativePath,
-      type,
-      openable: type === "file" && isViewableProjectFile(absolutePath)
+      name: child.entry.name,
+      path: child.childRelativePath,
+      type: child.type,
+      openable: child.type === "file" && isViewableProjectFile(child.absolutePath)
     })
   }
   children.sort((a, b) => {

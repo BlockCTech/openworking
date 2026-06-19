@@ -6,9 +6,11 @@ const {
   clearPendingPermission,
   clearPendingQuestion,
   createThreadStream,
+  fileRefsFromBacktickPaths,
   hasRunningTool,
   hydrateThread,
   messageCopyText,
+  userMessageFileRefs,
   messageText,
   removeOptimisticUser,
   threadIsBusy
@@ -131,6 +133,120 @@ test("thread stream keeps safe file metadata for hydrated and optimistic user me
   const retryId = addOptimisticUser(thread, "Retry", [])
   removeOptimisticUser(thread, retryId)
   assert.equal(thread.messages.some((message) => message.id === retryId), false)
+})
+
+test("thread stream keeps optimistic file-ref chips while deduping against the effective prompt text", () => {
+  const thread = createThreadStream("sess_one")
+  addOptimisticUser(thread, "Hãy đọc cho tôi file @api.py", [], {
+    fileRefs: [{ token: "@api.py", path: "src/api.py", name: "api.py" }],
+    signatureText: "Hãy đọc cho tôi file `src/api.py`"
+  })
+
+  assert.deepEqual(thread.messages[0].parts[0], {
+    id: `${thread.messages[0].id}_ref_0`,
+    messageID: thread.messages[0].id,
+    type: "file-ref",
+    token: "@api.py",
+    path: "src/api.py",
+    name: "api.py"
+  })
+  assert.equal(messageText(thread.messages[0]), "Hãy đọc cho tôi file @api.py")
+  assert.equal(messageCopyText(thread.messages[0]), "Hãy đọc cho tôi file @api.py")
+
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_user", role: "user" },
+    parts: [
+      { id: "part_text", messageID: "msg_user", type: "text", text: "Hãy đọc cho tôi file `src/api.py`" }
+    ]
+  }])
+
+  assert.equal(thread.messages.length, 1)
+  assert.equal(thread.messages[0].id, "msg_user")
+  assert.equal(messageText(thread.messages[0]), "Hãy đọc cho tôi file @api.py")
+  assert.equal(thread.messages[0].parts.some((part) => part.type === "file-ref"), true)
+  assert.equal(thread.messages[0].parts.find((part) => part.type === "text")?.id, "part_text")
+  assert.equal(thread.messages[0].parts.find((part) => part.type === "text")?.text, "Hãy đọc cho tôi file `src/api.py`")
+})
+
+test("messageText derives @file display tokens from backtick paths when file-ref parts are missing", () => {
+  const thread = createThreadStream("sess_one")
+  thread.messages.push({
+    id: "msg_user",
+    role: "user",
+    parts: [{
+      id: "part_text",
+      messageID: "msg_user",
+      type: "text",
+      text: "đọc `app/api/api_v1/endpoints/health_check.py` cho tôi"
+    }]
+  })
+
+  assert.deepEqual(userMessageFileRefs(thread.messages[0]), [{
+    token: "@health_check.py",
+    path: "app/api/api_v1/endpoints/health_check.py",
+    name: "health_check.py"
+  }])
+  assert.equal(messageText(thread.messages[0]), "đọc @health_check.py cho tôi")
+  assert.equal(messageCopyText(thread.messages[0]), "đọc @health_check.py cho tôi")
+})
+
+test("fileRefsFromBacktickPaths ignores prose backticks without a viewable file path", () => {
+  assert.deepEqual(fileRefsFromBacktickPaths("run `npm run build` now"), [])
+  assert.deepEqual(fileRefsFromBacktickPaths("use `some command` here"), [])
+})
+
+test("fileRefsFromBacktickPaths only accepts known project files when an index is provided", () => {
+  const files = ["app/api/api_v1/endpoints/health_check.py", "foo/README.md", "bar/README.md"]
+  assert.deepEqual(
+    fileRefsFromBacktickPaths("see `app/api/api_v1/endpoints/health_check.py`", files),
+    [{ token: "@health_check.py", path: "app/api/api_v1/endpoints/health_check.py", name: "health_check.py" }]
+  )
+  assert.deepEqual(fileRefsFromBacktickPaths("see `foo/README.md`", files), [{
+    token: "@foo/README.md",
+    path: "foo/README.md",
+    name: "README.md"
+  }])
+  assert.deepEqual(fileRefsFromBacktickPaths("see `missing.py`", files), [])
+  assert.deepEqual(fileRefsFromBacktickPaths("see `npm run build`", files), [])
+})
+
+test("userMessageFileRefs prefers explicit file-ref parts over derived backtick paths", () => {
+  const message = {
+    role: "user",
+    parts: [
+      { type: "file-ref", token: "@api.py", path: "src/api.py", name: "api.py" },
+      { type: "text", text: "đọc `src/api.py`" }
+    ]
+  }
+  assert.deepEqual(userMessageFileRefs(message), [{
+    type: "file-ref",
+    token: "@api.py",
+    path: "src/api.py",
+    name: "api.py"
+  }])
+})
+
+test("hydrated user text without file-ref parts still renders @file tokens", () => {
+  const thread = createThreadStream("sess_one")
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_user", role: "user" },
+    parts: [{
+      id: "part_text",
+      messageID: "msg_user",
+      type: "text",
+      text: "đọc `app/api/api_v1/endpoints/health_check.py` cho tôi"
+    }]
+  }])
+
+  const userMessage = thread.messages.find((message) => message.id === "msg_user")
+  assert.ok(userMessage)
+  assert.equal(userMessage.parts.some((part) => part.type === "file-ref"), false)
+  assert.deepEqual(userMessageFileRefs(userMessage), [{
+    token: "@health_check.py",
+    path: "app/api/api_v1/endpoints/health_check.py",
+    name: "health_check.py"
+  }])
+  assert.equal(messageText(userMessage), "đọc @health_check.py cho tôi")
 })
 
 test("thread stream drops synthetic tool text and dedupes the optimistic user message", () => {

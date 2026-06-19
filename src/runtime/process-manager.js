@@ -26,6 +26,7 @@ const EXTRACTABLE_OFFICE_ATTACHMENT_MIMES = new Set([
 function buildPromptParts({ prompt, attachments = [] }) {
   const documentPaths = []
   const officeContexts = []
+  const localPaths = []
   const fileParts = []
   for (const attachment of attachments) {
     const localPath = attachmentLocalPath(attachment)
@@ -43,6 +44,10 @@ function buildPromptParts({ prompt, attachments = [] }) {
       }
       continue
     }
+    if (attachment.mime === "application/octet-stream") {
+      localPaths.push(attachmentLocalPath(attachment))
+      continue
+    }
     fileParts.push({
       type: "file",
       url: attachment.url,
@@ -51,15 +56,22 @@ function buildPromptParts({ prompt, attachments = [] }) {
     })
   }
   const base = String(prompt).trim()
-  const text = documentPaths.length
-    ? [
-      base,
+  const sections = [base]
+  if (documentPaths.length) {
+    sections.push(
       "Attached document files are provided as local paths plus extracted text context when available because the configured gateway accepts text/images, not raw document binaries.",
       "If the user asks to translate a DOCX, Markdown, PDF, PPTX, or XLSX file, call the translate_document tool with the exact local inputPath. Do not use shell/write scripts for translation artifacts. Do not claim an output path unless it is returned in translate_document metadata.artifacts.",
       `Attached files (local paths):\n${documentPaths.map((p) => `- ${p}`).join("\n")}`,
       officeContexts.filter(Boolean).length ? `Extracted Office context:\n${officeContexts.filter(Boolean).join("\n\n")}` : ""
-    ].filter(Boolean).join("\n\n")
-    : base
+    )
+  }
+  if (localPaths.length) {
+    sections.push(
+      "Attached files are provided as local paths because their media type cannot be sent to the model as a binary file part.",
+      `Attached files (local paths):\n${localPaths.map((p) => `- ${p}`).join("\n")}`
+    )
+  }
+  const text = sections.filter(Boolean).join("\n\n")
   return [...fileParts, { type: "text", text }]
 }
 

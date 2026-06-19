@@ -20,9 +20,13 @@ class AttachmentRegistry {
   }
 
   add(filePaths = []) {
+    return this.addResolved(filePaths.map((filePath) => path.resolve(String(filePath))))
+  }
+
+  addResolved(filePaths = []) {
     const result = []
     for (const filePath of filePaths) {
-      const resolvedPath = path.resolve(String(filePath))
+      const resolvedPath = String(filePath)
       let attachment = this.attachments.get(this.idsByPath.get(resolvedPath))
       if (!attachment) {
         attachment = {

@@ -4,6 +4,7 @@ const fs = require("node:fs")
 const os = require("node:os")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
+const { execFileSync } = require("node:child_process")
 const { assertTranslationArtifact, assertProjectFile, assertProjectDirectory, listProjectDirectory, previewTranslationArtifact, readProjectFileContent } = require("../src/artifact-path")
 
 test("translation artifacts open when they match the translated document convention", () => {
@@ -200,6 +201,60 @@ test("project directory listing rejects traversal outside the project", () => {
 
   assert.throws(() => assertProjectDirectory(project, outside), /outside the current project/)
   assert.throws(() => listProjectDirectory(project, path.join(project, "..", path.basename(outside))), /outside the current project/)
+})
+
+test("project directory listing can return only visible non-hidden non-gitignored files for @file", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-projdir-gitignore-"))
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" })
+  fs.writeFileSync(path.join(project, ".gitignore"), [
+    "logs/",
+    "ignored.md",
+    "src/generated.md",
+    "deep/a/",
+    "tmp-cache/"
+  ].join("\n"))
+  fs.mkdirSync(path.join(project, "logs"), { recursive: true })
+  fs.mkdirSync(path.join(project, "src"), { recursive: true })
+  fs.mkdirSync(path.join(project, "deep", "a", "b"), { recursive: true })
+  fs.mkdirSync(path.join(project, "visible", "nested"), { recursive: true })
+  fs.mkdirSync(path.join(project, "tmp-cache"), { recursive: true })
+  fs.mkdirSync(path.join(project, ".hidden"), { recursive: true })
+  fs.writeFileSync(path.join(project, "logs", "debug.log"), "debug")
+  fs.writeFileSync(path.join(project, "ignored.md"), "# ignored root")
+  fs.writeFileSync(path.join(project, "README.md"), "# visible")
+  fs.writeFileSync(path.join(project, "src", "app.js"), "console.log('ok')\n")
+  fs.writeFileSync(path.join(project, "src", "generated.md"), "# ignored nested")
+  fs.writeFileSync(path.join(project, "deep", "a", "b", "report.md"), "# ignored deep")
+  fs.writeFileSync(path.join(project, "tmp-cache", "snapshot.md"), "# ignored")
+  fs.writeFileSync(path.join(project, "visible", "nested", "report.md"), "# visible nested")
+  fs.writeFileSync(path.join(project, "visible", "nested", "script.ts"), "export const ok = true\n")
+  fs.writeFileSync(path.join(project, ".env"), "TOKEN=secret")
+  fs.writeFileSync(path.join(project, ".hidden", "secret.local"), "hidden")
+
+  const root = listProjectDirectory(project, "", { mode: "visible-openable-files" })
+  assert.deepEqual(root.children, [
+    { name: "README.md", path: "README.md", type: "file", openable: true }
+  ])
+
+  const logs = listProjectDirectory(project, "logs", { mode: "visible-openable-files" })
+  assert.deepEqual(logs.children, [])
+
+  const cache = listProjectDirectory(project, "tmp-cache", { mode: "visible-openable-files" })
+  assert.deepEqual(cache.children, [
+  ])
+
+  const src = listProjectDirectory(project, "src", { mode: "visible-openable-files" })
+  assert.deepEqual(src.children, [
+    { name: "app.js", path: path.join("src", "app.js"), type: "file", openable: true }
+  ])
+
+  const recursive = listProjectDirectory(project, "", { mode: "visible-openable-files", recursive: true })
+  assert.deepEqual(recursive.children, [
+    { name: "app.js", path: path.join("src", "app.js"), type: "file", openable: true },
+    { name: "README.md", path: "README.md", type: "file", openable: true },
+    { name: "report.md", path: path.join("visible", "nested", "report.md"), type: "file", openable: true },
+    { name: "script.ts", path: path.join("visible", "nested", "script.ts"), type: "file", openable: true }
+  ])
 })
 
 test("readProjectFileContent reads small files fully", () => {

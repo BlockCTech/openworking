@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld("openworking", {
   },
   attachments: {
     pick: () => ipcRenderer.invoke("attachments:pick"),
+    addProjectFile: (filePath) => ipcRenderer.invoke("attachments:addProjectFile", filePath),
     discard: (ids) => ipcRenderer.invoke("attachments:discard", ids)
   },
   clipboard: {

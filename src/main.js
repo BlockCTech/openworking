@@ -202,6 +202,12 @@ function registerIpc() {
     if (result.canceled || !result.filePaths.length) return []
     return attachmentRegistry.add(result.filePaths)
   })
+  ipcMain.handle("attachments:addProjectFile", async (_event, filePath) => {
+    const projectPath = runtimeManager.snapshot().project?.path
+    if (!projectPath) throw new Error("Open a project before attaching a file.")
+    const safePath = assertProjectFile(projectPath, filePath)
+    return attachmentRegistry.addResolved([safePath])[0] || null
+  })
   ipcMain.handle("attachments:discard", (_event, ids) => {
     attachmentRegistry.discard(Array.isArray(ids) ? ids : [])
   })
@@ -236,10 +242,12 @@ function registerIpc() {
       truncated
     }
   })
-  ipcMain.handle("files:list", async (_event, directoryPath) => {
+  ipcMain.handle("files:list", async (_event, payload) => {
     const projectPath = runtimeManager.snapshot().project?.path
     if (!projectPath) throw new Error("Open a project before listing files.")
-    return listProjectDirectory(projectPath, directoryPath)
+    const directoryPath = typeof payload === "string" ? payload : payload?.directoryPath
+    const options = payload && typeof payload === "object" ? payload.options : undefined
+    return listProjectDirectory(projectPath, directoryPath, options)
   })
 
   ipcMain.handle("version:check", () =>
