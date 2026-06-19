@@ -95,7 +95,7 @@ The Config screen allows edits only for provider `baseURL`, provider `apiKey`, m
 
 Skills may include offline references under their bundled directory. Optional host tools such as LibreOffice, Poppler and Playwright are documented by the relevant skill but are not shipped in the desktop bundle. Optional plugins remain separate presets. Clicking `Superpowers` adds its plugin spec, but built-in skills do not depend on that network-loaded plugin.
 
-See `docs/built-in-skills.md` for the bundle contract.
+See `docs/03-skills-runtime/built-in-skills.md` for the bundle contract. The full documentation set is indexed in [docs/README.md](docs/README.md), organized by SDLC phase.
 
 ## Session-First Workflow
 

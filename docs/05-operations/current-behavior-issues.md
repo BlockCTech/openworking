@@ -67,9 +67,9 @@ This file logs behavior issues observed in the current TechTusCoWork app during 
 - Observed:
   The current project group renders project name, new-session action, and menu, but no session count badge.
 - Reference:
-  `docs/phase-1-session-first-ux.md` lists "Project accordion with session count".
+  `docs/00-product/session-first-ux.md` lists "Project accordion with session count".
 - Relevant code:
-  - `docs/phase-1-session-first-ux.md:20`
+  - `docs/00-product/session-first-ux.md:20`
   - `src/renderer.js:1128-1164`
 - Impact:
   Small UX drift from the documented shell; reduces scanability when many projects are present.
