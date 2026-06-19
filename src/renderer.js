@@ -64,6 +64,59 @@ const chips = [
   { label: "Summarize changes", icon: "activity", text: "Summarize the most recent changes in this project." }
 ]
 
+// Curated catalog of well-known remote MCP servers, surfaced as one-click presets in the
+// Extensions marketplace. This is a static prefill list (no network call, no remote
+// registry) — clicking a card just opens the Add Custom App modal pre-filled. `needsClientApp`
+// marks servers that do NOT support dynamic client registration and require a pre-registered
+// OAuth app (clientId/clientSecret), e.g. Slack.
+const MCP_PRESETS = [
+  {
+    id: "slack",
+    name: "Slack",
+    url: "https://mcp.slack.com/mcp",
+    blurb: "Search channels, read and post messages.",
+    icon: "activity",
+    needsClientApp: true,
+    docsUrl: "https://docs.slack.dev/ai/mcp/"
+  },
+  {
+    id: "github",
+    name: "GitHub",
+    url: "https://api.githubcopilot.com/mcp/",
+    blurb: "Browse repos, issues, and pull requests.",
+    icon: "blocks",
+    needsClientApp: false,
+    docsUrl: "https://github.com/github/github-mcp-server"
+  },
+  {
+    id: "linear",
+    name: "Linear",
+    url: "https://mcp.linear.app/sse",
+    blurb: "Plan sprints and ship tickets faster.",
+    icon: "bolt",
+    needsClientApp: false,
+    docsUrl: "https://linear.app/docs/mcp"
+  },
+  {
+    id: "sentry",
+    name: "Sentry",
+    url: "https://mcp.sentry.dev/mcp",
+    blurb: "Track releases and resolve production errors.",
+    icon: "activity",
+    needsClientApp: false,
+    docsUrl: "https://docs.sentry.io/product/sentry-mcp/"
+  },
+  {
+    id: "notion",
+    name: "Notion",
+    url: "https://mcp.notion.com/mcp",
+    blurb: "Keep docs, databases, and project notes in sync.",
+    icon: "doc",
+    needsClientApp: false,
+    docsUrl: "https://developers.notion.com/docs/mcp"
+  }
+]
+
 const {
   addOptimisticUser,
   applyThreadEvent,
@@ -102,11 +155,20 @@ const state = {
   config: null,
   customSkills: [],
   mcpServers: [],
-  skillsTab: "skills",             // skills | mcp
+  mcpStatus: {},                   // name -> "connected" | "needs_auth" | "failed" | "disabled"
+  mcpStatusError: {},              // name -> opencode's real failure reason (from GET /mcp), if any
+  mcpAuthenticating: {},           // name -> true while an auth flow is in progress
+  skillsTab: "skills",             // skills | mcp (mcp tab is the Extensions marketplace)
   mcpModalOpen: false,
   mcpSaving: false,
   mcpError: null,
-  mcpDraft: null,                  // { name, type, url, command, oauth, headers: [{key,value}] }
+  mcpErrorTarget: null,            // server name an inline error belongs to, or null for panel-level
+  // Draft for the Add/Edit Custom App modal:
+  // { name, type, url, command, headers: [{key,value}],
+  //   oauthMode: "auto"|"custom"|"disabled", oauthClientId, oauthClientSecret, oauthScope,
+  //   oauthAdvancedOpen, hasStoredSecret }
+  mcpDraft: null,
+  mcpEditTarget: null,             // name of the server being edited, or null when adding
   mcpDeleteTarget: null,           // { name } của MCP server chờ xác nhận xóa
   mcpRemoving: false,
   modalityErrors: {},
@@ -537,6 +599,11 @@ function handleRuntimeStream(event) {
   // screen — this is what keeps a backgrounded session streaming. We only touch a
   // thread we already track (active or previously opened); unknown sessions are
   // picked up lazily by the periodic refresh when the user opens them.
+  // MCP connection-status events carry no sessionID; update the badge in place.
+  if (event?.type && event.type.startsWith("mcp.")) {
+    handleMcpStreamEvent(event)
+    return
+  }
   const sessionId = event?.sessionID
   if (!sessionId) return
   const thread = state.threads.get(sessionId)
@@ -557,6 +624,46 @@ function handleRuntimeStream(event) {
     scheduleThreadRender()
   }
   if (result.reconcile) scheduleRefresh()
+}
+
+// Live-update MCP server connection status from runtime stream events. Only repaint
+// when the MCP panel is on screen to avoid spurious full renders.
+function handleMcpStreamEvent(event) {
+  if (!event?.name) return
+  if (event.type === "mcp.browser.open.failed") {
+    // The browser failed to open automatically; surface the link so the user can
+    // complete authentication manually.
+    state.mcpError = `Could not open the browser. Open this link to authenticate ${event.name}: ${event.url}`
+    state.mcpErrorTarget = event.name
+  } else if (event.status) {
+    state.mcpStatus = { ...state.mcpStatus, [event.name]: event.status }
+    if (event.status !== "needs_auth") state.mcpAuthenticating = { ...state.mcpAuthenticating, [event.name]: false }
+  }
+  if (state.nav === "skills" && state.skillsTab === "mcp") render()
+}
+
+// Apply a status array from GET /mcp into the status + error maps.
+function applyMcpStatusList(status) {
+  const map = {}
+  const errors = {}
+  for (const entry of Array.isArray(status) ? status : []) {
+    if (!entry?.name) continue
+    map[entry.name] = entry.status
+    if (entry.error) errors[entry.name] = entry.error
+  }
+  state.mcpStatus = map
+  state.mcpStatusError = errors
+}
+
+// Fetch MCP connection status from the runtime and repaint the panel. Errors are
+// swallowed (e.g. no project open yet) so the panel still renders.
+async function refreshMcpStatus() {
+  try {
+    applyMcpStatusList(await window.openworking.mcp.status())
+    if (state.nav === "skills" && state.skillsTab === "mcp") render()
+  } catch {
+    // Runtime not ready; leave status empty.
+  }
 }
 
 function activePlanProposal() {
@@ -2337,7 +2444,7 @@ function renderSkillsScreen() {
       <div class="admin-content skills-screen">
         <div class="skills-tabs">
           <button class="skills-tab ${tab === "skills" ? "active" : ""}" data-skills-tab="skills">${icon("blocks")}<span>Skills</span></button>
-          <button class="skills-tab ${tab === "mcp" ? "active" : ""}" data-skills-tab="mcp">${icon("server")}<span>MCP Servers</span></button>
+          <button class="skills-tab ${tab === "mcp" ? "active" : ""}" data-skills-tab="mcp">${icon("server")}<span>Extensions</span></button>
         </div>
         ${tab === "mcp" ? renderMcpPanel() : renderSkillsPanel()}
       </div>
@@ -2373,44 +2480,158 @@ function mcpServerSubtitle(server) {
   return server.url || ""
 }
 
+// Resolve the connection state of a server into a status pill + whether an auth action
+// is offered. Returns { pill: html, action: "authenticate"|"reconnect"|null }.
+function mcpStatusInfo(server) {
+  const oauthEligible = server.type === "remote" && server.oauth !== false
+  if (state.mcpAuthenticating?.[server.name]) {
+    return { pill: `<span class="mcp-pill mcp-pill-pending">Authenticating…</span>`, action: null }
+  }
+  const status = state.mcpStatus?.[server.name]
+  if (!server.enabled) return { pill: `<span class="mcp-pill mcp-pill-muted">Disabled</span>`, action: null }
+  if (status === "connected") return { pill: `<span class="mcp-pill mcp-pill-ok">Connected</span>`, action: null }
+  if (status === "failed") {
+    return { pill: `<span class="mcp-pill mcp-pill-bad">Failed</span>`, action: oauthEligible ? "reconnect" : null }
+  }
+  if (status === "needs_auth") {
+    return { pill: `<span class="mcp-pill mcp-pill-warn">Needs auth</span>`, action: oauthEligible ? "authenticate" : null }
+  }
+  if (status === "needs_client_registration") {
+    return { pill: `<span class="mcp-pill mcp-pill-warn">Needs OAuth app</span>`, action: oauthEligible ? "authenticate" : null }
+  }
+  return { pill: "", action: null }
+}
+
+function renderMcpServerCard(server) {
+  const { pill, action } = mcpStatusInfo(server)
+  // Prefer the transient action error (from a click); otherwise show opencode's persistent
+  // connect-failure reason from GET /mcp so the real cause is always visible on a failed card.
+  const errorText = (state.mcpError && state.mcpErrorTarget === server.name)
+    ? state.mcpError
+    : (state.mcpStatusError?.[server.name] || "")
+  const error = errorText ? `<div class="mcp-card-error">${escapeHtml(errorText)}</div>` : ""
+  const authBtn = action
+    ? `<button class="secondary-btn" data-action="authenticateMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}${action === "reconnect" ? "Reconnect" : "Authenticate"}</button>`
+    : ""
+  // On a failed connect, offer a reset that clears any stale stored OAuth state before re-auth —
+  // this recovers from a partial/dynamic registration left by an earlier attempt.
+  const clearBtn = action === "reconnect"
+    ? `<button class="secondary-btn" data-action="clearMcpAuth" data-mcp-name="${escapeHtml(server.name)}" title="Clear stored credentials and authenticate again">${icon("trash")}Reset auth</button>`
+    : ""
+  return `
+    <div class="mcp-card">
+      <div class="mcp-card-main">
+        <span class="mcp-card-icon">${icon("server")}</span>
+        <span class="mcp-card-text">
+          <strong>${escapeHtml(server.name)}</strong>
+          <small>${escapeHtml(mcpServerSubtitle(server))}</small>
+        </span>
+        ${pill}
+      </div>
+      <div class="mcp-card-actions">
+        ${authBtn}
+        ${clearBtn}
+        <button class="secondary-btn" data-action="editMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("edit")}Edit</button>
+        <span class="mcp-pill mcp-pill-type">${server.type === "remote" ? "Remote" : "Local"}</span>
+        <button class="switch ${server.enabled ? "on" : ""}" role="switch" aria-checked="${server.enabled ? "true" : "false"}" data-mcp-toggle="${escapeHtml(server.name)}" data-mcp-enabled="${server.enabled ? "1" : "0"}" title="${server.enabled ? "Disable" : "Enable"}"></button>
+        <button class="small-icon-btn mcp-delete" data-action="removeMcp" data-mcp-name="${escapeHtml(server.name)}" aria-label="Remove ${escapeHtml(server.name)}">${icon("trash")}</button>
+      </div>
+      ${error}
+    </div>
+  `
+}
+
+function renderMcpPresetCard(preset) {
+  const connected = (state.mcpServers || []).some((server) => server.name === preset.id)
+  return `
+    <div class="mcp-preset ${connected ? "connected" : ""}">
+      <div class="mcp-preset-head">
+        <span class="mcp-card-icon">${icon(preset.icon)}</span>
+        <strong>${escapeHtml(preset.name)}</strong>
+        ${preset.needsClientApp ? `<span class="mcp-pill mcp-pill-type">OAuth app</span>` : ""}
+      </div>
+      <p class="mcp-preset-blurb">${escapeHtml(preset.blurb)}</p>
+      ${connected
+        ? `<button class="secondary-btn" disabled>${icon("check")}Added</button>`
+        : `<button class="secondary-btn" data-action="connectPreset" data-preset-id="${escapeHtml(preset.id)}">${icon("plus")}Connect</button>`}
+    </div>
+  `
+}
+
 function renderMcpPanel() {
   const servers = state.mcpServers || []
   return `
     <section class="admin-panel skills-panel">
-      <div class="panel-head"><div><h1>MCP Servers</h1><p>Connect custom MCP servers by URL or local command.</p></div><button class="secondary-btn" data-action="openMcpModal">${icon("plus")}Add MCP server</button></div>
-      <div class="skill-list">
-        ${servers.length ? servers.map((server) => `
-          <div class="skill-list-item mcp-list-item">
-            <span class="sli-icon">${icon("server")}</span>
-            <span class="sli-text">
-              <strong>${escapeHtml(server.name)}</strong>
-              <small>${escapeHtml(mcpServerSubtitle(server))}</small>
-            </span>
-            <span class="sli-badge ${server.type === "remote" ? "builtin" : "custom"}">${server.type === "remote" ? "Remote" : "Local"}</span>
-            <button class="switch ${server.enabled ? "on" : ""}" role="switch" aria-checked="${server.enabled ? "true" : "false"}" data-mcp-toggle="${escapeHtml(server.name)}" data-mcp-enabled="${server.enabled ? "1" : "0"}" title="${server.enabled ? "Disable" : "Enable"}"></button>
-            <button class="small-icon-btn mcp-delete" data-action="removeMcp" data-mcp-name="${escapeHtml(server.name)}" aria-label="Remove ${escapeHtml(server.name)}">${icon("trash")}</button>
-          </div>
-        `).join("") : `<div class="config-note">No MCP servers yet. Click "Add MCP server" to connect one.</div>`}
+      <div class="panel-head"><div><h1>Extensions</h1><p>Connect MCP servers to give the agent new tools. Pick a featured app or add your own.</p></div><button class="primary-btn" data-action="openMcpModal">${icon("plus")}Add Custom App</button></div>
+
+      <div class="mcp-section-label">Featured</div>
+      <div class="mcp-preset-grid">
+        ${MCP_PRESETS.map(renderMcpPresetCard).join("")}
       </div>
+
+      <div class="mcp-section-label">Connected</div>
+      <div class="mcp-card-list">
+        ${servers.length ? servers.map(renderMcpServerCard).join("") : `<div class="config-note">No apps connected yet. Pick a featured app above or click "Add Custom App".</div>`}
+      </div>
+      ${state.mcpError && !state.mcpErrorTarget && !state.mcpModalOpen ? `<div class="config-note field-error">${escapeHtml(state.mcpError)}</div>` : ""}
     </section>
+  `
+}
+
+function renderMcpOauthSection(draft) {
+  const lock = state.mcpSaving ? "disabled" : ""
+  const mode = draft.oauthMode || "auto"
+  const advanced = !!draft.oauthAdvancedOpen
+  const secretPlaceholder = draft.hasStoredSecret ? "•••• (stored — leave blank to keep)" : "Paste the OAuth client secret"
+  return `
+    <div class="mcp-field-label">Authentication</div>
+    <div class="mcp-type-toggle">
+      <button class="mcp-type-opt ${mode === "auto" ? "active" : ""}" data-mcp-oauth-mode="auto" ${lock}>Auto</button>
+      <button class="mcp-type-opt ${mode === "custom" ? "active" : ""}" data-mcp-oauth-mode="custom" ${lock}>OAuth app</button>
+      <button class="mcp-type-opt ${mode === "disabled" ? "active" : ""}" data-mcp-oauth-mode="disabled" ${lock}>None</button>
+    </div>
+    <div class="config-note mcp-oauth-hint">${
+      mode === "auto" ? "The server registers a client automatically (works for most MCP servers). You'll sign in after adding."
+      : mode === "custom" ? "Use this for servers that need a pre-registered OAuth app, such as Slack MCP."
+      : "No OAuth — the server is reached directly (or via custom headers)."
+    }</div>
+    ${mode === "custom" ? `
+      <button class="mcp-advanced-toggle" data-action="toggleMcpAdvanced" ${lock}>${icon(advanced ? "chevDown" : "chevRight")}Advanced OAuth</button>
+      ${advanced ? `
+        <div class="mcp-advanced">
+          <label for="mcpOauthClientId">OAuth client ID
+            <input id="mcpOauthClientId" type="text" value="${escapeHtml(draft.oauthClientId || "")}" placeholder="Paste the OAuth client ID" data-mcp-field="oauthClientId" ${lock}>
+          </label>
+          <label for="mcpOauthClientSecret">OAuth client secret
+            <input id="mcpOauthClientSecret" type="password" value="${escapeHtml(draft.oauthClientSecret || "")}" placeholder="${escapeHtml(secretPlaceholder)}" data-mcp-field="oauthClientSecret" autocomplete="off" ${lock}>
+          </label>
+          <label for="mcpOauthScope">OAuth scopes
+            <input id="mcpOauthScope" type="text" value="${escapeHtml(draft.oauthScope || "")}" placeholder="Optional, space-separated scopes" data-mcp-field="oauthScope" ${lock}>
+          </label>
+          <div class="mcp-warning">Keep client secrets out of chats and source control. Store only credentials issued for this app.</div>
+          ${draft.presetDocsUrl ? `<button class="link-btn" data-action="openMcpDocs" data-docs-url="${escapeHtml(draft.presetDocsUrl)}">${icon("book")}Where do I get these?</button>` : ""}
+        </div>
+      ` : ""}
+    ` : ""}
   `
 }
 
 function renderMcpModal() {
   const draft = state.mcpDraft
   if (!state.mcpModalOpen || !draft) return ""
+  const editing = !!state.mcpEditTarget
   const disable = state.mcpSaving ? " disabled" : ""
   const isRemote = draft.type !== "local"
   const headers = Array.isArray(draft.headers) ? draft.headers : []
   return `
     <div class="update-backdrop" ${state.mcpSaving ? "" : 'data-action="closeMcpModal"'}>
       <div class="confirm-modal rename-modal mcp-modal" role="dialog" aria-modal="true" aria-labelledby="mcpModalTitle" data-stop-click>
-        <div class="confirm-title" id="mcpModalTitle">Add MCP Server</div>
+        <div class="confirm-title" id="mcpModalTitle">${editing ? "Edit App" : "Add Custom App"}</div>
         <p>Connect a custom MCP server by URL or local command.</p>
         <div class="rename-modal-body">
           <label for="mcpName">
             App name
-            <input id="mcpName" type="text" value="${escapeHtml(draft.name)}" placeholder="sentry-mcp" data-mcp-field="name" ${state.mcpSaving ? "disabled" : ""}>
+            <input id="mcpName" type="text" value="${escapeHtml(draft.name)}" placeholder="sentry-mcp" data-mcp-field="name" ${editing || state.mcpSaving ? "disabled" : ""}>
           </label>
           <div class="mcp-field-label">Type</div>
           <div class="mcp-type-toggle">
@@ -2422,10 +2643,7 @@ function renderMcpModal() {
               Server URL
               <input id="mcpUrl" type="text" value="${escapeHtml(draft.url)}" placeholder="https://mcp.sentry.dev/mcp" data-mcp-field="url" ${state.mcpSaving ? "disabled" : ""}>
             </label>
-            <label class="mcp-checkbox">
-              <input type="checkbox" data-mcp-field="oauth" ${draft.oauth ? "checked" : ""} ${state.mcpSaving ? "disabled" : ""}>
-              <span>Requires OAuth sign-in</span>
-            </label>
+            ${renderMcpOauthSection(draft)}
             <div class="mcp-headers">
               <div class="mcp-field-label">Custom headers</div>
               ${headers.map((header, index) => `
@@ -2443,11 +2661,11 @@ function renderMcpModal() {
               <input id="mcpCommand" type="text" value="${escapeHtml(draft.command)}" placeholder="npx -y some-mcp-server" data-mcp-field="command" ${state.mcpSaving ? "disabled" : ""}>
             </label>
           `}
-          <div class="field-error">${state.mcpError ? escapeHtml(state.mcpError) : ""}</div>
+          <div class="field-error">${state.mcpError && state.mcpModalOpen ? escapeHtml(state.mcpError) : ""}</div>
         </div>
         <div class="confirm-actions">
           <button class="secondary-btn${disable}" data-action="closeMcpModal">Cancel</button>
-          <button class="primary-btn${disable}" data-action="submitMcpServer">${icon("plus")}${state.mcpSaving ? "Adding…" : "Add server"}</button>
+          <button class="primary-btn${disable}" data-action="submitMcpServer">${icon(editing ? "save" : "plus")}${state.mcpSaving ? "Saving…" : (editing ? "Save changes" : "Add App")}</button>
         </div>
       </div>
     </div>
@@ -2829,6 +3047,7 @@ function bindEvents() {
   document.querySelectorAll("[data-skills-tab]").forEach((element) => element.addEventListener("click", () => {
     state.skillsTab = element.dataset.skillsTab
     render()
+    if (state.skillsTab === "mcp") refreshMcpStatus()
   }))
   document.querySelectorAll("[data-mcp-type]").forEach((element) => element.addEventListener("click", () => {
     if (state.mcpSaving || !state.mcpDraft) return
@@ -2841,8 +3060,15 @@ function bindEvents() {
   }))
   document.querySelectorAll("[data-mcp-field]").forEach((element) => element.addEventListener("input", () => {
     if (!state.mcpDraft) return
-    const field = element.dataset.mcpField
-    state.mcpDraft[field] = field === "oauth" ? element.checked : element.value
+    state.mcpDraft[element.dataset.mcpField] = element.value
+  }))
+  document.querySelectorAll("[data-mcp-oauth-mode]").forEach((element) => element.addEventListener("click", () => {
+    if (state.mcpSaving || !state.mcpDraft) return
+    const mode = element.dataset.mcpOauthMode
+    state.mcpDraft.oauthMode = mode
+    if (mode === "custom") state.mcpDraft.oauthAdvancedOpen = true
+    state.mcpError = null
+    render()
   }))
   document.querySelectorAll("[data-mcp-header]").forEach((element) => element.addEventListener("input", () => {
     if (!state.mcpDraft) return
@@ -3224,6 +3450,16 @@ async function handleAction(event) {
     if (action === "openMcpModal") openMcpModal()
     if (action === "closeMcpModal") closeMcpModal()
     if (action === "submitMcpServer") await submitMcpServer()
+    if (action === "connectPreset") openMcpModalForPreset(event.currentTarget.dataset.presetId)
+    if (action === "editMcp") openMcpModalForEdit(event.currentTarget.dataset.mcpName)
+    if (action === "toggleMcpAdvanced") {
+      state.mcpDraft.oauthAdvancedOpen = !state.mcpDraft.oauthAdvancedOpen
+      render()
+    }
+    if (action === "openMcpDocs") {
+      const url = event.currentTarget.dataset.docsUrl
+      if (url) await window.openworking.mcp.openDocs(url)
+    }
     if (action === "addMcpHeader") {
       state.mcpDraft.headers = [...(state.mcpDraft.headers || []), { key: "", value: "" }]
       render()
@@ -3237,6 +3473,12 @@ async function handleAction(event) {
       state.mcpDeleteTarget = { name: event.currentTarget.dataset.mcpName }
       state.mcpRemoving = false
       render()
+    }
+    if (action === "authenticateMcp") {
+      await authenticateMcp(event.currentTarget.dataset.mcpName)
+    }
+    if (action === "clearMcpAuth") {
+      await authenticateMcp(event.currentTarget.dataset.mcpName, { clear: true })
     }
     if (action === "cancelRemoveMcp") {
       if (state.mcpRemoving) return
@@ -3819,6 +4061,11 @@ function redactedConfigJson() {
   for (const provider of Object.values(config?.provider || {})) {
     if (provider.options?.apiKey) provider.options.apiKey = "[redacted]"
   }
+  for (const server of Object.values(config?.mcp || {})) {
+    if (server?.oauth && typeof server.oauth === "object" && server.oauth.clientSecret) {
+      server.oauth.clientSecret = "[redacted]"
+    }
+  }
   return JSON.stringify(config, null, 2)
 }
 
@@ -3901,22 +4148,94 @@ async function uninstallSkill(name) {
   }
 }
 
+function newMcpDraft(overrides = {}) {
+  return {
+    name: "",
+    type: "remote",
+    url: "",
+    command: "",
+    headers: [],
+    oauthMode: "auto",          // auto | custom | disabled
+    oauthClientId: "",
+    oauthClientSecret: "",
+    oauthScope: "",
+    oauthAdvancedOpen: false,
+    hasStoredSecret: false,
+    presetDocsUrl: "",
+    ...overrides
+  }
+}
+
 function openMcpModal() {
   state.mcpModalOpen = true
+  state.mcpEditTarget = null
   state.mcpSaving = false
   state.mcpError = null
-  state.mcpDraft = { name: "", type: "remote", url: "", command: "", oauth: true, headers: [] }
+  state.mcpDraft = newMcpDraft()
+  render()
+}
+
+function openMcpModalForPreset(presetId) {
+  const preset = MCP_PRESETS.find((entry) => entry.id === presetId)
+  if (!preset) return openMcpModal()
+  state.mcpModalOpen = true
+  state.mcpEditTarget = null
+  state.mcpSaving = false
+  state.mcpError = null
+  state.mcpDraft = newMcpDraft({
+    name: preset.id,
+    url: preset.url,
+    oauthMode: preset.needsClientApp ? "custom" : "auto",
+    oauthAdvancedOpen: !!preset.needsClientApp,
+    presetDocsUrl: preset.docsUrl || ""
+  })
+  render()
+}
+
+function openMcpModalForEdit(name) {
+  const server = (state.mcpServers || []).find((entry) => entry.name === name)
+  if (!server) return
+  let oauthMode = "auto"
+  let oauthClientId = ""
+  let oauthScope = ""
+  let hasStoredSecret = false
+  if (server.oauth === false) {
+    oauthMode = "disabled"
+  } else if (server.oauth && typeof server.oauth === "object") {
+    oauthMode = "custom"
+    oauthClientId = server.oauth.clientId || ""
+    oauthScope = server.oauth.scope || ""
+    hasStoredSecret = !!server.oauth.hasClientSecret
+  }
+  state.mcpModalOpen = true
+  state.mcpEditTarget = name
+  state.mcpSaving = false
+  state.mcpError = null
+  state.mcpDraft = newMcpDraft({
+    name: server.name,
+    type: server.type,
+    url: server.url || "",
+    command: Array.isArray(server.command) ? server.command.join(" ") : "",
+    headers: Object.entries(server.headers || {}).map(([key, value]) => ({ key, value })),
+    oauthMode,
+    oauthClientId,
+    oauthScope,
+    oauthAdvancedOpen: oauthMode === "custom",
+    hasStoredSecret
+  })
   render()
 }
 
 function closeMcpModal() {
   if (state.mcpSaving) return
   state.mcpModalOpen = false
+  state.mcpEditTarget = null
   state.mcpDraft = null
   state.mcpError = null
   render()
 }
 
+// Translate the modal draft into the payload buildMcpServer/updateMcpServer expects.
 function serializeMcpDraft(draft) {
   if (draft.type === "local") {
     return { name: draft.name.trim(), type: "local", command: draft.command }
@@ -3926,11 +4245,21 @@ function serializeMcpDraft(draft) {
     const key = String(row.key || "").trim()
     if (key) headers[key] = String(row.value ?? "")
   }
+  let oauth
+  if (draft.oauthMode === "disabled") {
+    oauth = false
+  } else if (draft.oauthMode === "custom") {
+    // Omit a blank secret on edit so updateMcpServer preserves the stored one.
+    oauth = { clientId: draft.oauthClientId, scope: draft.oauthScope }
+    if (String(draft.oauthClientSecret || "").trim()) oauth.clientSecret = draft.oauthClientSecret
+  } else {
+    oauth = true // auto-negotiate → buildMcpServer omits the key
+  }
   return {
     name: draft.name.trim(),
     type: "remote",
     url: draft.url,
-    oauth: !!draft.oauth,
+    oauth,
     headers
   }
 }
@@ -3953,19 +4282,58 @@ async function submitMcpServer() {
     render()
     return
   }
+  if (draft.type === "remote" && draft.oauthMode === "custom" && !String(draft.oauthClientId || "").trim()) {
+    state.mcpError = "OAuth client ID is required for a pre-registered OAuth app."
+    render()
+    return
+  }
+  const editing = !!state.mcpEditTarget
   state.mcpSaving = true
   state.mcpError = null
   render()
   try {
-    const result = await window.openworking.mcp.add(serializeMcpDraft(draft))
+    const payload = serializeMcpDraft(draft)
+    const result = editing
+      ? await window.openworking.mcp.update(state.mcpEditTarget, payload)
+      : await window.openworking.mcp.add(payload)
     state.mcpServers = result?.servers || state.mcpServers
     state.mcpModalOpen = false
+    state.mcpEditTarget = null
     state.mcpDraft = null
-    showToast(`Added ${draft.name.trim()}`)
+    showToast(`${editing ? "Updated" : "Added"} ${draft.name.trim()}`)
+    // A freshly added/edited OAuth server reports needs_auth once the runtime reconnects.
+    refreshMcpStatus()
   } catch (error) {
     state.mcpError = error.message
   } finally {
     state.mcpSaving = false
+    render()
+  }
+}
+
+async function authenticateMcp(name, { clear = false } = {}) {
+  const serverName = String(name || "")
+  if (!serverName || state.mcpAuthenticating?.[serverName]) return
+  state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: true }
+  state.mcpError = null
+  state.mcpErrorTarget = null
+  render()
+  try {
+    const result = clear
+      ? await window.openworking.mcp.clearAuth(serverName)
+      : await window.openworking.mcp.authenticate(serverName)
+    if (result?.error) {
+      state.mcpError = result.error
+      state.mcpErrorTarget = serverName
+    } else {
+      if (result.servers) state.mcpServers = result.servers
+      applyMcpStatusList(result.status)
+      if (state.mcpStatus[serverName] === "connected") showToast(`Connected ${serverName}`)
+    }
+  } catch (error) {
+    state.mcpError = error.message
+  } finally {
+    state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: false }
     render()
   }
 }

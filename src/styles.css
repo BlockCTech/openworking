@@ -971,8 +971,15 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .mcp-list-item .switch { flex-shrink: 0; cursor: pointer; }
 .mcp-delete { flex-shrink: 0; }
 
-/* Add MCP server modal */
-.mcp-modal { width: min(560px, calc(100vw - 56px)); }
+/* Add/Edit MCP server modal. Cap the height to the viewport and scroll the body so the
+   Cancel/Save action bar stays visible even when the Advanced OAuth section makes it tall. */
+.confirm-modal.mcp-modal {
+  width: min(560px, calc(100vw - 56px));
+  max-height: calc(100vh - 64px);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.confirm-modal.mcp-modal .rename-modal-body { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.confirm-modal.mcp-modal .confirm-actions { margin-top: 0; padding-top: 12px; border-top: 1px solid var(--border); }
 .mcp-field-label { font-size: 13px; font-weight: 600; color: var(--text-2); }
 .mcp-type-toggle { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
 .mcp-type-opt { padding: 6px 14px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 600; color: var(--text-2); transition: background .12s, color .12s; }
@@ -986,6 +993,50 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .link-btn { display: inline-flex; align-items: center; gap: 6px; align-self: start; padding: 4px 2px; font-size: 13px; font-weight: 600; color: var(--accent-text); }
 .link-btn svg { width: 15px; height: 15px; }
 .link-btn:hover { text-decoration: underline; }
+
+/* Extensions marketplace (MCP tab) */
+.mcp-section-label { margin: 18px 0 10px; font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); }
+.mcp-section-label:first-of-type { margin-top: 6px; }
+.mcp-preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.mcp-preset {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.mcp-preset.connected { opacity: .75; }
+.mcp-preset-head { display: flex; align-items: center; gap: 9px; }
+.mcp-preset-head strong { font-size: 14px; flex: 1; min-width: 0; }
+.mcp-preset-blurb { color: var(--text-3); font-size: 12.5px; line-height: 1.45; flex: 1; }
+.mcp-preset .secondary-btn { align-self: flex-start; }
+.mcp-card-icon { display: grid; place-items: center; width: 32px; height: 32px; flex-shrink: 0; border-radius: var(--radius); background: var(--accent-soft); }
+.mcp-card-icon svg { width: 17px; height: 17px; color: var(--accent-text); }
+
+.mcp-card-list { display: grid; gap: 10px; }
+.mcp-card {
+  display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px;
+  padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+}
+.mcp-card-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.mcp-card-text { display: grid; gap: 2px; min-width: 0; }
+.mcp-card-text strong { font-size: 13.5px; }
+.mcp-card-text small { color: var(--text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mcp-card-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.mcp-card-error { grid-column: 1 / -1; color: var(--red); font-size: 12.5px; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 160px; overflow-y: auto; }
+
+.mcp-pill { flex-shrink: 0; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+.mcp-pill-type { color: var(--text-3); background: var(--surface-2); border: 1px solid var(--border); }
+.mcp-pill-ok { color: var(--green); background: var(--green-soft, var(--accent-soft)); }
+.mcp-pill-warn { color: var(--accent-text); background: var(--accent-soft); }
+.mcp-pill-bad { color: var(--red); background: var(--red-soft, var(--surface-2)); }
+.mcp-pill-pending { color: var(--text-2); background: var(--surface-2); border: 1px solid var(--border); }
+.mcp-pill-muted { color: var(--text-3); background: var(--surface-2); border: 1px solid var(--border); }
+
+/* Advanced OAuth section in the Add/Edit modal */
+.mcp-oauth-hint { margin-top: -2px; }
+.mcp-advanced-toggle { display: inline-flex; align-items: center; gap: 6px; align-self: start; padding: 4px 2px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.mcp-advanced-toggle svg { width: 15px; height: 15px; }
+.mcp-advanced-toggle:hover { color: var(--text); }
+.mcp-advanced { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.mcp-warning { font-size: 12.5px; line-height: 1.45; color: var(--accent-text); background: var(--accent-soft); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 9px 11px; }
 
 /* footer settings button uses a flat icon, matching nav rows */
 .su-icon { display: grid; place-items: center; flex-shrink: 0; }

@@ -22,8 +22,13 @@ contextBridge.exposeInMainWorld("openworking", {
   mcp: {
     list: () => ipcRenderer.invoke("mcp:list"),
     add: (server) => ipcRenderer.invoke("mcp:add", server),
+    update: (name, server) => ipcRenderer.invoke("mcp:update", { name, server }),
     setEnabled: (name, enabled) => ipcRenderer.invoke("mcp:setEnabled", { name, enabled }),
-    remove: (name) => ipcRenderer.invoke("mcp:remove", name)
+    remove: (name) => ipcRenderer.invoke("mcp:remove", name),
+    status: () => ipcRenderer.invoke("mcp:status"),
+    authenticate: (name) => ipcRenderer.invoke("mcp:authenticate", name),
+    clearAuth: (name) => ipcRenderer.invoke("mcp:clearAuth", name),
+    openDocs: (url) => ipcRenderer.invoke("mcp:openDocs", url)
   },
   attachments: {
     pick: () => ipcRenderer.invoke("attachments:pick"),

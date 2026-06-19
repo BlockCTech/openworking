@@ -3,7 +3,7 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { assertTranslationArtifact, assertProjectFile, listProjectDirectory, previewTranslationArtifact, readProjectFileContent } = require("./artifact-path")
 const { AttachmentRegistry } = require("./attachment-registry")
-const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, writeEditableProfileConfig } = require("./opencode-profile")
+const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, writeEditableProfileConfig } = require("./opencode-profile")
 const { ProjectRegistry } = require("./project-registry")
 const { RuntimeProcessManager } = require("./runtime/process-manager")
 const { checkDesktopVersion, downloadInstaller, installDmg, versionCheckConfigured } = require("./version-check")
@@ -183,6 +183,11 @@ function registerIpc() {
     await runtimeManager.reload()
     return { server: added, servers: listMcpServers(opencodeProfile) }
   })
+  ipcMain.handle("mcp:update", async (_event, { name, server }) => {
+    const updated = updateMcpServer(opencodeProfile, name, server)
+    await runtimeManager.reload()
+    return { server: updated, servers: listMcpServers(opencodeProfile) }
+  })
   ipcMain.handle("mcp:setEnabled", async (_event, { name, enabled }) => {
     setMcpServerEnabled(opencodeProfile, name, enabled)
     await runtimeManager.reload()
@@ -192,6 +197,52 @@ function registerIpc() {
     removeMcpServer(opencodeProfile, name)
     await runtimeManager.reload()
     return { servers: listMcpServers(opencodeProfile) }
+  })
+  ipcMain.handle("mcp:status", async () => {
+    try {
+      return await runtimeManager.listMcpStatus()
+    } catch {
+      // Runtime may not be running yet (no project open); treat as no status.
+      return []
+    }
+  })
+  ipcMain.handle("mcp:openDocs", async (_event, url) => {
+    // Only open http/https links in the external browser — guard against file://, etc.
+    const target = String(url || "")
+    if (!/^https?:\/\//i.test(target)) throw new Error("Only http(s) documentation links can be opened.")
+    await shell.openExternal(target)
+    return true
+  })
+  // Drive the OAuth flow ourselves: startMcpAuth returns the authorization URL (opencode also
+  // stands up its loopback callback server), we open it in the browser, then authenticateMcp waits
+  // for the callback to complete. Opening the URL from the main process is more reliable than
+  // relying on opencode's internal browser-open inside a headless `serve`.
+  async function runMcpAuth(serverName) {
+    const { authorizationUrl } = await runtimeManager.startMcpAuth(serverName)
+    if (authorizationUrl) await shell.openExternal(authorizationUrl)
+    await runtimeManager.authenticateMcp(serverName)
+    return {
+      servers: listMcpServers(opencodeProfile),
+      status: await runtimeManager.listMcpStatus()
+    }
+  }
+  ipcMain.handle("mcp:authenticate", async (_event, name) => {
+    try {
+      return await runMcpAuth(String(name || ""))
+    } catch (error) {
+      return { error: error.message }
+    }
+  })
+  ipcMain.handle("mcp:clearAuth", async (_event, name) => {
+    const serverName = String(name || "")
+    try {
+      const result = runtimeManager.clearMcpAuth(serverName)
+      // Reload so the running opencode server picks up the cleared auth store, then re-auth fresh.
+      await runtimeManager.reload()
+      return { cleared: result.cleared, ...(await runMcpAuth(serverName)) }
+    } catch (error) {
+      return { error: error.message }
+    }
   })
 
   ipcMain.handle("attachments:pick", async () => {

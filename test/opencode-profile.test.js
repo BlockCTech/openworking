@@ -12,6 +12,7 @@ const {
   readSkillMarkdown,
   uninstallCustomSkill,
   addMcpServer,
+  updateMcpServer,
   listMcpServers,
   removeMcpServer,
   setMcpServerEnabled,
@@ -439,6 +440,76 @@ test("rejects invalid MCP server input", () => {
 
   addMcpServer(profile, { name: "dupe", type: "remote", url: "https://x.test/mcp" })
   assert.throws(() => addMcpServer(profile, { name: "dupe", type: "remote", url: "https://y.test/mcp" }), /already exists/)
+})
+
+test("stores a pre-registered OAuth app and redacts the client secret in the view", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  const added = addMcpServer(profile, {
+    name: "slack",
+    type: "remote",
+    url: "https://mcp.slack.com/mcp",
+    oauth: { clientId: " client-123 ", clientSecret: " secret-xyz ", scope: "channels:read chat:write" }
+  })
+
+  // The view never exposes the raw secret — only a boolean flag.
+  assert.deepEqual(added.oauth, {
+    clientId: "client-123",
+    scope: "channels:read chat:write",
+    callbackPort: undefined,
+    redirectUri: "",
+    hasClientSecret: true
+  })
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.deepEqual(saved.mcp.slack.oauth, {
+    clientId: "client-123",
+    clientSecret: "secret-xyz",
+    scope: "channels:read chat:write"
+  })
+})
+
+test("validates the OAuth callback port", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  assert.throws(
+    () => addMcpServer(profile, { name: "bad-port", type: "remote", url: "https://x.test/mcp", oauth: { clientId: "a", callbackPort: 70000 } }),
+    /callback port/
+  )
+  const added = addMcpServer(profile, { name: "ok-port", type: "remote", url: "https://x.test/mcp", oauth: { clientId: "a", callbackPort: "20000" } })
+  assert.equal(added.oauth.callbackPort, 20000)
+})
+
+test("updateMcpServer preserves the stored secret when left blank and rejects unknown names", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  addMcpServer(profile, {
+    name: "slack",
+    type: "remote",
+    url: "https://mcp.slack.com/mcp",
+    oauth: { clientId: "client-1", clientSecret: "secret-1", scope: "old:scope" }
+  })
+  setMcpServerEnabled(profile, "slack", false)
+
+  // Edit scopes but leave the secret blank → the stored secret must survive, and the
+  // enabled flag must be preserved.
+  const updated = updateMcpServer(profile, "slack", {
+    type: "remote",
+    url: "https://mcp.slack.com/mcp",
+    oauth: { clientId: "client-1", clientSecret: "", scope: "new:scope" }
+  })
+  assert.equal(updated.oauth.hasClientSecret, true)
+  assert.equal(updated.enabled, false)
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(saved.mcp.slack.oauth.clientSecret, "secret-1")
+  assert.equal(saved.mcp.slack.oauth.scope, "new:scope")
+  assert.equal(saved.mcp.slack.enabled, false)
+
+  assert.throws(() => updateMcpServer(profile, "ghost", { type: "remote", url: "https://x.test/mcp" }), /does not exist/)
 })
 
 test("toggles enabled and removes MCP servers", () => {

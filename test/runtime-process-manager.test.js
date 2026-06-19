@@ -1133,6 +1133,98 @@ test("rejectQuestion posts to the session question reject endpoint without a /re
   }
 })
 
+test("listMcpStatus projects the runtime status map down to name + status", async () => {
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/mcp" && req.method === "GET") {
+      return res.end(JSON.stringify({
+        slack: { status: "failed", error: "server unavailable", secret: "drop" },
+        sentry: { status: "connected" }
+      }))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    // The real failure reason in `error` is preserved; unrelated fields (secret) are dropped.
+    assert.deepEqual(await manager.listMcpStatus(), [
+      { name: "slack", status: "failed", error: "server unavailable" },
+      { name: "sentry", status: "connected" }
+    ])
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("startMcpAuth posts to the auth endpoint and returns the authorization url", async () => {
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/mcp/slack/auth" && req.method === "POST") {
+      captured = { url: req.url, authorization: req.headers.authorization }
+      return res.end(JSON.stringify({ authorizationUrl: "https://slack.com/oauth/authorize?x=1", oauthState: "abc" }))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    assert.deepEqual(await manager.startMcpAuth("slack"), {
+      authorizationUrl: "https://slack.com/oauth/authorize?x=1",
+      oauthState: "abc"
+    })
+    assert.deepEqual(captured, {
+      url: "/mcp/slack/auth",
+      authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`
+    })
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("authenticateMcp posts to the authenticate endpoint and resolves when the callback completes", async () => {
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/mcp/slack/auth/authenticate" && req.method === "POST") {
+      captured = { url: req.url }
+      return res.end(JSON.stringify({ status: "connected" }))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    assert.deepEqual(await manager.authenticateMcp("slack"), { status: "connected" })
+    assert.equal(captured.url, "/mcp/slack/auth/authenticate")
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("mcp status events project to a whitelisted name + status shape", () => {
+  assert.deepEqual(projectRuntimeEvent({
+    type: "mcp.status.needs_auth",
+    properties: { name: "slack", secret: "drop" }
+  }), { type: "mcp.status.needs_auth", name: "slack", status: "needs_auth" })
+
+  assert.deepEqual(projectRuntimeEvent({
+    type: "mcp.status.connected",
+    properties: { name: "slack" }
+  }), { type: "mcp.status.connected", name: "slack", status: "connected" })
+
+  assert.deepEqual(projectRuntimeEvent({
+    type: "mcp.browser.open.failed",
+    properties: { mcpName: "slack", url: "https://slack.com/oauth", secret: "drop" }
+  }), { type: "mcp.browser.open.failed", name: "slack", url: "https://slack.com/oauth" })
+
+  assert.equal(projectRuntimeEvent({ type: "mcp.status.connected", properties: {} }), null)
+})
+
 test("replyPermission posts to the session permission reply endpoint without a /request/ segment", async () => {
   let captured = null
   const server = http.createServer((req, res) => {

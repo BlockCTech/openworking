@@ -74,3 +74,33 @@ The composer surfaces OpenCode's native command catalog: type `/` to open an aut
 - every enabled skill above, tagged `skill`.
 
 Picking an entry inserts `/<name> ` into the composer; the user types arguments and presses Enter. Sending a `/<known-command> [args]` message dispatches via `POST /session/{id}/command` (`RuntimeProcessManager.sendCommand`), where OpenCode expands `$ARGUMENTS` in the command template and runs it as a normal turn. `mcp`-sourced commands are filtered out of the menu in this local-first build. A leading `/token` that is not a known command is sent as plain text.
+
+## Extensions (MCP Servers)
+
+The Skills screen has an **Extensions** tab (internally `state.skillsTab === "mcp"`) for connecting Model Context Protocol servers. It is a local-first marketplace UI: a static **Featured** catalog (`MCP_PRESETS` in `src/renderer.js` — Slack, GitHub, Linear, Sentry, Notion) that one-click prefills the Add modal, plus a **Connected** list of cards with live status. There is no remote registry or network catalog fetch.
+
+Entries are stored under the `mcp` key in the app-managed `opencode.json` (`addMcpServer`/`updateMcpServer`/`listMcpServers` in `src/opencode-profile.js`); a remote server is `{ type: "remote", url, headers?, oauth? }`, a local one is `{ type: "local", command }`.
+
+### OAuth modes (Add/Edit Custom App → Authentication)
+
+The modal offers three auth modes for remote servers:
+
+- **Auto** — omit the `oauth` key so OpenCode auto-negotiates via **dynamic client registration (RFC 7591) + PKCE**. Works for Sentry, GitHub, Linear, Notion, etc.
+- **OAuth app** — for servers that do **not** support DCR and require a **pre-registered OAuth app**, e.g. **Slack MCP** (without this, `https://mcp.slack.com/mcp` returns `HTTP 500`). The collapsible **Advanced OAuth** section accepts `clientId`, `clientSecret`, and optional space-separated `scope`, written to `mcp.<name>.oauth` (`McpOAuthConfig`). The client secret is stored in the app-managed profile config (same place as provider API keys — gitignored, never in the user's project) and is **redacted** (`[redacted]`) in the App-profile-JSON panel and never crosses the IPC boundary (`mcpServerView` returns `hasClientSecret` instead). When editing, leaving the secret blank preserves the stored value.
+- **None** — write `oauth: false` to disable OAuth auto-detection (direct/header-authed servers).
+
+### Sign-in flow
+
+1. After adding, an OAuth server reports `needs_auth` and an **Authenticate** button appears on its card.
+2. Clicking it triggers `POST /mcp/{name}/auth` on the runtime, opens the returned authorization URL in the default browser (`shell.openExternal`), and waits via `POST /mcp/{name}/auth/authenticate`.
+3. After consent, the browser is redirected to OpenCode's own loopback callback at **`http://127.0.0.1:19876/mcp/oauth/callback`** (port configurable per server via `oauth.callbackPort`/`oauth.redirectUri`). OpenCode runs this callback server itself — the desktop app does not open any port. Tokens are persisted in OpenCode's auth store inside the app-managed profile dir.
+
+Status flows live to the renderer through the runtime stream events `mcp.status.{connected,needs_auth,failed,disabled}` and `mcp.browser.open.failed`, projected by `projectRuntimeEvent` and surfaced as the card status pill. IPC: `mcp:status`, `mcp:authenticate`, `mcp:clearAuth`, `mcp:update`, and `mcp:openDocs` (guarded http(s)-only external link) in `src/main.js`, exposed via `window.openworking.mcp.{status,authenticate,clearAuth,update,openDocs}` in `src/preload.js`.
+
+### Diagnosing connect failures
+
+opencode collapses MCP connect/auth errors into an opaque `HTTP 500 UnknownError` (with a `ref`). To surface the real cause, the runtime is spawned with `--print-logs` (`src/runtime/process-manager.js`), routing opencode's structured logs to stderr at its default level where they are captured into `state.logs` (Diagnostics panel) — `redactString` is hardened to strip `client_secret`/`code`/`*_token`/`code_verifier` so secrets never land in logs. (DEBUG level is intentionally avoided as it would log OAuth request bodies.) On an auth failure, `mcpAuthRequest` appends the most recent correlated runtime error lines to the message shown on the MCP card.
+
+`GET /mcp` returns a per-server `{ status, error }` map (opencode records the real connect-failure reason in `error`; its WARN log only prints the status). `listMcpStatus` preserves `error` and the renderer shows it on the card via `state.mcpStatusError`. Statuses include `connected`, `needs_auth`, `needs_client_registration` (server has no DCR and no clientId), `failed`, `disabled`.
+
+If a connect fails after a prior partial/dynamic registration left stale OAuth state, the failed card shows a **Reset auth** button → `mcp:clearAuth` deletes the server's entry from opencode's auth store (`<profile>/data/opencode/auth.json`, keyed by server name; only entries with `tokens`/`clientInfo`/`oauthState`/`codeVerifier` are removed), reloads the runtime, and re-authenticates clean.

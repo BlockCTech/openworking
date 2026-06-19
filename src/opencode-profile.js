@@ -289,7 +289,21 @@ function mcpServerView(name, server) {
   if (server.type === "remote") {
     view.url = server.url || ""
     view.headers = server.headers && typeof server.headers === "object" ? { ...server.headers } : {}
-    view.oauth = server.oauth
+    // Surface the OAuth config to the renderer with the client secret redacted — the
+    // raw secret must never cross the IPC boundary into renderer state or the JSON preview.
+    if (server.oauth === false) {
+      view.oauth = false
+    } else if (server.oauth && typeof server.oauth === "object") {
+      view.oauth = {
+        clientId: server.oauth.clientId || "",
+        scope: server.oauth.scope || "",
+        callbackPort: server.oauth.callbackPort,
+        redirectUri: server.oauth.redirectUri || "",
+        hasClientSecret: !!server.oauth.clientSecret
+      }
+    } else {
+      view.oauth = undefined
+    }
   } else {
     view.command = Array.isArray(server.command) ? [...server.command] : []
   }
@@ -314,7 +328,40 @@ function normalizeHeaders(headers) {
   return result
 }
 
-function buildMcpServer(input) {
+// Build the `oauth` value written to opencode.json from the renderer's input.
+//   - false        → disable OpenCode OAuth auto-detection.
+//   - object       → a pre-registered OAuth app (clientId/clientSecret/scope/…) for
+//                    servers that do not support dynamic client registration (e.g. Slack).
+//   - true/omitted → omit `oauth` so the runtime auto-negotiates (DCR + PKCE).
+// `existing` is the previously stored oauth object, used to preserve a secret the user
+// left blank while editing.
+function normalizeOauth(input, existing) {
+  if (input === false) return false
+  if (!input || typeof input !== "object") return undefined
+  const oauth = {}
+  const clientId = String(input.clientId || "").trim()
+  const scope = String(input.scope || "").trim()
+  const redirectUri = String(input.redirectUri || "").trim()
+  let clientSecret = String(input.clientSecret || "").trim()
+  // Preserve the stored secret when editing and the field was left blank.
+  if (!clientSecret && existing && typeof existing === "object" && existing.clientSecret) {
+    clientSecret = existing.clientSecret
+  }
+  if (clientId) oauth.clientId = clientId
+  if (clientSecret) oauth.clientSecret = clientSecret
+  if (scope) oauth.scope = scope
+  if (redirectUri) oauth.redirectUri = redirectUri
+  if (input.callbackPort !== undefined && input.callbackPort !== null && input.callbackPort !== "") {
+    const port = Number(input.callbackPort)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("OAuth callback port must be an integer between 1 and 65535.")
+    }
+    oauth.callbackPort = port
+  }
+  return Object.keys(oauth).length ? oauth : undefined
+}
+
+function buildMcpServer(input, existing) {
   const type = input?.type
   if (!MCP_SERVER_TYPES.includes(type)) throw new Error('MCP server type must be "remote" or "local".')
 
@@ -324,10 +371,8 @@ function buildMcpServer(input) {
     const server = { type: "remote", url, enabled: true }
     const headers = normalizeHeaders(input.headers)
     if (Object.keys(headers).length) server.headers = headers
-    // The OAuth checkbox is opt-in: when the user leaves it unchecked we explicitly
-    // disable OpenCode's OAuth auto-detection; when checked we omit `oauth` so the
-    // runtime negotiates OAuth on its own.
-    if (input.oauth === false) server.oauth = false
+    const oauth = normalizeOauth(input.oauth, existing && existing.type === "remote" ? existing.oauth : undefined)
+    if (oauth !== undefined) server.oauth = oauth
     return server
   }
 
@@ -350,6 +395,21 @@ function addMcpServer(profile, input) {
   config.mcp[name] = server
   writeProfileConfig(profile, config)
   return mcpServerView(name, server)
+}
+
+function updateMcpServer(profile, name, input) {
+  const serverName = String(name || "").trim()
+  assertValidMcpName(serverName)
+  const config = readProfileConfig(profile).config
+  const existing = config.mcp && config.mcp[serverName]
+  if (!existing) throw new Error(`MCP server "${serverName}" does not exist.`)
+  // Rebuild from the new input, preserving the enabled flag and any stored secret the
+  // user left blank while editing.
+  const server = buildMcpServer({ ...input, type: input?.type || existing.type }, existing)
+  server.enabled = existing.enabled !== false
+  config.mcp[serverName] = server
+  writeProfileConfig(profile, config)
+  return mcpServerView(serverName, server)
 }
 
 function setMcpServerEnabled(profile, name, enabled) {
@@ -479,6 +539,7 @@ module.exports = {
   readSkillMarkdown,
   uninstallCustomSkill,
   addMcpServer,
+  updateMcpServer,
   listMcpServers,
   removeMcpServer,
   setMcpServerEnabled,

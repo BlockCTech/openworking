@@ -94,6 +94,11 @@ function redactString(value) {
   return String(value)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [redacted]")
     .replace(/(OPENWORKING_TRANSLATION_API_KEY)=\S+/g, "$1=[redacted]")
+    // Raising the opencode log level can surface OAuth material in log lines / query strings.
+    // Redact secrets and authorization-code grant material in both `key=value` and `"key":"value"`
+    // shapes so nothing sensitive reaches state.logs / the Diagnostics panel.
+    .replace(/(client_secret|code_verifier|access_token|refresh_token|id_token|authorization_code)["']?\s*[=:]\s*["']?[A-Za-z0-9._~+/=-]+/gi, "$1=[redacted]")
+    .replace(/([?&]code=)[A-Za-z0-9._~+/=-]+/g, "$1[redacted]")
 }
 
 function redactValue(value, key = "") {
@@ -457,6 +462,19 @@ function projectRuntimeEvent(event) {
     const requestID = requestIdOf(properties)
     if (properties.sessionID && requestID) return { type: event.type, sessionID: properties.sessionID, requestID }
   }
+  if (
+    event?.type === "mcp.status.needs_auth" ||
+    event?.type === "mcp.status.connected" ||
+    event?.type === "mcp.status.failed" ||
+    event?.type === "mcp.status.disabled"
+  ) {
+    const name = properties.name || properties.mcpName
+    if (name) return { type: event.type, name: String(name), status: event.type.slice("mcp.status.".length) }
+  }
+  if (event?.type === "mcp.browser.open.failed") {
+    const name = properties.mcpName || properties.name
+    if (name) return { type: event.type, name: String(name), url: properties.url || "" }
+  }
   return null
 }
 
@@ -588,9 +606,14 @@ class RuntimeProcessManager {
     const runtimeStateDir = path.join(configDir, "state")
     const runtimeCacheDir = path.join(configDir, "cache")
     const runtimeBin = resolveRuntimeBin()
+    // `--print-logs` routes opencode's structured logs to stderr (captured into state.logs / the
+    // Diagnostics panel) at its default level. Without it, opencode errors — e.g. an MCP OAuth
+    // connect failure — only land in opencode's log file and surface to us as an opaque
+    // "HTTP 500 UnknownError". We intentionally do NOT raise to --log-level DEBUG, which would dump
+    // OAuth request bodies (secrets) into logs. The OPENWORKING_RUNTIME_ARGS override is unchanged.
     const runtimeArgs = process.env.OPENWORKING_RUNTIME_ARGS
       ? process.env.OPENWORKING_RUNTIME_ARGS.split(" ").filter(Boolean)
-      : ["serve", "--port", String(port), "--hostname", "127.0.0.1"]
+      : ["serve", "--port", String(port), "--hostname", "127.0.0.1", "--print-logs"]
     const password = `ow_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}`
     const serverUrl = `http://127.0.0.1:${port}`
     const auth = basicAuth("opencode", password)
@@ -739,6 +762,130 @@ class RuntimeProcessManager {
       model: command.model,
       hints: Array.isArray(command.hints) ? command.hints : []
     }))
+  }
+
+  async listMcpStatus() {
+    this.assertReady()
+    const result = await requestJson({
+      url: `${this.state.runtime.serverUrl}/mcp`,
+      auth: this.auth()
+    })
+    // The runtime returns a map of name -> { status, error? }. opencode's connect path records the
+    // real failure reason in `error` (the WARN log only prints the status), so we surface it here —
+    // this is how the actual cause of a `failed`/`needs_client_registration` server reaches the UI.
+    if (!result || typeof result !== "object") return []
+    const entries = Array.isArray(result) ? result : Object.entries(result)
+    return entries
+      .map((entry) => {
+        const [name, info] = Array.isArray(entry) ? entry : [entry?.name, entry]
+        if (!name) return null
+        const status = typeof info === "string" ? info : info?.status
+        const error = info && typeof info === "object" && info.error ? String(info.error) : null
+        return { name: String(name), status: status ? String(status) : "unknown", ...(error ? { error } : {}) }
+      })
+      .filter(Boolean)
+  }
+
+  // opencode collapses MCP connect/auth failures into an opaque "HTTP 500 UnknownError" with a
+  // `ref`. The real cause is logged to stderr (now captured into state.logs thanks to
+  // --print-logs). Pull the most recent error/warn log lines so the renderer can show the actual
+  // reason on the MCP card instead of "UnknownError".
+  recentRuntimeErrorText(limit = 4) {
+    const lines = (this.state.logs || [])
+      .filter((entry) => entry.level === "stderr" || entry.level === "error")
+      .map((entry) => String(entry.message || ""))
+      .filter((message) => /error|fail|unauthor|invalid|oauth|mcp|exception|panic/i.test(message))
+      .slice(-limit)
+    return lines.join("\n").trim()
+  }
+
+  // Wrap an MCP auth/connect HTTP call so a generic opencode 500 is enriched with the real error
+  // text from the captured runtime logs.
+  async mcpAuthRequest(name, path, label) {
+    try {
+      return await requestJson({
+        url: `${this.state.runtime.serverUrl}/mcp/${encodeURIComponent(name)}${path}`,
+        method: "POST",
+        auth: this.auth()
+      })
+    } catch (error) {
+      // Give opencode a moment to flush the correlated log line to stderr.
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      const detail = this.recentRuntimeErrorText()
+      this.log("error", `${label} failed for "${name}": ${error.message}${detail ? `\n${detail}` : ""}`)
+      if (detail) error.message = `${error.message}\nRuntime log:\n${detail}`
+      throw error
+    }
+  }
+
+  async startMcpAuth(name) {
+    this.assertReady()
+    if (!name) throw new Error("MCP server name is required.")
+    const result = await this.mcpAuthRequest(name, "/auth", "MCP start-auth")
+    return {
+      authorizationUrl: result?.authorizationUrl || "",
+      oauthState: result?.oauthState || null
+    }
+  }
+
+  async authenticateMcp(name) {
+    this.assertReady()
+    if (!name) throw new Error("MCP server name is required.")
+    return await this.mcpAuthRequest(name, "/auth/authenticate", "MCP authenticate")
+  }
+
+  async connectMcp(name) {
+    this.assertReady()
+    if (!name) throw new Error("MCP server name is required.")
+    return await requestJson({
+      url: `${this.state.runtime.serverUrl}/mcp/${encodeURIComponent(name)}/connect`,
+      method: "POST",
+      auth: this.auth()
+    })
+  }
+
+  async disconnectMcp(name) {
+    this.assertReady()
+    if (!name) throw new Error("MCP server name is required.")
+    return await requestJson({
+      url: `${this.state.runtime.serverUrl}/mcp/${encodeURIComponent(name)}/disconnect`,
+      method: "POST",
+      auth: this.auth()
+    })
+  }
+
+  // Path to opencode's MCP auth store inside the app-managed profile. opencode persists MCP OAuth
+  // material (tokens, dynamically-registered clientInfo, oauthState, codeVerifier) here keyed by
+  // the MCP server name. NOTE: this is `mcp-auth.json` — provider/login credentials live in a
+  // separate `auth.json`; we must only touch the MCP one.
+  authStorePath() {
+    const configDir = this.profile?.profileDir || path.join(this.userDataPath, "opencode-profile")
+    return path.join(configDir, "data", "opencode", "mcp-auth.json")
+  }
+
+  // Remove a server's stale MCP OAuth entry so the next auth starts clean. A failed first attempt
+  // (e.g. a dynamic registration before clientId was supplied) can leave partial clientInfo/oauthState
+  // that collides with a later pre-registered-app reconnect. Only entries that look like MCP OAuth
+  // entries are removed, so provider credentials sharing the name space are left untouched.
+  clearMcpAuth(name) {
+    const serverName = String(name || "")
+    if (!serverName) throw new Error("MCP server name is required.")
+    const storePath = this.authStorePath()
+    if (!fs.existsSync(storePath)) return { cleared: false }
+    let store
+    try {
+      store = JSON.parse(fs.readFileSync(storePath, "utf8"))
+    } catch {
+      return { cleared: false }
+    }
+    const entry = store && store[serverName]
+    const looksLikeMcpOauth = entry && typeof entry === "object" &&
+      ("tokens" in entry || "clientInfo" in entry || "oauthState" in entry || "codeVerifier" in entry)
+    if (!looksLikeMcpOauth) return { cleared: false }
+    delete store[serverName]
+    fs.writeFileSync(storePath, JSON.stringify(store, null, 2))
+    this.log("info", `Cleared stored MCP OAuth credentials for "${serverName}".`)
+    return { cleared: true }
   }
 
   async createSession({ title } = {}) {
