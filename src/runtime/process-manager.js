@@ -1029,18 +1029,24 @@ class RuntimeProcessManager {
     this.sessionStatuses[sessionId] = { type: "busy" }
     this.emitStream({ type: "session.status", sessionID: sessionId, status: { type: "busy" } })
     this.timeline("session.prompt.sent", { sessionId, agent, model, attachmentCount: attachments.length })
+    const startTime = Date.now()
+    this.log("info", `[Prompt] Sending prompt to runtime session ${sessionId} (${agent || "default agent"})...`)
     try {
-      return await requestJson({
+      const result = await requestJson({
         url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/prompt_async`,
         method: "POST",
         auth: this.auth(),
         body
       })
+      const duration = ((Date.now() - startTime) / 1000).toFixed(2)
+      this.log("info", `[Prompt] Prompt accepted by session in ${duration}s.`)
+      return result
     } catch (error) {
+      const duration = ((Date.now() - startTime) / 1000).toFixed(2)
       this.state.activity = "idle"
       this.sessionStatuses[sessionId] = { type: "idle" }
       this.emitStream({ type: "session.error", sessionID: sessionId, error: error.message })
-      this.log("error", `Prompt failed: ${error.message}`)
+      this.log("error", `[Prompt] Prompt failed after ${duration}s: ${error.message}`)
       this.timeline("session.prompt.error", { sessionId, error: error.message })
       throw error
     }
@@ -1062,18 +1068,24 @@ class RuntimeProcessManager {
     this.sessionStatuses[sessionId] = { type: "busy" }
     this.emitStream({ type: "session.status", sessionID: sessionId, status: { type: "busy" } })
     this.timeline("session.command.sent", { sessionId, command: body.command, agent, model })
+    const startTime = Date.now()
+    this.log("info", `[Command] Dispatching command: /${body.command} to session ${sessionId}...`)
     try {
-      return await requestJson({
+      const result = await requestJson({
         url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/command`,
         method: "POST",
         auth: this.auth(),
         body
       })
+      const duration = ((Date.now() - startTime) / 1000).toFixed(2)
+      this.log("info", `[Command] Command accepted in ${duration}s.`)
+      return result
     } catch (error) {
+      const duration = ((Date.now() - startTime) / 1000).toFixed(2)
       this.state.activity = "idle"
       this.sessionStatuses[sessionId] = { type: "idle" }
       this.emitStream({ type: "session.error", sessionID: sessionId, error: error.message })
-      this.log("error", `Command failed: ${error.message}`)
+      this.log("error", `[Command] Command failed after ${duration}s: ${error.message}`)
       this.timeline("session.command.error", { sessionId, command: body.command, error: error.message })
       throw error
     }
@@ -1327,6 +1339,19 @@ class RuntimeProcessManager {
         this.state.activity = "idle"
         this.state.lastError = sessionErrorMessage(properties.error)
         publish = true
+      }
+    }
+    // Debug tool steps in the Runtime diagnostics logs
+    if (event.type === "message.part.updated" && properties.part?.type === "tool") {
+      const toolName = properties.part.tool
+      const toolStatus = properties.part.state?.status
+      const toolError = properties.part.state?.error
+      if (toolStatus === "running") {
+        this.log("info", `[Tool] Agent started calling tool: ${toolName}`)
+      } else if (toolStatus === "complete") {
+        this.log("info", `[Tool] Tool ${toolName} completed successfully.`)
+      } else if (toolStatus === "error") {
+        this.log("warn", `[Tool] Tool ${toolName} failed: ${toolError || "Unknown error"}`)
       }
     }
     this.emitStream(projectRuntimeEvent(event))

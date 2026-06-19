@@ -13,6 +13,7 @@ global.window = {
     hasRunningTool() { return false },
     hydrateThread() {},
     messageCopyText() { return "" },
+    needsThreadRehydration() { return true },
     userMessageFileRefs() { return [] },
     messageText() { return "" },
     removeOptimisticUser() {},

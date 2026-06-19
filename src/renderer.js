@@ -109,6 +109,7 @@ const {
   hasRunningTool,
   hydrateThread,
   messageCopyText,
+  needsThreadRehydration,
   userMessageFileRefs,
   messageText,
   removeOptimisticUser,
@@ -770,11 +771,31 @@ function scheduleRefresh() {
   scheduleRefresh.timer = setTimeout(() => refreshSessionData().catch(() => {}), 180)
 }
 
+async function reconcileThread(sessionId) {
+  const thread = state.threads.get(sessionId)
+  const serverStatus = state.runtime?.sessionStatuses?.[sessionId]
+  if (!thread || !needsThreadRehydration(thread, serverStatus)) return
+  const messages = await window.openworking.runtime.listMessages({ sessionId })
+  hydrateThread(thread, sessionId, messages, serverStatus)
+}
+
 async function refreshSessionData() {
   if (state.runtime?.status !== "running" || state.runtime.project?.id !== state.activeProjectId) return
   state.sessionsByProject[state.activeProjectId] = await window.openworking.runtime.listSessions()
-  if (state.activeSessionId) {
-    hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId: state.activeSessionId }))
+  const activeId = state.activeSessionId
+  const staleIds = [...state.threads.keys()].filter((id) => (
+    id && needsThreadRehydration(state.threads.get(id), state.runtime?.sessionStatuses?.[id])
+  ))
+  for (const id of staleIds) {
+    if (id === activeId) continue
+    await reconcileThread(id)
+  }
+  if (activeId && needsThreadRehydration(state.threads.get(activeId), state.runtime?.sessionStatuses?.[activeId])) {
+    const serverStatus = state.runtime?.sessionStatuses?.[activeId]
+    hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId: activeId }), serverStatus)
+  } else if (staleIds.some((id) => id !== activeId) && activeId) {
+    // listMessages updates the runtime's active session; restore focus after background reconciles.
+    await window.openworking.runtime.listMessages({ sessionId: activeId })
   }
   render()
 }
@@ -3819,12 +3840,16 @@ async function selectSession(projectId, sessionId) {
   state.activeProjectId = projectId
   state.activeSessionId = sessionId
   state.nav = "session"
-  // If we already hold a live thread for this session that is mid-flight (busy), keep
-  // it as-is — re-hydrating from the server would drop streamed parts not yet
-  // persisted there. Idle or first-time threads hydrate from the server as before.
+  // Re-hydrate unless the session is genuinely still streaming (local + server busy
+  // with streamed output already in memory). Stale busy threads missed stream events
+  // during backgrounding or SSE reconnect and must fetch from the server.
   const existing = state.threads.get(sessionId)
-  if (!existing || !threadIsBusy(existing)) {
-    hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId }))
+  const serverStatus = state.runtime?.sessionStatuses?.[sessionId]
+  if (needsThreadRehydration(existing, serverStatus)) {
+    hydrateActiveThread(
+      await window.openworking.runtime.listMessages({ sessionId }),
+      serverStatus
+    )
   }
   render({ threadScroll: "latest" })
 }

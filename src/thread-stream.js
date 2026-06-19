@@ -336,7 +336,7 @@
       if (message.role === "user") return false
       if (assistantMessageHasOutput(message)) return true
     }
-    return true
+    return false
   }
 
   function appendSyntheticError(thread, { title, detail }) {
@@ -711,6 +711,13 @@
     return type === "busy" || type === "retry"
   }
 
+  function needsThreadRehydration(thread, serverStatus) {
+    if (!thread || !threadIsBusy(thread)) return true
+    if (serverStatus?.type === "idle") return true
+    if (!hasAssistantOutputAfterLastUser(thread)) return true
+    return false
+  }
+
   function hasRunningTool(thread) {
     for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
       const message = thread.messages[index]
@@ -742,6 +749,7 @@
     fileRefsFromBacktickPaths,
     hydrateThread,
     messageCopyText,
+    needsThreadRehydration,
     userMessageFileRefs,
     messageText,
     removeOptimisticUser,

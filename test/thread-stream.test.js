@@ -10,6 +10,7 @@ const {
   hasRunningTool,
   hydrateThread,
   messageCopyText,
+  needsThreadRehydration,
   userMessageFileRefs,
   messageText,
   removeOptimisticUser,
@@ -930,6 +931,36 @@ test("threadIsBusy reflects busy/retry status", () => {
   thread.status = { type: "idle" }
   assert.equal(threadIsBusy(thread), false)
   assert.equal(threadIsBusy(undefined), false)
+})
+
+test("needsThreadRehydration rehydrates idle, stale, and stuck threads but preserves live streams", () => {
+  const idle = createThreadStream("sess_idle")
+  assert.equal(needsThreadRehydration(idle, { type: "busy" }), true)
+  assert.equal(needsThreadRehydration(undefined, { type: "idle" }), true)
+
+  const emptyBusy = createThreadStream("sess_empty")
+  emptyBusy.status = { type: "busy" }
+  assert.equal(needsThreadRehydration(emptyBusy, { type: "busy" }), true)
+
+  const staleBusy = createThreadStream("sess_stale")
+  addOptimisticUser(staleBusy, "Hello")
+  staleBusy.status = { type: "busy" }
+  assert.equal(needsThreadRehydration(staleBusy, { type: "idle" }), true)
+
+  const stuckBusy = createThreadStream("sess_stuck")
+  addOptimisticUser(stuckBusy, "Hello")
+  stuckBusy.status = { type: "busy" }
+  assert.equal(needsThreadRehydration(stuckBusy, { type: "busy" }), true)
+
+  const liveStream = createThreadStream("sess_live")
+  addOptimisticUser(liveStream, "Hello")
+  liveStream.status = { type: "busy" }
+  applyThreadEvent(liveStream, {
+    type: "message.part.updated",
+    sessionID: "sess_live",
+    part: { id: "part_1", messageID: "msg_a", type: "text", text: "Working on it" }
+  })
+  assert.equal(needsThreadRehydration(liveStream, { type: "busy" }), false)
 })
 
 // Models the renderer's per-session routing: one thread per session, kept live
