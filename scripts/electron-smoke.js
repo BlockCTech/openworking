@@ -356,7 +356,7 @@ async function main() {
             messageID: "msg_stream",
             type: "tool",
             tool: "read",
-            state: { status: "running", input: { filePath: "CLAUDE.md" } }
+            state: { status: "running", input: { filePath: "README.md" } }
           }
         })
         await nextPaint()
@@ -365,7 +365,7 @@ async function main() {
         const keepsRunningToolStatusCompact = hasCompactToolStepStatus(runningToolStep, ".tool-processing")
         const runningStepStartsOpen =
           runningToolStep?.getAttribute("aria-expanded") === "true" &&
-          document.querySelector(".tool-step-details")?.textContent.includes("CLAUDE.md")
+          document.querySelector(".tool-step-details")?.textContent.includes("README.md")
         runningToolStep?.click()
         await nextPaint()
         runningToolStep = document.querySelector(".tool-step.running")
@@ -377,7 +377,7 @@ async function main() {
         runningToolStep = document.querySelector(".tool-step.running")
         const runningStepCanReopen =
           runningToolStep?.getAttribute("aria-expanded") === "true" &&
-          runningToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("CLAUDE.md")
+          runningToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("README.md")
 
         handleRuntimeStream({
           type: "message.part.updated",
@@ -389,10 +389,10 @@ async function main() {
             tool: "read",
             state: {
               status: "completed",
-              input: { filePath: "CLAUDE.md" },
+              input: { filePath: "README.md" },
               metadata: {
                 diff: "@@ -1 +1 @@\\n-old\\n+new",
-                filepath: "CLAUDE.md"
+                filepath: "README.md"
               }
             }
           }
@@ -409,7 +409,7 @@ async function main() {
         completedToolStep = document.querySelector(".tool-step.completed")
         const completedStepCanReopen =
           completedToolStep?.getAttribute("aria-expanded") === "true" &&
-          completedToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("CLAUDE.md")
+          completedToolStep?.closest(".tool-result").querySelector(".tool-step-details")?.textContent.includes("README.md")
         const hidesReadFileRef = !document.querySelector(".file-ref-chip")
         const hidesReadDiff = !document.querySelector(".changes-summary")
 

@@ -1,7 +1,7 @@
 # Giảm kích thước app `.dmg` — Phân tích & Khuyến nghị
 
 > **Loại tài liệu:** Decision document (phân tích kỹ thuật + khuyến nghị).
-> **Phạm vi:** macOS arm64 build của `TechTusCoWork` (package `openworking`).
+> **Phạm vi:** macOS arm64 build của `OpenWorking` (package `openworking`).
 > **Ràng buộc đã chốt:** Giữ nguyên tính năng (không bỏ skill, không bỏ document-tools, **giữ offline-first** — không tải runtime opencode sau khi cài). Chỉ loại trùng lặp / file thừa và nén tốt hơn.
 > **Trạng thái:** ĐÃ ÁP DỤNG (2026-06-19) — xem §0. Phần phân tích bên dưới giữ nguyên làm tham chiếu lịch sử.
 > **Số liệu phân tích gốc đo từ bản build `dist/` ngày 2026-06-03.**
@@ -64,8 +64,8 @@ Hai thành phần lớn nhất gần như **không thể cắt** nếu giữ tí
 
 | Artifact | Size |
 |---|---|
-| `dist/TechTusCoWork-1.0.0-arm64.dmg` | **160 MB** |
-| `dist/mac-arm64/TechTusCoWork.app` | **409 MB** |
+| `dist/OpenWorking-1.0.0-arm64.dmg` | **160 MB** |
+| `dist/mac-arm64/OpenWorking.app` | **409 MB** |
 
 ### 2.2 Bên trong `.app` (409 MB)
 
@@ -149,7 +149,7 @@ Glob này về lý thuyết match **cả hai**:
 **Đã verify** trong bản build hiện tại: chỉ `opencode-darwin-arm64` lọt vào `app.asar.unpacked` (103 MB), `opencode-ai/bin` **không** bị unpack → chỉ 1 bản. Đây là điều **tốt cần duy trì**. Nếu sau này refactor glob/`files`, phải verify lại bằng:
 
 ```sh
-du -sh dist/mac-arm64/TechTusCoWork.app/Contents/Resources/app.asar.unpacked
+du -sh dist/mac-arm64/OpenWorking.app/Contents/Resources/app.asar.unpacked
 ```
 
 Nếu con số nhảy lên ~206 MB → đã vô tình ship 2 bản.
@@ -249,16 +249,16 @@ Mỗi mục: *mô tả → tiết kiệm → tradeoff → việc cần làm / ve
 **Đo size trước/sau:**
 
 ```sh
-du -sh dist/mac-arm64/TechTusCoWork.app
+du -sh dist/mac-arm64/OpenWorking.app
 du -sh dist/*.dmg
-du -sh dist/mac-arm64/TechTusCoWork.app/Contents/Resources/app.asar
-du -sh dist/mac-arm64/TechTusCoWork.app/Contents/Resources/app.asar.unpacked
+du -sh dist/mac-arm64/OpenWorking.app/Contents/Resources/app.asar
+du -sh dist/mac-arm64/OpenWorking.app/Contents/Resources/app.asar.unpacked
 ```
 
 **Soi nội dung asar (xem package nào còn trong đó):**
 
 ```sh
-npx asar list dist/mac-arm64/TechTusCoWork.app/Contents/Resources/app.asar | grep '^/node_modules/[^/]*$'
+npx asar list dist/mac-arm64/OpenWorking.app/Contents/Resources/app.asar | grep '^/node_modules/[^/]*$'
 ```
 
 **Phải PASS sau mọi thay đổi (cổng an toàn):**

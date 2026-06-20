@@ -24,8 +24,7 @@ Reports land in `playwright-report/` (gitignored). After a failure:
 - `helpers.js` — sandbox + env builders, plus `seedProjects()` which writes
   `projects.json` directly (the real "Add project" button opens a native folder
   dialog Playwright cannot drive). Project ids mirror `src/project-registry.js`.
-- Mock env (see `sandboxEnv`): `OPENWORKING_SAML2_ENABLED=false` (skips login,
-  `isAuthenticated()` is true), `OPENWORKING_RUNTIME_BIN=/does/not/exist` (no
+- Mock env (see `sandboxEnv`): `OPENWORKING_RUNTIME_BIN=/does/not/exist` (no
   real `opencode serve`), `OPENWORKING_USER_DATA_DIR` / `_OPENCODE_CONFIG_PATH`
   (sandboxed profile), `OPENWORKING_VERSION_API_BASE` → unreachable (version
   check fails open, no forced-update modal).
@@ -34,7 +33,7 @@ Reports land in `playwright-report/` (gitignored). After a failure:
 
 UI-level flows only: app launch, screen navigation, project rename/remove, and
 the Config screen's read-only fields + API-key redaction. Sending prompts to a
-real LLM is intentionally out of scope (needs SSO + gateway credentials).
+real LLM is intentionally out of scope because it needs a user-configured provider.
 
 ## Selectors
 

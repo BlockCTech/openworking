@@ -1,6 +1,6 @@
 # Current Behavior Issues
 
-This file logs behavior issues observed in the current TechTusCoWork app during basic project/session flow review.
+This file logs behavior issues observed in the current OpenWorking app during basic project/session flow review.
 
 ## Scope reviewed
 

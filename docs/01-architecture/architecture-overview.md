@@ -1,12 +1,12 @@
 # Architecture Overview (as-built)
 
 > **Loại tài liệu:** As-built architecture reference. Mô tả hiện trạng code, không phải kế hoạch.
-> **Phạm vi:** `desktop-client/` (Electron app). Backend/contract phía AI Console nằm ở workspace-root `/docs`.
-> **Đối tượng:** kỹ sư mới + AI agent (Claude/Codex) cần bản đồ tổng thể trước khi sửa code.
+> **Phạm vi:** `desktop-client/` (Electron app).
+> **Đối tượng:** kỹ sư mới + AI agent cần bản đồ tổng thể trước khi sửa code.
 
 ## Context
 
-TechTusCoWork là vỏ Electron local-first bọc upstream OpenCode AI. App nhúng sẵn `opencode-ai`, chạy `opencode serve` trong thư mục project mà người dùng chọn, và quản lý một OpenCode profile riêng dưới Electron `userData` — **không** ghi vào project folder hay `~/.config/opencode` toàn cục.
+OpenWorking là vỏ Electron local-first bọc upstream OpenCode AI. App nhúng sẵn `opencode-ai`, chạy `opencode serve` trong thư mục project mà người dùng chọn, và quản lý một OpenCode profile riêng dưới Electron `userData` — **không** ghi vào project folder hay `~/.config/opencode` toàn cục.
 
 Tài liệu này chỉ tả những gì **không suy ra nhanh được từ code**: đường đi giữa 3 process, vòng đời runtime, các ranh giới bảo mật, và bản đồ module↔test. Chi tiết từng miền nằm ở các doc được link.
 
@@ -25,7 +25,7 @@ flowchart LR
 
 - **Renderer** (`src/renderer.js`, ~5k dòng, `src/index.html`, `src/styles.css`): single-page UI vanilla-JS, không framework. Tiêu thụ `runtime:update`/`runtime:stream` để render thread sống.
 - **Preload** (`src/preload.js`): mặt phẳng API **duy nhất** giữa renderer↔main, expose qua `contextBridge` thành `window.openworking`. `contextIsolation: true`, `nodeIntegration: false` (xem `createWindow` trong `src/main.js`). Mọi capability mới phải đi qua đây.
-- **Main** (`src/main.js`): giữ toàn bộ state đặc quyền + đăng ký IPC handler. Singletons: `ProjectRegistry`, `RuntimeProcessManager`, `AttachmentRegistry`, `LocalLlmProxy`, `AuthSession`, OpenCode profile đã resolve. Push update bất đồng bộ về renderer qua helper `send(channel, payload)` (`src/main.js:80`).
+- **Main** (`src/main.js`): giữ toàn bộ state đặc quyền + đăng ký IPC handler. Singletons: `ProjectRegistry`, `RuntimeProcessManager`, `AttachmentRegistry`, OpenCode profile đã resolve. Push update bất đồng bộ về renderer qua helper `send(channel, payload)`.
 
 ## 2. IPC surface
 
@@ -33,7 +33,6 @@ Mặt phẳng đầy đủ định nghĩa ở `src/preload.js`; handler ở `src
 
 | Nhóm | Kênh `invoke` (renderer → main) | Module xử lý chính |
 |---|---|---|
-| `auth:*` | `getSession`, `refresh`, `login`, `logout` | `src/auth-session.js` |
 | `projects:*` | `list`, `add`, `remove`, `rename`, `touch` | `src/project-registry.js` |
 | `config:*` | `get`, `save` | `src/opencode-profile.js`, `src/opencode-config.js` |
 | `skills:*` | `upload`, `installPath`, `read`, `uninstall` | `src/opencode-profile.js` |
@@ -50,7 +49,7 @@ Mặt phẳng đầy đủ định nghĩa ở `src/preload.js`; handler ở `src
 - `runtime:stream` — từng event đã chiếu nhỏ (per-event).
 - `version:gate`, `version:download-progress`, `version:install-status` — luồng cập nhật app.
 
-`RuntimeProcessManager` nhận chính hàm `send` qua tham số `emit` (`src/main.js:474-479`), nên nó tự phát `runtime:update`/`runtime:stream`.
+`RuntimeProcessManager` nhận chính hàm `send` qua tham số `emit`, nên nó tự phát `runtime:update`/`runtime:stream`.
 
 ## 3. Runtime lifecycle — `RuntimeProcessManager`
 
@@ -76,7 +75,7 @@ sequenceDiagram
 
 Điểm cần biết:
 - **Resolve binary** (`resolveRuntimeBin`): ưu tiên `opencode-ai` / `opencode-<platform>-<arch>` đã nhúng hơn CLI toàn cục. Packaging giữ chúng unpacked khỏi asar.
-- **Spawn args**: `serve --port <free> --hostname 127.0.0.1 --print-logs` (`src/runtime/process-manager.js:617`). Override bằng `OPENWORKING_RUNTIME_ARGS`. `--print-logs` route log có cấu trúc của opencode ra stderr → vào Diagnostics (cần cho việc chẩn đoán lỗi MCP).
+- **Spawn args**: `serve --port <free> --hostname 127.0.0.1 --print-logs`. Override bằng `OPENWORKING_RUNTIME_ARGS`. `--print-logs` route log có cấu trúc của opencode ra stderr → vào Diagnostics (cần cho việc chẩn đoán lỗi MCP).
 - **Auth**: server bind **chỉ** `127.0.0.1`, yêu cầu HTTP Basic auth với password ngẫu nhiên mỗi lần chạy (`OPENCODE_SERVER_PASSWORD`).
 - **Projection**: event/message thô của opencode được chiếu xuống shape rút gọn (`projectRuntimeEvent`, `projectMessage*`) — chỉ field trong allowlist mới qua biên giới. Xem `03-skills-runtime/built-in-skills.md` cho commands/MCP và [[message-part-allowlist]].
 - **Multi-session**: lõi opencode hỗ trợ session đồng thời; renderer giữ Map-of-threads + per-session badge. Stream per-session đi qua `src/thread-stream.js` (parse/assemble message parts).
@@ -89,11 +88,13 @@ sequenceDiagram
 - `opencode.json` được **validate offline** bằng Ajv với schema nhúng (`resources/opencode/schemas/`) trước khi ghi — input sai (vd modality lạ) bị từ chối mà không đổi file đã lưu.
 - Config screen chỉ sửa: provider `baseURL`/`apiKey`, model **input** modalities, optional plugins, skill toggles. Phần còn lại read-only. API key bị redact khỏi JSON preview.
 
-## 5. Auth + LLM proxy lane
+## 5. Provider Config Lane
 
-Tóm tắt vai trò (contract chi tiết ở `02-auth/`):
-- `src/auth-session.js` + `src/auth-secret-store.js`: Portal Hub SAML2 login qua AI Console, lưu **chỉ** refresh token (Electron `safeStorage`), access token & Gateway JWT chỉ ở memory. → [`02-auth/sso-login-and-llm-token.md`](../02-auth/sso-login-and-llm-token.md).
-- `src/local-llm-proxy.js`: proxy 127.0.0.1 random-port; OpenCode chỉ thấy `TECHTUS_LOCAL_PROXY_TOKEN`, proxy mới đổi sang Gateway JWT khi forward. → [`03-skills-runtime/local-llm-proxy.md`](../03-skills-runtime/local-llm-proxy.md).
+OpenWorking không ship account login hay managed LLM proxy. Người dùng cấu hình provider OpenAI-compatible trực tiếp trong app-managed `opencode.json` qua Settings:
+
+- `baseURL` và `apiKey` thuộc provider `gateway`.
+- API key chỉ nằm trong local profile của người dùng và bị redact khỏi preview/diagnostics.
+- Runtime child nhận config bằng `OPENCODE_CONFIG`/`OPENCODE_CONFIG_DIR`; app không gửi token dịch vụ nội bộ nào.
 
 ## 6. Module supporting cast
 
@@ -111,7 +112,7 @@ Tóm tắt vai trò (contract chi tiết ở `02-auth/`):
 - Runtime server bind **chỉ** `127.0.0.1` + Basic auth per-launch.
 - `assertTranslationArtifact` (`src/artifact-path.js`) confine `artifacts:open` về artifact dịch hợp lệ qua realpath — gate `shell.openPath`. `assertProjectFile`/`assertProjectDirectory` confine `files:*` trong project root.
 - Biên renderer↔main hẹp: thêm capability qua `preload.js`; chiếu event/message xuống field allowlist thay vì forward object opencode thô.
-- Redact: `Authorization`, `apiKey`, `TECHTUS_LOCAL_PROXY_TOKEN`, các giá trị token-like trong diagnostics/logs. Không ghi Gateway JWT / AI Console token / SAMLResponse.
+- Redact: `Authorization`, `apiKey`, `token`, `secret`, `password`, bearer tokens, OAuth code/token fields, và các giá trị token-like trong diagnostics/logs.
 
 ## 8. Module ↔ test map
 
@@ -124,8 +125,6 @@ Test là `node:test` thuần dưới `test/`, một file/module. Chạy: `npm te
 | `src/runtime/process-manager.js` | `test/runtime-process-manager.test.js`, `test/opencode-skill-integration.test.js` |
 | `src/thread-stream.js` | `test/thread-stream.test.js` |
 | `src/renderer.js` | `test/renderer.test.js` |
-| `src/auth-session.js` / `auth-secret-store.js` | `test/auth-session.test.js`, `test/auth-secret-store.test.js` |
-| `src/local-llm-proxy.js` | `test/local-llm-proxy.test.js` |
 | `src/attachment-registry.js` | `test/attachment-registry.test.js` |
 | `src/office-attachment-context.js` | `test/office-attachment-context.test.js` |
 | `src/artifact-path.js` | `test/artifact-path.test.js` |

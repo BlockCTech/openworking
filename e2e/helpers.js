@@ -55,14 +55,12 @@ function seedProjects(userDataDir, projects) {
   return entries
 }
 
-// Env that boots the app fully offline & login-free:
-//  - SAML2 off  -> isAuthenticated() is true, the whole UI is usable.
+// Env that boots the app fully offline:
 //  - runtime bin -> /does/not/exist so no real opencode serve is spawned.
 //  - userData/config redirected into the sandbox.
 function sandboxEnv(sandbox) {
   return {
     ...process.env,
-    OPENWORKING_SAML2_ENABLED: "false",
     OPENWORKING_RUNTIME_BIN: "/does/not/exist",
     OPENWORKING_USER_DATA_DIR: sandbox.userDataDir,
     OPENWORKING_OPENCODE_CONFIG_PATH: sandbox.opencodeConfigPath,

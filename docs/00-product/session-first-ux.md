@@ -2,7 +2,7 @@
 
 ## Source Hierarchy
 
-Use these sources in order when planning or implementing TechTusCoWork UI work:
+Use these sources in order when planning or implementing OpenWorking UI work:
 
 1. `openworking-business-principles.md`: business scope and product boundary.
 2. `opencode-enterprise-desktop-prd.md`: product behavior and technical boundary.
@@ -13,8 +13,8 @@ If the mockup conflicts with the business principles, keep the local-first produ
 
 ## Required Shell
 
-- Dark desktop titlebar with the TechTusCoWork title.
-- Light left sidebar with TechTusCoWork branding and `Local desktop`.
+- Dark desktop titlebar with the OpenWorking title.
+- Light left sidebar with OpenWorking branding and `Local desktop`.
 - Primary `New session` action.
 - `Projects` and `Config` navigation.
 - Project accordion with session count, recent session rows and `Show more`.
@@ -51,7 +51,7 @@ If the mockup conflicts with the business principles, keep the local-first produ
 
 ## Config And Built-In Skills
 
-- Config edits the TechTusCoWork app-managed OpenCode profile under Electron `userData`, not the global OpenCode profile.
+- Config edits the OpenWorking app-managed OpenCode profile under Electron `userData`, not the global OpenCode profile.
 - The Config screen lists the fourteen offline built-in skills documented in `built-in-skills.md`.
 - Each skill toggle writes native OpenCode `permission.skill.<name> = allow|deny`.
 - Optional plugin presets remain separate from the built-in skill bundle.

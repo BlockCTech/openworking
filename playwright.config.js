@@ -3,7 +3,7 @@ const { defineConfig } = require("@playwright/test")
 // E2E for the Electron desktop shell. We drive the real app via Playwright's
 // _electron launcher (see e2e/fixtures.js); there is no webServer and no
 // browser project — every test spawns its own Electron instance against a
-// throwaway userData/profile, with SAML2 + the opencode runtime mocked off.
+// throwaway userData/profile, with the opencode runtime mocked off.
 module.exports = defineConfig({
   testDir: "./e2e",
   testMatch: "**/*.spec.js",

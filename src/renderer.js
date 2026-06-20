@@ -2264,7 +2264,7 @@ function renderToolArtifacts(metadata) {
 }
 
 function renderThinkingRow() {
-  return `<div class="msg-ai stream-row"><div class="thinking"><img class="thinking-logo" src="./assets/techtus_logo.apng" alt="" width="24" height="24"><span>Thinking</span></div></div>`
+  return `<div class="msg-ai stream-row"><div class="thinking"><img class="thinking-logo" src="./assets/logo.png" alt="" width="24" height="24"><span>Thinking</span></div></div>`
 }
 
 function renderRetryRow(status) {
@@ -4425,39 +4425,6 @@ async function reloadConfig() {
   selectedModel()
 }
 
-async function login() {
-  state.authLoading = true
-  render()
-  try {
-    state.auth = await window.openworking.auth.login()
-    await reloadConfig()
-    render()
-    if (isAuthenticated() && state.projects[0]) {
-      await openProject(state.projects[0].id, { selectLatest: false })
-    }
-  } finally {
-    state.authLoading = false
-    render()
-  }
-}
-
-async function logout() {
-  state.popover = null
-  state.accountMenuOpen = false
-  state.authLoading = true
-  render()
-  try {
-    state.auth = await window.openworking.auth.logout()
-    state.runtime = await window.openworking.runtime.get()
-    state.activeSessionId = null
-    state.threads.clear()
-    resetActiveThread()
-  } finally {
-    state.authLoading = false
-    render()
-  }
-}
-
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     applyPendingFileMentions,
@@ -4492,10 +4459,6 @@ if (typeof document !== "undefined") {
     }
     if (state.popover && !event.target.closest(".popover-anchor")) {
       state.popover = null
-      dirty = true
-    }
-    if (state.accountMenuOpen && !event.target.closest(".account-menu-anchor")) {
-      state.accountMenuOpen = false
       dirty = true
     }
     if (dirty) render()

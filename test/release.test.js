@@ -24,8 +24,8 @@ test("release preflight requires signing and notarization credentials", () => {
 
 test("release helper finds the packaged app bundle", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-release-"))
-  const appPath = path.join(temp, "mac-arm64", "TechTusCoWork.app")
+  const appPath = path.join(temp, "mac-arm64", "OpenWorking.app")
   fs.mkdirSync(appPath, { recursive: true })
 
-  assert.equal(findAppBundle(temp, "TechTusCoWork"), appPath)
+  assert.equal(findAppBundle(temp, "OpenWorking"), appPath)
 })

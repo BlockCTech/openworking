@@ -11,7 +11,7 @@ This document verifies the session-first local desktop MVP:
 - Restricted provider credential and model input-modality editor, optional plugin editor and built-in skill toggles.
 - Diagnostics with runtime status, cwd, profile path, config path, server URL, logs and errors.
 
-SSO, RBAC, project sharing, team workspaces, control-plane sync, provider proxy and enterprise audit are outside this MVP.
+Account login, RBAC, project sharing, team workspaces, control-plane sync, provider proxy and enterprise audit are outside this MVP.
 
 ## Runtime Contract
 
