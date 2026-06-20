@@ -6,7 +6,7 @@ const os = require("node:os")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
 const AdmZip = require("adm-zip")
-const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, translationGatewayEnv } = require("../src/runtime/process-manager")
+const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, resolveUserPath, translationGatewayEnv } = require("../src/runtime/process-manager")
 
 test("translation gateway env resolves managed config without exposing extra provider fields", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-gateway-"))
@@ -25,6 +25,42 @@ test("translation gateway env resolves managed config without exposing extra pro
     OPENWORKING_TRANSLATION_API_KEY: "secret",
     OPENWORKING_TRANSLATION_MODEL: "gemma/model"
   })
+})
+
+test("resolveUserPath preserves the current PATH entries and dedupes", () => {
+  const originalPath = process.env.PATH
+  try {
+    const unique = path.join(os.tmpdir(), `openworking-path-${Date.now()}`)
+    // Duplicate an entry to confirm dedup; include a unique marker dir to confirm preservation.
+    process.env.PATH = [unique, "/usr/bin", "/usr/bin", unique].join(path.delimiter)
+    const resolved = resolveUserPath({ force: true })
+    const parts = resolved.split(path.delimiter)
+
+    // Every current PATH entry survives.
+    assert.ok(parts.includes(unique))
+    assert.ok(parts.includes("/usr/bin"))
+    // No duplicates in the merged result.
+    assert.equal(new Set(parts).size, parts.length)
+  } finally {
+    process.env.PATH = originalPath
+    resolveUserPath({ force: true })
+  }
+})
+
+test("resolveUserPath caches and returns the same value until forced", () => {
+  const originalPath = process.env.PATH
+  try {
+    process.env.PATH = "/usr/bin"
+    const first = resolveUserPath({ force: true })
+    process.env.PATH = "/somewhere/else"
+    // Without force, the cached value (from the previous force call) is returned unchanged.
+    assert.equal(resolveUserPath(), first)
+    // Forcing picks up the new PATH.
+    assert.notEqual(resolveUserPath({ force: true }), first)
+  } finally {
+    process.env.PATH = originalPath
+    resolveUserPath({ force: true })
+  }
 })
 
 test("tool metadata projection keeps only allowlisted artifact fields", () => {
@@ -181,17 +217,18 @@ test("question reply/reject projection forwards only ids", () => {
   }
 })
 
-test("permission.asked projection whitelists display fields", () => {
+test("permission.asked projection whitelists display fields and flattens metadata into details", () => {
   const projected = projectRuntimeEvent({
     type: "permission.asked",
     properties: {
       sessionID: "sess_one",
       requestID: "p1",
       title: "Allow edit to src/index.js?",
+      permission: "backlog_update_issue",
       type: "edit",
       pattern: "src/**",
       callID: "call_42",
-      metadata: { tool: "edit" },
+      metadata: { issueIdOrKey: "TSD-131", statusId: 2, nested: { a: 1 }, empty: null },
       secret: "drop"
     }
   })
@@ -202,10 +239,15 @@ test("permission.asked projection whitelists display fields", () => {
     requestID: "p1",
     permission: {
       title: "Allow edit to src/index.js?",
+      permission: "backlog_update_issue",
       type: "edit",
       pattern: "src/**",
       callID: "call_42",
-      metadata: { tool: "edit" }
+      details: [
+        { key: "issueIdOrKey", value: "TSD-131" },
+        { key: "statusId", value: "2" },
+        { key: "nested", value: "{\"a\":1}" }
+      ]
     }
   })
 })
@@ -1083,11 +1125,11 @@ function readyManager(serverUrl) {
   return manager
 }
 
-test("answerQuestion posts to the session question reply endpoint without a /request/ segment", async () => {
+test("answerQuestion posts to the non-session question reply endpoint", async () => {
   let captured = null
   const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json")
-    if (req.method === "POST" && /^\/session\/[^/]+\/question\/[^/]+\/reply$/.test(req.url)) {
+    if (req.method === "POST" && /^\/question\/[^/]+\/reply$/.test(req.url)) {
       let raw = ""
       req.on("data", (chunk) => { raw += chunk })
       req.on("end", () => {
@@ -1103,19 +1145,19 @@ test("answerQuestion posts to the session question reply endpoint without a /req
   const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
   try {
     await manager.answerQuestion({ sessionId: "sess_new", requestID: "q1", answers: [["yes"]] })
-    assert.equal(captured.url, "/session/sess_new/question/q1/reply")
-    assert.equal(captured.url.includes("/request/"), false)
+    assert.equal(captured.url, "/question/q1/reply")
+    assert.equal(captured.url.includes("/session/"), false)
     assert.deepEqual(captured.body, { answers: [["yes"]] })
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
 })
 
-test("rejectQuestion posts to the session question reject endpoint without a /request/ segment", async () => {
+test("rejectQuestion posts to the non-session question reject endpoint", async () => {
   let captured = null
   const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json")
-    if (req.method === "POST" && /^\/session\/[^/]+\/question\/[^/]+\/reject$/.test(req.url)) {
+    if (req.method === "POST" && /^\/question\/[^/]+\/reject$/.test(req.url)) {
       captured = { url: req.url }
       return res.end("true")
     }
@@ -1126,8 +1168,8 @@ test("rejectQuestion posts to the session question reject endpoint without a /re
   const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
   try {
     await manager.rejectQuestion({ sessionId: "sess_new", requestID: "q1" })
-    assert.equal(captured.url, "/session/sess_new/question/q1/reject")
-    assert.equal(captured.url.includes("/request/"), false)
+    assert.equal(captured.url, "/question/q1/reject")
+    assert.equal(captured.url.includes("/session/"), false)
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
@@ -1225,11 +1267,14 @@ test("mcp status events project to a whitelisted name + status shape", () => {
   assert.equal(projectRuntimeEvent({ type: "mcp.status.connected", properties: {} }), null)
 })
 
-test("replyPermission posts to the session permission reply endpoint without a /request/ segment", async () => {
+test("replyPermission posts to the non-session permission reply endpoint", async () => {
+  // OpenCode v1.17 serves the reply at /permission/{requestID}/reply. The old session-scoped
+  // path (/session/{id}/permission/{id}/reply) does not exist and is silently swallowed by the
+  // web UI fallback (HTTP 200 HTML), which left tools stuck "Processing" after approval.
   let captured = null
   const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json")
-    if (req.method === "POST" && /^\/session\/[^/]+\/permission\/[^/]+\/reply$/.test(req.url)) {
+    if (req.method === "POST" && /^\/permission\/[^/]+\/reply$/.test(req.url)) {
       let raw = ""
       req.on("data", (chunk) => { raw += chunk })
       req.on("end", () => {
@@ -1245,8 +1290,8 @@ test("replyPermission posts to the session permission reply endpoint without a /
   const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
   try {
     await manager.replyPermission({ sessionId: "sess_new", requestID: "p1", reply: "reject", message: "no" })
-    assert.equal(captured.url, "/session/sess_new/permission/p1/reply")
-    assert.equal(captured.url.includes("/request/"), false)
+    assert.equal(captured.url, "/permission/p1/reply")
+    assert.equal(captured.url.includes("/session/"), false)
     assert.deepEqual(captured.body, { reply: "reject", message: "no" })
   } finally {
     await new Promise((resolve) => server.close(resolve))

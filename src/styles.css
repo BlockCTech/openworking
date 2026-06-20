@@ -793,6 +793,10 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .ask-dismiss:hover { color: var(--text); background: var(--surface-2); }
 .permission-card { border-color: color-mix(in srgb, var(--amber), transparent 55%); }
 .ask-permission-meta { color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
+.ask-permission-details { display: flex; flex-direction: column; gap: 4px; margin: 2px 0; }
+.ask-permission-detail { display: flex; gap: 8px; font-size: 12px; line-height: 1.4; }
+.ask-permission-detail-key { color: var(--text-3); flex: 0 0 auto; min-width: 96px; font-weight: 600; }
+.ask-permission-detail-value { color: var(--text); overflow-wrap: anywhere; }
 .ask-permission-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .ask-permission-btn {
   padding: 8px 14px; border: 1px solid var(--border-input); border-radius: 9px;
@@ -1009,6 +1013,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .mcp-preset .secondary-btn { align-self: flex-start; }
 .mcp-card-icon { display: grid; place-items: center; width: 32px; height: 32px; flex-shrink: 0; border-radius: var(--radius); background: var(--accent-soft); }
 .mcp-card-icon svg { width: 17px; height: 17px; color: var(--accent-text); }
+.mcp-card-icon img { width: 20px; height: 20px; object-fit: contain; }
 
 .mcp-card-list { display: grid; gap: 10px; }
 .mcp-card {

@@ -1,5 +1,6 @@
-const { spawn } = require("node:child_process")
+const { spawn, execFileSync } = require("node:child_process")
 const fs = require("node:fs")
+const os = require("node:os")
 const http = require("node:http")
 const net = require("node:net")
 const path = require("node:path")
@@ -232,6 +233,55 @@ function translationGatewayEnv(configPath, env = process.env) {
   }
 }
 
+// Directories where Node (and therefore `npx`) is commonly installed but which a GUI app launched
+// from Finder/Dock never sees: launchd hands the app a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin),
+// missing Homebrew, nvm, Volta, etc. Used as a fallback when the login shell can't be queried.
+function commonNodeBinDirs(env = process.env) {
+  const home = os.homedir()
+  const dirs = ["/opt/homebrew/bin", "/usr/local/bin", path.join(home, ".volta", "bin"), path.join(home, ".bun", "bin")]
+  // nvm installs one bin dir per Node version; include them all (newest is resolved by opencode's lookup).
+  const nvmVersions = path.join(home, ".nvm", "versions", "node")
+  try {
+    for (const entry of fs.readdirSync(nvmVersions)) {
+      dirs.push(path.join(nvmVersions, entry, "bin"))
+    }
+  } catch {}
+  return dirs.filter((dir) => {
+    try {
+      return fs.statSync(dir).isDirectory()
+    } catch {
+      return false
+    }
+  })
+}
+
+// The login shell's PATH (set up by ~/.zshrc, ~/.zprofile, nvm, etc.). `-ilc` runs an interactive
+// login shell so version managers initialize. POSIX-only — skipped on win32. Returns [] on any failure.
+function loginShellPathParts() {
+  if (process.platform === "win32") return []
+  const shell = process.env.SHELL || "/bin/zsh"
+  try {
+    const out = execFileSync(shell, ["-ilc", "echo $PATH"], { encoding: "utf8", timeout: 4000, stdio: ["ignore", "pipe", "ignore"] })
+    return String(out).trim().split(path.delimiter).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+let cachedUserPath = null
+
+// Builds a PATH that includes the user's real toolchain so spawned local MCP servers (e.g.
+// `npx backlog-mcp-server`) resolve. Without this, a packaged macOS app inherits launchd's minimal
+// PATH and opencode reports `Executable not found in $PATH: "npx"`. Cached: the login shell is
+// queried at most once per app session. Pass `force` in tests to bypass the cache.
+function resolveUserPath({ force = false } = {}) {
+  if (cachedUserPath && !force) return cachedUserPath
+  const currentParts = (process.env.PATH || "").split(path.delimiter).filter(Boolean)
+  const merged = [...loginShellPathParts(), ...currentParts, ...commonNodeBinDirs()]
+  cachedUserPath = Array.from(new Set(merged)).join(path.delimiter)
+  return cachedUserPath
+}
+
 function commandModelValue(model) {
   if (typeof model === "string") return model.trim() || null
   if (model?.providerID && model?.modelID) return `${model.providerID}/${model.modelID}`
@@ -394,15 +444,40 @@ function projectQuestion(properties) {
   }
 }
 
-// OpenCode's permission subsystem asks the user to approve a tool action. Whitelist only
-// the display fields needed to describe what is being requested.
+// Flatten a permission's `metadata` object into a small list of displayable key/value strings so
+// the renderer can show what is actually being approved (e.g. which ticket, which status). Only
+// primitive values are surfaced; nested objects/arrays are JSON-stringified and truncated. This
+// keeps the renderer↔main boundary to whitelisted, display-only data.
+function projectPermissionDetails(metadata) {
+  if (!metadata || typeof metadata !== "object") return []
+  const details = []
+  for (const [key, value] of Object.entries(metadata)) {
+    if (value == null) continue
+    let text
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      text = String(value)
+    } else {
+      try { text = JSON.stringify(value) } catch { continue }
+    }
+    if (!text) continue
+    details.push({ key: String(key), value: text.length > 200 ? `${text.slice(0, 200)}…` : text })
+    if (details.length >= 12) break
+  }
+  return details
+}
+
+// OpenCode's permission subsystem asks the user to approve a tool action. Whitelist only the
+// display fields needed to describe what is being requested. `permission` is the tool name
+// (e.g. `backlog_update_issue`); `metadata` carries the tool call arguments we surface as details.
 function projectPermission(properties) {
+  const details = projectPermissionDetails(properties?.metadata)
   return {
     ...(properties?.title ? { title: String(properties.title) } : {}),
+    ...(properties?.permission ? { permission: String(properties.permission) } : {}),
     ...(properties?.type ? { type: String(properties.type) } : {}),
     ...(properties?.pattern ? { pattern: String(properties.pattern) } : {}),
     ...(properties?.callID ? { callID: String(properties.callID) } : {}),
-    ...(properties?.metadata && typeof properties.metadata === "object" ? { metadata: properties.metadata } : {})
+    ...(details.length ? { details } : {})
   }
 }
 
@@ -647,6 +722,9 @@ class RuntimeProcessManager {
     })
     const env = {
       ...process.env,
+      // Augment PATH with the user's real toolchain so opencode can spawn local MCP servers
+      // (e.g. `npx ...`). A packaged macOS app otherwise inherits launchd's minimal PATH.
+      PATH: resolveUserPath(),
       OPENCODE_CONFIG: configPath,
       OPENCODE_CONFIG_DIR: configDir,
       XDG_DATA_HOME: runtimeDataDir,
@@ -1057,7 +1135,7 @@ class RuntimeProcessManager {
     this.timeline("session.question.reply", { sessionId, requestID })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/question/${encodeURIComponent(requestID)}/reply`,
+        url: `${this.state.runtime.serverUrl}/question/${encodeURIComponent(requestID)}/reply`,
         method: "POST",
         auth: this.auth(),
         body: { answers: Array.isArray(answers) ? answers : [] }
@@ -1076,7 +1154,7 @@ class RuntimeProcessManager {
     this.timeline("session.question.reject", { sessionId, requestID })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/question/${encodeURIComponent(requestID)}/reject`,
+        url: `${this.state.runtime.serverUrl}/question/${encodeURIComponent(requestID)}/reject`,
         method: "POST",
         auth: this.auth()
       })
@@ -1097,7 +1175,7 @@ class RuntimeProcessManager {
     this.timeline("session.permission.reply", { sessionId, requestID, reply })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestID)}/reply`,
+        url: `${this.state.runtime.serverUrl}/permission/${encodeURIComponent(requestID)}/reply`,
         method: "POST",
         auth: this.auth(),
         body: { reply, ...(message ? { message: String(message) } : {}) }
@@ -1275,5 +1353,6 @@ module.exports = {
   projectToolMetadata,
   requestJson,
   resolveRuntimeBin,
+  resolveUserPath,
   translationGatewayEnv
 }

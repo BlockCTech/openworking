@@ -76,44 +76,25 @@ const MCP_PRESETS = [
     url: "https://mcp.slack.com/mcp",
     blurb: "Search channels, read and post messages.",
     icon: "activity",
+    iconUrl: "https://images.icon-icons.com/2699/PNG/512/slack_logo_icon_170727.png",
     needsClientApp: true,
     docsUrl: "https://docs.slack.dev/ai/mcp/"
   },
   {
-    id: "github",
-    name: "GitHub",
-    url: "https://api.githubcopilot.com/mcp/",
-    blurb: "Browse repos, issues, and pull requests.",
+    id: "backlog",
+    name: "Backlog",
+    // Backlog is a local stdio MCP server (run via npx), not a remote URL. It requires the
+    // BACKLOG_DOMAIN + BACKLOG_API_KEY env vars — pre-filled here with blank values for the user.
+    type: "local",
+    command: "npx backlog-mcp-server",
+    env: [
+      { key: "BACKLOG_DOMAIN", value: "" },
+      { key: "BACKLOG_API_KEY", value: "" }
+    ],
+    blurb: "Manage projects, issues, and pull requests on Nulab Backlog.",
     icon: "blocks",
-    needsClientApp: false,
-    docsUrl: "https://github.com/github/github-mcp-server"
-  },
-  {
-    id: "linear",
-    name: "Linear",
-    url: "https://mcp.linear.app/sse",
-    blurb: "Plan sprints and ship tickets faster.",
-    icon: "bolt",
-    needsClientApp: false,
-    docsUrl: "https://linear.app/docs/mcp"
-  },
-  {
-    id: "sentry",
-    name: "Sentry",
-    url: "https://mcp.sentry.dev/mcp",
-    blurb: "Track releases and resolve production errors.",
-    icon: "activity",
-    needsClientApp: false,
-    docsUrl: "https://docs.sentry.io/product/sentry-mcp/"
-  },
-  {
-    id: "notion",
-    name: "Notion",
-    url: "https://mcp.notion.com/mcp",
-    blurb: "Keep docs, databases, and project notes in sync.",
-    icon: "doc",
-    needsClientApp: false,
-    docsUrl: "https://developers.notion.com/docs/mcp"
+    iconUrl: "https://devio2023-media.developers.io/wp-content/uploads/2018/02/backlog-favicon.svg",
+    docsUrl: "https://github.com/nulab/backlog-mcp-server"
   }
 ]
 
@@ -2075,6 +2056,28 @@ function permissionSummary(request) {
   return parts.join(" · ")
 }
 
+// The card header names the action: prefer an explicit title, else the tool name
+// (e.g. `backlog_update_issue`), so the user knows exactly which tool is being approved.
+function permissionHeader(request) {
+  if (request.title) return String(request.title)
+  if (request.permission) return `Run ${request.permission}?`
+  return "Allow this action?"
+}
+
+// Renders the per-argument detail rows (e.g. issueIdOrKey: TSD-131, statusId: 2) so the user can
+// see exactly what the gated tool will do before approving.
+function renderPermissionDetails(request) {
+  const details = Array.isArray(request.details) ? request.details : []
+  if (!details.length) return ""
+  const rows = details.map((detail) => `
+    <div class="ask-permission-detail">
+      <span class="ask-permission-detail-key">${escapeHtml(detail.key)}</span>
+      <span class="ask-permission-detail-value">${escapeHtml(detail.value)}</span>
+    </div>
+  `).join("")
+  return `<div class="ask-permission-details">${rows}</div>`
+}
+
 // Renders the tool-approval card OpenCode raises when an action is gated to "ask".
 function renderPendingPermissions() {
   const pending = activeThread().pendingPermissions || []
@@ -2084,10 +2087,12 @@ function renderPendingPermissions() {
 
 function renderPermissionCard(request) {
   const summary = permissionSummary(request)
+  const details = renderPermissionDetails(request)
   return `
     <div class="ask-card permission-card" data-permission-card="${escapeHtml(request.requestID)}">
-      <div class="ask-card-header">${escapeHtml(request.title || "Allow this action?")}</div>
+      <div class="ask-card-header">${escapeHtml(permissionHeader(request))}</div>
       ${summary ? `<div class="ask-permission-meta">${escapeHtml(summary)}</div>` : ""}
+      ${details || (summary ? "" : `<div class="ask-permission-meta">No additional details.</div>`)}
       <div class="ask-permission-actions">
         <button class="ask-permission-btn allow" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-decision="once">Allow once</button>
         <button class="ask-permission-btn always" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-decision="always">Always allow</button>
@@ -2543,10 +2548,15 @@ function renderMcpServerCard(server) {
 
 function renderMcpPresetCard(preset) {
   const connected = (state.mcpServers || []).some((server) => server.name === preset.id)
+  // Prefer a remote image when the preset ships an iconUrl (e.g. Slack, Backlog), otherwise
+  // fall back to the inline SVG from the icon map.
+  const iconHtml = preset.iconUrl
+    ? `<img class="mcp-card-img" src="${escapeHtml(preset.iconUrl)}" alt="${escapeHtml(preset.name)}" loading="lazy">`
+    : icon(preset.icon)
   return `
     <div class="mcp-preset ${connected ? "connected" : ""}">
       <div class="mcp-preset-head">
-        <span class="mcp-card-icon">${icon(preset.icon)}</span>
+        <span class="mcp-card-icon">${iconHtml}</span>
         <strong>${escapeHtml(preset.name)}</strong>
         ${preset.needsClientApp ? `<span class="mcp-pill mcp-pill-type">OAuth app</span>` : ""}
       </div>
@@ -2562,7 +2572,7 @@ function renderMcpPanel() {
   const servers = state.mcpServers || []
   return `
     <section class="admin-panel skills-panel">
-      <div class="panel-head"><div><h1>Extensions</h1><p>Connect MCP servers to give the agent new tools. Pick a featured app or add your own.</p></div><button class="primary-btn" data-action="openMcpModal">${icon("plus")}Add Custom App</button></div>
+      <div class="panel-head"><div><h1>Extensions (MCP servers)</h1><p>Each extension is an MCP server that gives the agent extra tools. Pick a featured app or connect your own.</p></div><button class="primary-btn" data-action="openMcpModal">${icon("plus")}Add Custom App</button></div>
 
       <div class="mcp-section-label">Featured</div>
       <div class="mcp-preset-grid">
@@ -2623,6 +2633,7 @@ function renderMcpModal() {
   const disable = state.mcpSaving ? " disabled" : ""
   const isRemote = draft.type !== "local"
   const headers = Array.isArray(draft.headers) ? draft.headers : []
+  const env = Array.isArray(draft.env) ? draft.env : []
   return `
     <div class="update-backdrop" ${state.mcpSaving ? "" : 'data-action="closeMcpModal"'}>
       <div class="confirm-modal rename-modal mcp-modal" role="dialog" aria-modal="true" aria-labelledby="mcpModalTitle" data-stop-click>
@@ -2660,6 +2671,17 @@ function renderMcpModal() {
               Command
               <input id="mcpCommand" type="text" value="${escapeHtml(draft.command)}" placeholder="npx -y some-mcp-server" data-mcp-field="command" ${state.mcpSaving ? "disabled" : ""}>
             </label>
+            <div class="mcp-headers">
+              <div class="mcp-field-label">Environment variables</div>
+              ${env.map((row, index) => `
+                <div class="mcp-headers-row">
+                  <input type="text" value="${escapeHtml(row.key)}" placeholder="KEY" data-mcp-env="key" data-mcp-env-index="${index}" ${state.mcpSaving ? "disabled" : ""}>
+                  <input type="text" value="${escapeHtml(row.value)}" placeholder="Value" data-mcp-env="value" data-mcp-env-index="${index}" ${state.mcpSaving ? "disabled" : ""}>
+                  <button class="small-icon-btn" data-action="removeMcpEnv" data-mcp-env-index="${index}" aria-label="Remove variable" ${disable}>${icon("x")}</button>
+                </div>
+              `).join("")}
+              <button class="link-btn" data-action="addMcpEnv" ${disable}>${icon("plus")}Add variable</button>
+            </div>
           `}
           <div class="field-error">${state.mcpError && state.mcpModalOpen ? escapeHtml(state.mcpError) : ""}</div>
         </div>
@@ -3076,6 +3098,12 @@ function bindEvents() {
     const row = state.mcpDraft.headers?.[index]
     if (row) row[element.dataset.mcpHeader] = element.value
   }))
+  document.querySelectorAll("[data-mcp-env]").forEach((element) => element.addEventListener("input", () => {
+    if (!state.mcpDraft) return
+    const index = Number(element.dataset.mcpEnvIndex)
+    const row = state.mcpDraft.env?.[index]
+    if (row) row[element.dataset.mcpEnv] = element.value
+  }))
   document.querySelectorAll("[data-rename-project]").forEach((element) => element.addEventListener("click", () => openRenameProjectModal(element.dataset.renameProject, element.dataset.projectName || "")))
   document.querySelectorAll("[data-remove-project]").forEach((element) => element.addEventListener("click", () => {
     state.projectDeleteTarget = { id: element.dataset.removeProject, name: element.dataset.projectName || "this project" }
@@ -3467,6 +3495,15 @@ async function handleAction(event) {
     if (action === "removeMcpHeader") {
       const index = Number(event.currentTarget.dataset.mcpHeaderIndex)
       state.mcpDraft.headers = (state.mcpDraft.headers || []).filter((_, i) => i !== index)
+      render()
+    }
+    if (action === "addMcpEnv") {
+      state.mcpDraft.env = [...(state.mcpDraft.env || []), { key: "", value: "" }]
+      render()
+    }
+    if (action === "removeMcpEnv") {
+      const index = Number(event.currentTarget.dataset.mcpEnvIndex)
+      state.mcpDraft.env = (state.mcpDraft.env || []).filter((_, i) => i !== index)
       render()
     }
     if (action === "removeMcp") {
@@ -4155,6 +4192,7 @@ function newMcpDraft(overrides = {}) {
     url: "",
     command: "",
     headers: [],
+    env: [],                    // [{key, value}] environment variables for local servers
     oauthMode: "auto",          // auto | custom | disabled
     oauthClientId: "",
     oauthClientSecret: "",
@@ -4184,7 +4222,10 @@ function openMcpModalForPreset(presetId) {
   state.mcpError = null
   state.mcpDraft = newMcpDraft({
     name: preset.id,
-    url: preset.url,
+    type: preset.type === "local" ? "local" : "remote",
+    url: preset.url || "",
+    command: preset.command || "",
+    env: Array.isArray(preset.env) ? preset.env.map((row) => ({ ...row })) : [],
     oauthMode: preset.needsClientApp ? "custom" : "auto",
     oauthAdvancedOpen: !!preset.needsClientApp,
     presetDocsUrl: preset.docsUrl || ""
@@ -4217,6 +4258,7 @@ function openMcpModalForEdit(name) {
     url: server.url || "",
     command: Array.isArray(server.command) ? server.command.join(" ") : "",
     headers: Object.entries(server.headers || {}).map(([key, value]) => ({ key, value })),
+    env: Object.entries(server.environment || {}).map(([key, value]) => ({ key, value })),
     oauthMode,
     oauthClientId,
     oauthScope,
@@ -4238,7 +4280,14 @@ function closeMcpModal() {
 // Translate the modal draft into the payload buildMcpServer/updateMcpServer expects.
 function serializeMcpDraft(draft) {
   if (draft.type === "local") {
-    return { name: draft.name.trim(), type: "local", command: draft.command }
+    const environment = {}
+    for (const row of draft.env || []) {
+      const key = String(row.key || "").trim()
+      if (key) environment[key] = String(row.value ?? "")
+    }
+    const payload = { name: draft.name.trim(), type: "local", command: draft.command }
+    if (Object.keys(environment).length) payload.environment = environment
+    return payload
   }
   const headers = {}
   for (const row of draft.headers || []) {
