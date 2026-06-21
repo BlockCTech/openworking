@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld("openworking", {
     start: (payload) => ipcRenderer.invoke("runtime:start", payload?.project ? payload : { project: payload }),
     stop: () => ipcRenderer.invoke("runtime:stop"),
     listSessions: () => ipcRenderer.invoke("runtime:listSessions"),
+    listSessionsForDirectory: (directory) => ipcRenderer.invoke("runtime:listSessionsForDirectory", { directory }),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     createSession: (payload) => ipcRenderer.invoke("runtime:createSession", payload),
     renameSession: (payload) => ipcRenderer.invoke("runtime:renameSession", payload),

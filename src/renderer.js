@@ -399,6 +399,48 @@ function projectSessions(projectId) {
   return state.sessionsByProject[projectId] || []
 }
 
+// Renderer-side path compare (no realpath available here): trim a trailing separator and
+// compare. Mirrors the intent of process-manager's samePath for matching a session's
+// `directory` against a project's `path`.
+function samePathish(left, right) {
+  if (!left || !right) return false
+  const normalize = (value) => String(value).replace(/[/\\]+$/, "")
+  return normalize(left) === normalize(right)
+}
+
+// Keeps only sessions whose `directory` matches the given project path. /session?directory= is
+// already directory-scoped, so this is a defensive filter against any session tagged with a
+// sibling/child directory leaking into a project's list.
+function sessionsForProjectPath(sessions, projectPath) {
+  return (Array.isArray(sessions) ? sessions : []).filter((session) =>
+    !session.directory || samePathish(session.directory, projectPath)
+  )
+}
+
+// Populates sidebar history for EVERY project from the single running server. OpenCode's
+// GET /session is scoped by directory, so we ask the one running server once per project
+// `directory`. Requests run SEQUENTIALLY (not a parallel burst) and only while the runtime is
+// running — if the server stops or the active project changes mid-loop we bail, so the fill never
+// fights a project switch's server restart (the source of the ECONNRESET storm). A single
+// in-flight guard coalesces the openProject + refreshSessionData triggers into one pass. Only
+// projects that return sessions are overwritten, so a transient empty never blanks an existing list.
+function loadAllSessions() {
+  if (loadAllSessions.inFlight) return loadAllSessions.inFlight
+  loadAllSessions.inFlight = (async () => {
+    if (state.runtime?.status !== "running") return
+    const activeProjectId = state.activeProjectId
+    for (const project of state.projects) {
+      if (state.runtime?.status !== "running" || state.activeProjectId !== activeProjectId) break
+      const sessions = sessionsForProjectPath(
+        await window.openworking.runtime.listSessionsForDirectory(project.path).catch(() => []),
+        project.path
+      )
+      if (sessions.length) state.sessionsByProject[project.id] = sessions
+    }
+  })().finally(() => { loadAllSessions.inFlight = null })
+  return loadAllSessions.inFlight
+}
+
 // Pinned projects float to the top, keeping registry order within each group.
 function sortProjectsByPin(projects) {
   return [
@@ -620,6 +662,8 @@ async function loadInitialState() {
   render()
   checkAppVersion()
   if (projects[0]) {
+    // openProject() loads the active project's sessions AND calls loadAllSessions() to fill in
+    // history for every other expanded/pinned accordion from the same server.
     await openProject(projects[0].id, { selectLatest: false }).catch((error) => showToast(error.message))
   }
 }
@@ -835,6 +879,8 @@ async function reconcileThread(sessionId) {
 async function refreshSessionData() {
   if (state.runtime?.status !== "running" || state.runtime.project?.id !== state.activeProjectId) return
   state.sessionsByProject[state.activeProjectId] = await window.openworking.runtime.listSessions()
+  // Refresh the other expanded/pinned accordions' history (per-directory; coalesced via in-flight guard).
+  await loadAllSessions()
   const activeId = state.activeSessionId
   const staleIds = [...state.threads.keys()].filter((id) => (
     id && needsThreadRehydration(state.threads.get(id), state.runtime?.sessionStatuses?.[id])
@@ -862,7 +908,10 @@ async function refreshSessionData() {
     // listMessages updates the runtime's active session; restore focus after background reconciles.
     await window.openworking.runtime.listMessages({ sessionId: activeId })
   }
-  render()
+  // Background refresh touches session lists (sidebar) and the active thread; repaint both
+  // surgically instead of rebuilding the whole window.
+  scheduleSidebarRender()
+  scheduleThreadRender()
 }
 
 function captureThreadScroll() {
@@ -885,6 +934,17 @@ function restoreThreadScroll(previous, threadScroll) {
   }
 
   if (previous) thread.scrollTop = previous.scrollTop
+}
+
+function captureSidebarScroll() {
+  const sidebar = document.querySelector(".side-scroll")
+  return sidebar ? sidebar.scrollTop : null
+}
+
+function restoreSidebarScroll(previous) {
+  if (previous === null) return
+  const sidebar = document.querySelector(".side-scroll")
+  if (sidebar) sidebar.scrollTop = previous
 }
 
 function renderMarkdown(text) {
@@ -965,12 +1025,8 @@ function renderThreadContent({ threadScroll = "preserve" } = {}) {
   if (!inner) return
   const previousThreadScroll = captureThreadScroll()
   inner.innerHTML = renderThreadRows()
-  bindMessageActions(inner)
-  bindArtifactActions(inner)
-  bindToolStepActions(inner)
-  bindFileRefActions(inner)
-  bindPendingPromptActions(inner)
-  inner.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", handleAction))
+  // Thread-row clicks (copy/artifact/tool-step/file-ref/question/permission/data-action) are
+  // handled by the delegated #root listeners, so no per-render rebinding is needed here.
   scheduleMermaidRender(inner)
   restoreThreadScroll(previousThreadScroll, threadScroll)
 }
@@ -983,14 +1039,55 @@ function scheduleThreadRender() {
   })
 }
 
+// Repaints ONLY the sidebar subtree (#sidebarRoot) in place. Clicks are delegated from #root, so
+// replacing innerHTML needs no rebinding — this is O(sidebar) instead of the O(whole-DOM) full
+// render() + bindEvents() rebuild. Used by sidebar-only state changes (open project, expand/
+// collapse, session-list fill, pin/menu toggles, show-more).
+function renderSidebarInto() {
+  const host = document.getElementById("sidebarRoot")
+  if (!host) return
+  const previousSidebarScroll = captureSidebarScroll()
+  host.innerHTML = renderSidebar()
+  restoreSidebarScroll(previousSidebarScroll)
+}
+
+function scheduleSidebarRender() {
+  if (scheduleSidebarRender.frame) return
+  scheduleSidebarRender.frame = requestAnimationFrame(() => {
+    scheduleSidebarRender.frame = null
+    renderSidebarInto()
+  })
+}
+
+// Coalesces full renders into one per animation frame. Full render() rebuilds the whole #root
+// tree, so background-driven bursts (session refresh, stream reconciles) that each ask for a
+// repaint would otherwise thrash the DOM. Interactive paths still call render() directly so the
+// UI updates synchronously on click. Prefer scheduleSidebarRender()/scheduleThreadRender() when
+// only part of the UI changed.
+function scheduleRender() {
+  if (scheduleRender.frame) return
+  scheduleRender.frame = requestAnimationFrame(() => {
+    scheduleRender.frame = null
+    render()
+  })
+}
+
+// Full repaint: rebuilds all of #root. Clicks/inputs are handled by the delegated #root listeners
+// (installDelegatedListeners), so this NO LONGER rebinds listeners — bindEvents() now only runs the
+// few imperative post-render bits (focus a rename input, size the prompt textarea). Even so, a full
+// render() rebuilds the whole tree, so prefer the narrower paths when only part of the UI changed:
+//   - scheduleSidebarRender() for sidebar-only changes (open project, expand/collapse, pin, menus)
+//   - scheduleThreadRender() for the active thread
+//   - scheduleRender() to coalesce a full repaint across a burst of background updates
 function render({ threadScroll = "preserve" } = {}) {
+  const previousSidebarScroll = captureSidebarScroll()
   const previousThreadScroll = captureThreadScroll()
 
   document.getElementById("root").innerHTML = `
     <div class="desktop">
       <div class="window">
         <div class="app${state.sidebarCollapsed ? " collapsed" : ""}${state.document ? " has-doc" : ""}${state.rightSidebarOpen ? " right-open" : ""}">
-          ${renderSidebar()}
+          <div id="sidebarRoot" style="display:contents">${renderSidebar()}</div>
           ${renderMain()}
           ${state.document ? renderDocumentViewer() : ""}
           ${state.rightSidebarOpen ? renderRightFileSidebar() : ""}
@@ -1010,6 +1107,7 @@ function render({ threadScroll = "preserve" } = {}) {
   bindEvents()
   renderToast()
   scheduleMermaidRender()
+  restoreSidebarScroll(previousSidebarScroll)
   restoreThreadScroll(previousThreadScroll, threadScroll)
 }
 
@@ -3000,79 +3098,6 @@ function renderToast() {
   host.innerHTML = state.toast ? `<div class="toast">${icon("check")}<span>${escapeHtml(state.toast)}</span></div>` : ""
 }
 
-function bindMessageActions(root = document) {
-  root.querySelectorAll("[data-copy-message]").forEach((element) => element.addEventListener("click", () => copyMessage(element.dataset.copyMessage).catch((error) => showToast(error.message))))
-}
-
-function bindArtifactActions(root = document) {
-  root.querySelectorAll("[data-open-artifact]").forEach((element) => element.addEventListener("click", () => openArtifact(element.dataset.openArtifact).catch((error) => showToast(error.message))))
-}
-
-function bindToolStepActions(root = document) {
-  root.querySelectorAll("[data-tool-step]").forEach((element) => element.addEventListener("click", () => {
-    const disclosure = state.toolDisclosure.get(element.dataset.toolStep)
-    if (!disclosure) return
-    disclosure.open = !disclosure.open
-    renderThreadContent()
-  }))
-}
-
-function bindFileRefActions(root = document) {
-  root.querySelectorAll("[data-open-file]").forEach((element) => element.addEventListener("click", () =>
-    openDocument(element.dataset.openFile, { tab: element.dataset.openTab || null }).catch((error) => showToast(error.message))))
-}
-
-function bindDocTabActions(root = document) {
-  root.querySelectorAll("[data-doc-tab]").forEach((element) => element.addEventListener("click", () => switchDocumentTab(element.dataset.docTab)))
-}
-
-function bindPendingPromptActions(root = document) {
-  root.querySelectorAll("[data-question-option]").forEach((element) => element.addEventListener("click", () => {
-    const requestID = element.dataset.questionOption
-    const index = Number(element.dataset.questionIndex)
-    const value = element.dataset.questionValue
-    if (element.dataset.questionMultiple === "1") {
-      const draft = questionDraft(requestID, index)
-      draft.selected.has(value) ? draft.selected.delete(value) : draft.selected.add(value)
-      renderThreadContent()
-    } else {
-      submitQuestion(requestID, index, [value]).catch((error) => showToast(error.message))
-    }
-  }))
-  root.querySelectorAll("[data-question-other]").forEach((element) => element.addEventListener("input", () => {
-    const draft = questionDraft(element.dataset.questionOther, Number(element.dataset.questionIndex))
-    draft.other = element.value
-  }))
-  root.querySelectorAll("[data-question-other-submit]").forEach((element) => element.addEventListener("click", () => {
-    const requestID = element.dataset.questionOtherSubmit
-    const index = Number(element.dataset.questionIndex)
-    const other = questionDraft(requestID, index).other.trim()
-    if (!other) {
-      showToast("Type an answer or pick an option.")
-      return
-    }
-    submitQuestion(requestID, index, [other]).catch((error) => showToast(error.message))
-  }))
-  root.querySelectorAll("[data-question-submit]").forEach((element) => element.addEventListener("click", () => {
-    const requestID = element.dataset.questionSubmit
-    const index = Number(element.dataset.questionIndex)
-    const draft = questionDraft(requestID, index)
-    const answers = [...draft.selected]
-    if (draft.other.trim()) answers.push(draft.other.trim())
-    if (!answers.length) {
-      showToast("Select at least one option.")
-      return
-    }
-    submitQuestion(requestID, index, answers).catch((error) => showToast(error.message))
-  }))
-  root.querySelectorAll("[data-question-dismiss]").forEach((element) => element.addEventListener("click", () => {
-    dismissQuestion(element.dataset.questionDismiss).catch((error) => showToast(error.message))
-  }))
-  root.querySelectorAll("[data-permission-reply]").forEach((element) => element.addEventListener("click", () => {
-    replyPermission(element.dataset.permissionReply, element.dataset.permissionDecision).catch((error) => showToast(error.message))
-  }))
-}
-
 function clearQuestionDrafts(requestID) {
   for (const key of [...state.questionDrafts.keys()]) {
     if (key.startsWith(`${requestID}:`)) state.questionDrafts.delete(key)
@@ -3106,102 +3131,11 @@ async function replyPermission(requestID, decision) {
   renderThreadContent()
 }
 
-function bindSkillUploadDrop(root = document) {
-  root.querySelectorAll("[data-skill-drop]").forEach((element) => {
-    element.addEventListener("dragover", (event) => {
-      event.preventDefault()
-      element.classList.add("dragging")
-    })
-    element.addEventListener("dragleave", () => {
-      element.classList.remove("dragging")
-    })
-    element.addEventListener("drop", (event) => {
-      event.preventDefault()
-      element.classList.remove("dragging")
-      const file = event.dataTransfer?.files?.[0]
-      const filePath = file ? window.openworking.skills.pathForFile(file) : ""
-      if (!filePath) {
-        showToast("Drop a .zip or .skill file from disk.")
-        return
-      }
-      uploadSkill(filePath).catch((error) => showToast(error.message))
-    })
-  })
-}
-
+// All click/input/keydown/mousedown wiring now lives in the delegated #root listeners
+// (installDelegatedListeners). bindEvents() keeps only the imperative, per-element bits that
+// must run AFTER each render() rebuilds #root: focus/select of a freshly-rendered rename input,
+// restoring focus to a session kebab after a rename, and sizing the prompt textarea + overlay.
 function bindEvents() {
-  document.querySelectorAll("[data-nav]").forEach((element) => element.addEventListener("click", () => {
-    state.nav = element.dataset.nav
-    state.popover = null
-    render()
-  }))
-  document.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", handleAction))
-  document.querySelectorAll("[data-resizer]").forEach((element) => element.addEventListener("mousedown", startSidebarResize))
-  document.querySelectorAll("[data-document-resizer]").forEach((element) => element.addEventListener("mousedown", startDocumentViewerResize))
-  document.querySelectorAll("[data-right-file-resizer]").forEach((element) => element.addEventListener("mousedown", startRightFileSidebarResize))
-  document.querySelectorAll("[data-tree-dir]").forEach((element) => element.addEventListener("click", () => toggleFileTreeDirectory(element.dataset.treeDir).catch((error) => showToast(error.message))))
-  document.querySelectorAll("[data-tree-file]").forEach((element) => element.addEventListener("click", () => openFileTreeFile(element.dataset.treeFile).catch((error) => showToast(error.message))))
-  document.querySelectorAll("[data-open-project]").forEach((element) => element.addEventListener("click", () => openProject(element.dataset.openProject)))
-  document.querySelectorAll("[data-new-session]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    newSession(element.dataset.newSession)
-  }))
-  document.querySelectorAll("[data-session-id]").forEach((element) => element.addEventListener("click", () => selectSession(element.dataset.projectId, element.dataset.sessionId)))
-  document.querySelectorAll("[data-session-menu]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    const id = element.dataset.sessionMenu
-    state.sessionMenu = state.sessionMenu === id ? null : id
-    render()
-  }))
-  document.querySelectorAll("[data-session-pin]").forEach((element) => element.addEventListener("click", (event) => {
-    // The pin item lives in the session ⋯ menu; stop the click from bubbling into the
-    // row's selectSession handler and close the menu.
-    event.stopPropagation()
-    state.sessionMenu = null
-    const meta = {
-      projectId: element.dataset.pinProject || null,
-      title: element.dataset.pinTitle || "",
-      updatedAt: element.dataset.pinUpdated || null
-    }
-    togglePin(element.dataset.sessionPin, element.dataset.pinned !== "1", meta).catch((error) => showToast(error.message))
-  }))
-  document.querySelectorAll("[data-session-delete]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    state.sessionDeleteTarget = { id: element.dataset.sessionDelete, title: element.dataset.sessionTitle || "Untitled session" }
-    state.sessionMenu = null
-    render()
-  }))
-  document.querySelectorAll("[data-session-rename]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    state.sessionRenameTarget = {
-      sessionId: element.dataset.sessionRename,
-      projectId: element.dataset.sessionProject,
-      title: element.dataset.sessionTitle || "",
-      label: element.dataset.sessionLabel || "Untitled session",
-    }
-    state.sessionRenameDraft = element.dataset.sessionTitle || ""
-    state.sessionRenameError = null
-    state.sessionRenaming = false
-    state.sessionRenameAutoFocus = true
-    state.sessionMenu = null
-    render()
-  }))
-  document.querySelectorAll("[data-session-rename-input]").forEach((element) => {
-    element.addEventListener("input", () => {
-      state.sessionRenameDraft = element.value
-      state.sessionRenameError = null
-    })
-    element.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault()
-        confirmRenameSession().catch((error) => showToast(error.message))
-      }
-      if (event.key === "Escape" && !state.sessionRenaming) {
-        event.preventDefault()
-        closeRenameSessionModal()
-      }
-    })
-  })
   if (state.sessionRenameTarget && state.sessionRenameAutoFocus) {
     const input = document.querySelector("[data-session-rename-input]")
     if (input) {
@@ -3215,43 +3149,6 @@ function bindEvents() {
     trigger?.focus()
     state.sessionRenameFocusId = null
   }
-  document.querySelectorAll("[data-project-menu]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    const id = element.dataset.projectMenu
-    state.projectMenu = state.projectMenu === id ? null : id
-    render()
-  }))
-  document.querySelectorAll("[data-project-pin]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    toggleProjectPin(element.dataset.projectPin, element.dataset.pinned !== "1").catch((error) => showToast(error.message))
-  }))
-  document.querySelectorAll("[data-project-rename]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    openRenameProjectModal(element.dataset.projectRename, element.dataset.projectName || "")
-  }))
-  document.querySelectorAll("[data-project-delete]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    state.projectDeleteTarget = { id: element.dataset.projectDelete, name: element.dataset.projectName || "this project" }
-    state.projectRemoving = false
-    state.projectMenu = null
-    render()
-  }))
-  document.querySelectorAll("[data-project-rename-input]").forEach((element) => {
-    element.addEventListener("input", () => {
-      state.projectRenameDraft = element.value
-      state.projectRenameError = null
-    })
-    element.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault()
-        confirmRenameProject().catch((error) => showToast(error.message))
-      }
-      if (event.key === "Escape" && !state.projectRenaming) {
-        event.preventDefault()
-        closeRenameProjectModal()
-      }
-    })
-  })
   if (state.projectRenameTarget && state.projectRenameAutoFocus) {
     const input = document.querySelector("[data-project-rename-input]")
     if (input) {
@@ -3260,180 +3157,11 @@ function bindEvents() {
     }
     state.projectRenameAutoFocus = false
   }
-  document.querySelectorAll("[data-stop-click]").forEach((element) => element.addEventListener("click", (event) => event.stopPropagation()))
-  document.querySelectorAll("[data-show-all]").forEach((element) => element.addEventListener("click", () => {
-    const id = element.dataset.showAll
-    state.showAll.has(id) ? state.showAll.delete(id) : state.showAll.add(id)
-    render()
-  }))
-  document.querySelectorAll("[data-popover]").forEach((element) => element.addEventListener("click", () => {
-    state.popover = state.popover === element.dataset.popover ? null : element.dataset.popover
-    render()
-    document.getElementById("promptInput")?.focus()
-  }))
-  document.querySelectorAll("[data-model]").forEach((element) => element.addEventListener("click", () => {
-    state.selectedModelKey = element.dataset.model
-    state.popover = null
-    render()
-  }))
-  document.querySelectorAll("[data-chip]").forEach((element) => element.addEventListener("click", () => sendPrompt(chips[Number(element.dataset.chip)].text)))
-  document.querySelectorAll("[data-provider]").forEach((element) => element.addEventListener("click", () => {
-    state.providerId = element.dataset.provider
-    render()
-  }))
-  document.querySelectorAll("[data-field]").forEach((element) => element.addEventListener("input", () => updateConfigField(element.dataset.field, element.value)))
-  document.querySelectorAll("[data-model-modalities]").forEach((element) => element.addEventListener("input", () => updateModelModalities(element.dataset.modelId, element.dataset.modelModalities, element.value)))
-  document.querySelectorAll("[data-settings-section]").forEach((element) => element.addEventListener("click", () => {
-    state.settingsSection = element.dataset.settingsSection
-    render()
-  }))
-  document.querySelectorAll("[data-skill-open]").forEach((element) => element.addEventListener("click", () => {
-    openSkillPreview(element.dataset.skillOpen, element.dataset.skillBuiltin === "1")
-  }))
-  document.querySelectorAll("[data-skills-tab]").forEach((element) => element.addEventListener("click", () => {
-    state.skillsTab = element.dataset.skillsTab
-    render()
-    if (state.skillsTab === "mcp") refreshMcpStatus()
-    if (state.skillsTab === "memory") loadMemory()
-  }))
-  document.querySelectorAll("[data-memory-field]").forEach((element) => element.addEventListener("input", () => {
-    if (!state.memoryDraft) return
-    state.memoryDraft[element.dataset.memoryField] = element.value
-  }))
-  document.querySelectorAll("[data-memory-save]").forEach((element) => element.addEventListener("click", () => {
-    saveMemory(element.dataset.memorySave)
-  }))
-  document.querySelectorAll("[data-mcp-type]").forEach((element) => element.addEventListener("click", () => {
-    if (state.mcpSaving || !state.mcpDraft) return
-    state.mcpDraft.type = element.dataset.mcpType
-    state.mcpError = null
-    render()
-  }))
-  document.querySelectorAll("[data-mcp-toggle]").forEach((element) => element.addEventListener("click", () => {
-    toggleMcpEnabled(element.dataset.mcpToggle, element.dataset.mcpEnabled !== "1")
-  }))
-  document.querySelectorAll("[data-mcp-field]").forEach((element) => element.addEventListener("input", () => {
-    if (!state.mcpDraft) return
-    state.mcpDraft[element.dataset.mcpField] = element.value
-  }))
-  document.querySelectorAll("[data-mcp-oauth-mode]").forEach((element) => element.addEventListener("click", () => {
-    if (state.mcpSaving || !state.mcpDraft) return
-    const mode = element.dataset.mcpOauthMode
-    state.mcpDraft.oauthMode = mode
-    if (mode === "custom") state.mcpDraft.oauthAdvancedOpen = true
-    state.mcpError = null
-    render()
-  }))
-  document.querySelectorAll("[data-mcp-header]").forEach((element) => element.addEventListener("input", () => {
-    if (!state.mcpDraft) return
-    const index = Number(element.dataset.mcpHeaderIndex)
-    const row = state.mcpDraft.headers?.[index]
-    if (row) row[element.dataset.mcpHeader] = element.value
-  }))
-  document.querySelectorAll("[data-mcp-env]").forEach((element) => element.addEventListener("input", () => {
-    if (!state.mcpDraft) return
-    const index = Number(element.dataset.mcpEnvIndex)
-    const row = state.mcpDraft.env?.[index]
-    if (row) row[element.dataset.mcpEnv] = element.value
-  }))
-  document.querySelectorAll("[data-rename-project]").forEach((element) => element.addEventListener("click", () => openRenameProjectModal(element.dataset.renameProject, element.dataset.projectName || "")))
-  document.querySelectorAll("[data-remove-project]").forEach((element) => element.addEventListener("click", () => {
-    state.projectDeleteTarget = { id: element.dataset.removeProject, name: element.dataset.projectName || "this project" }
-    state.projectRemoving = false
-    render()
-  }))
-  document.querySelectorAll("[data-remove-attachment]").forEach((element) => element.addEventListener("click", () => removeAttachment(element.dataset.removeAttachment)))
-  document.querySelectorAll("[data-remove-file-mention]").forEach((element) => element.addEventListener("click", () => removeFileMention(element.dataset.removeFileMention)))
-  bindMessageActions()
-  bindArtifactActions()
-  bindToolStepActions()
-  bindFileRefActions()
-  bindDocTabActions()
-  bindPendingPromptActions()
-  bindSkillUploadDrop()
-  document.querySelectorAll("[data-command]").forEach((element) => element.addEventListener("mousedown", (event) => {
-    event.preventDefault()
-    selectCommand(element.dataset.command)
-  }))
   const promptInput = document.getElementById("promptInput")
   if (promptInput) {
     promptInput.style.height = "auto"
     promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
     syncPromptOverlay(promptInput)
-    promptInput.addEventListener("input", () => {
-      state.promptDraft = promptInput.value
-      syncPendingFileMentions(promptInput.value, { rerender: true, promptInput })
-      const liveInput = document.getElementById("promptInput") || promptInput
-      const send = document.querySelector(".send")
-      if (send) send.classList.toggle("disabled", !threadAbortable() && !liveInput.value.trim())
-      liveInput.style.height = "auto"
-      liveInput.style.height = `${Math.min(liveInput.scrollHeight, 200)}px`
-      syncPromptOverlay(liveInput)
-      syncPromptAssist(liveInput)
-    })
-    promptInput.addEventListener("scroll", () => {
-      syncPromptOverlay(promptInput)
-    })
-    promptInput.addEventListener("keydown", (event) => {
-      if (state.commandMenu.open) {
-        const candidates = commandCandidates(state.commandMenu.query)
-        if (event.key === "ArrowDown") {
-          event.preventDefault()
-          state.commandMenu.index = Math.min(state.commandMenu.index + 1, Math.max(candidates.length - 1, 0))
-          paintCommandMenu()
-          return
-        }
-        if (event.key === "ArrowUp") {
-          event.preventDefault()
-          state.commandMenu.index = Math.max(state.commandMenu.index - 1, 0)
-          paintCommandMenu()
-          return
-        }
-        if (event.key === "Enter" || event.key === "Tab") {
-          event.preventDefault()
-          const choice = candidates[state.commandMenu.index]
-          if (choice) selectCommand(choice.name)
-          else closeCommandMenu()
-          return
-        }
-        if (event.key === "Escape") {
-          event.preventDefault()
-          closeCommandMenu()
-          return
-        }
-      }
-      if (state.fileMentionMenu.open) {
-        const candidates = fileMentionCandidates(state.fileMentionMenu.query)
-        if (event.key === "ArrowDown") {
-          event.preventDefault()
-          state.fileMentionMenu.index = Math.min(state.fileMentionMenu.index + 1, Math.max(candidates.length - 1, 0))
-          paintPromptAssistMenu()
-          return
-        }
-        if (event.key === "ArrowUp") {
-          event.preventDefault()
-          state.fileMentionMenu.index = Math.max(state.fileMentionMenu.index - 1, 0)
-          paintPromptAssistMenu()
-          return
-        }
-        if (event.key === "Enter" || event.key === "Tab") {
-          event.preventDefault()
-          const choice = candidates[state.fileMentionMenu.index]
-          if (choice) selectFileMention(choice).catch((error) => showToast(error.message))
-          else closeFileMentionMenu()
-          return
-        }
-        if (event.key === "Escape") {
-          event.preventDefault()
-          closeFileMentionMenu()
-          return
-        }
-      }
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault()
-        sendPrompt(promptInput.value)
-      }
-    })
   }
 }
 
@@ -3450,14 +3178,7 @@ function paintPromptAssistMenu() {
   if (existing) existing.remove()
   const html = renderCommandMenu() || renderFileMentionMenu()
   if (html) wrap.insertAdjacentHTML("afterbegin", html)
-  wrap.querySelectorAll("[data-command]").forEach((element) => element.addEventListener("mousedown", (event) => {
-    event.preventDefault()
-    selectCommand(element.dataset.command)
-  }))
-  wrap.querySelectorAll("[data-file-mention]").forEach((element) => element.addEventListener("mousedown", (event) => {
-    event.preventDefault()
-    selectFileMention(element.dataset.fileMention).catch((error) => showToast(error.message))
-  }))
+  // data-command / data-file-mention mousedown is handled by the delegated #root listener.
 }
 
 function syncPromptOverlay(promptInput) {
@@ -3669,7 +3390,7 @@ async function handleAction(event) {
     if (action === "collapseAll") {
       state.expanded.clear()
       persistExpanded()
-      render()
+      scheduleSidebarRender()
     }
     if (action === "toggleSidebar") toggleSidebar()
     if (action === "toggleRightSidebar") await toggleRightSidebar()
@@ -3902,6 +3623,10 @@ async function openProject(projectId, { selectLatest = true } = {}) {
     state.loading = false
     render({ threadScroll: scrollLatest ? "latest" : "preserve" })
   }
+  // Fill the other expanded/pinned accordions' history AFTER the active project has settled, so a
+  // slow/failed background fetch never delays or breaks the active load. Fire-and-forget; repaint
+  // when done. The in-flight guard coalesces this with refreshSessionData's trigger.
+  loadAllSessions().then(() => scheduleSidebarRender()).catch(() => {})
   if (state.rightSidebarOpen) loadFileTreeDirectory("").catch((error) => showToast(error.message))
 }
 
@@ -3968,14 +3693,30 @@ async function newSession(projectId, { clearAttachments = true } = {}) {
 
 async function selectSession(projectId, sessionId) {
   // A pinned session caches its projectId; if it's missing (legacy pin) or its project
-  // was removed, openProject would no-op and the click would silently do nothing.
-  if (!projectId || !state.projects.some((project) => project.id === projectId)) {
+  // was removed, the click would have nothing to point at.
+  const project = state.projects.find((item) => item.id === projectId)
+  if (!project) {
     showToast("This chat's project is no longer available. Re-pin it from the project to restore the link.")
     return
   }
   await clearPendingAttachments()
-  if (state.runtime?.project?.id !== projectId || state.runtime.status !== "running") {
-    await openProject(projectId, { selectLatest: false })
+  // Clicking a session must never collapse its accordion — keep it expanded regardless of how the
+  // runtime is doing (it may still be starting up from a fresh app launch).
+  state.expanded.add(projectId)
+  persistExpanded()
+  // VIEW the chat without switching projects: OpenCode serves any project's history from the one
+  // running server when we pass its `directory`. We deliberately do NOT restart the server when it
+  // is already running on a different project — restarting on every cross-project click is what
+  // caused the ECONNRESET/"not running" storm. Sending a prompt still restarts to the right cwd via
+  // ensureRuntimeProject in sendPrompt.
+  //
+  // Only cold-start when there is genuinely NO live runtime. If one is already starting/running,
+  // do NOT call openProject — its same-project branch would TOGGLE the accordion CLOSED, and the
+  // directory-scoped listMessages below waits for the in-flight start via the runtime's
+  // waitUntilReady() anyway. ("starting" means the user clicked before init finished.)
+  const runtimeAlive = state.runtime?.status === "running" || state.runtime?.status === "starting"
+  if (!runtimeAlive) {
+    await openProject(projectId, { selectLatest: false }).catch((error) => showToast(error.message))
   }
   state.activeProjectId = projectId
   state.activeSessionId = sessionId
@@ -3986,10 +3727,14 @@ async function selectSession(projectId, sessionId) {
   const existing = state.threads.get(sessionId)
   const serverStatus = state.runtime?.sessionStatuses?.[sessionId]
   if (needsThreadRehydration(existing, serverStatus)) {
-    hydrateActiveThread(
-      await window.openworking.runtime.listMessages({ sessionId }),
-      serverStatus
-    )
+    try {
+      hydrateActiveThread(
+        await window.openworking.runtime.listMessages({ sessionId, directory: project.path }),
+        serverStatus
+      )
+    } catch (error) {
+      showToast(error.message || "Could not load this chat.")
+    }
   }
   render({ threadScroll: "latest" })
 }
@@ -4020,7 +3765,8 @@ async function togglePin(sessionId, pinned, meta = {}) {
     showToast(error.message || "Could not update pin.")
     return
   }
-  render()
+  // Pin/unpin only reshuffles the sidebar's Pinned section + accordions.
+  scheduleSidebarRender()
 }
 
 function closeRenameSessionModal({ restoreFocus = true } = {}) {
@@ -4308,7 +4054,8 @@ async function toggleProjectPin(projectId, pinned) {
     return
   }
   state.projectMenu = null
-  render()
+  // Pinning a project only moves it between the sidebar's Pinned/Projects sections.
+  scheduleSidebarRender()
 }
 
 function updateConfigField(field, value) {
@@ -4709,6 +4456,8 @@ if (typeof module !== "undefined" && module.exports) {
     fileMentionTokenPattern,
     filterPromptAttachments,
     livePendingFileMentions,
+    loadAllSessions,
+    sessionsForProjectPath,
     loadStoredExpanded,
     persistExpanded,
     renderPromptOverlayHtml,
@@ -4716,10 +4465,440 @@ if (typeof module !== "undefined" && module.exports) {
     resolveFileMentionsFromPrompt,
     __test: {
       refreshSessionData,
+      selectSession,
       sendPrompt,
-      state
+      state,
+      dispatchDelegated,
+      delegationShim,
+      render,
+      renderSidebarInto,
+      // DELEGATED_CLICK is a `const` (TDZ) at exports-eval time, so expose it via a getter.
+      getDelegatedClick: () => DELEGATED_CLICK
     }
   }
+}
+
+// Event delegation: a single set of listeners on #root replaces the per-render
+// querySelectorAll(...).forEach(addEventListener) storm that bindEvents() used to run on every
+// repaint. Each click/input/keydown/mousedown is matched against an ordered table of
+// [attribute|selector] → handler. Handlers keep reading `event.currentTarget.dataset` / calling
+// `event.stopPropagation()` exactly as before — the dispatcher hands them a small shim whose
+// currentTarget is the matched element and whose stopPropagation() ends dispatch for this event.
+// Ordering matters: more-specific targets (a session kebab/menu) are listed BEFORE the row they
+// sit inside, reproducing the old stopPropagation() guards that kept a kebab click from also
+// selecting the row.
+
+// Build the per-handler shim. `stop()` flips a flag the dispatcher checks to stop walking the
+// table, matching the old event.stopPropagation() semantics (each element used to own its
+// listener, so a stopPropagation there simply meant "no other handler runs for this click").
+function delegationShim(event, element) {
+  let stopped = false
+  const shim = {
+    type: event.type,
+    key: event.key,
+    shiftKey: event.shiftKey,
+    dataTransfer: event.dataTransfer,
+    target: event.target,
+    currentTarget: element,
+    stopPropagation() { stopped = true },
+    preventDefault() { event.preventDefault() }
+  }
+  return { shim, isStopped: () => stopped }
+}
+
+// Click handlers, most-specific first. Each entry: [attribute, handler(shim)].
+const DELEGATED_CLICK = [
+  ["data-session-menu", (e) => {
+    const id = e.currentTarget.dataset.sessionMenu
+    state.sessionMenu = state.sessionMenu === id ? null : id
+    scheduleSidebarRender()
+  }],
+  ["data-session-pin", (e) => {
+    state.sessionMenu = null
+    const meta = {
+      projectId: e.currentTarget.dataset.pinProject || null,
+      title: e.currentTarget.dataset.pinTitle || "",
+      updatedAt: e.currentTarget.dataset.pinUpdated || null
+    }
+    togglePin(e.currentTarget.dataset.sessionPin, e.currentTarget.dataset.pinned !== "1", meta).catch((error) => showToast(error.message))
+  }],
+  ["data-session-delete", (e) => {
+    state.sessionDeleteTarget = { id: e.currentTarget.dataset.sessionDelete, title: e.currentTarget.dataset.sessionTitle || "Untitled session" }
+    state.sessionMenu = null
+    render()
+  }],
+  ["data-session-rename", (e) => {
+    state.sessionRenameTarget = {
+      sessionId: e.currentTarget.dataset.sessionRename,
+      projectId: e.currentTarget.dataset.sessionProject,
+      title: e.currentTarget.dataset.sessionTitle || "",
+      label: e.currentTarget.dataset.sessionLabel || "Untitled session",
+    }
+    state.sessionRenameDraft = e.currentTarget.dataset.sessionTitle || ""
+    state.sessionRenameError = null
+    state.sessionRenaming = false
+    state.sessionRenameAutoFocus = true
+    state.sessionMenu = null
+    render()
+  }],
+  ["data-session-id", (e) => selectSession(e.currentTarget.dataset.projectId, e.currentTarget.dataset.sessionId)],
+  ["data-project-menu", (e) => {
+    const id = e.currentTarget.dataset.projectMenu
+    state.projectMenu = state.projectMenu === id ? null : id
+    scheduleSidebarRender()
+  }],
+  ["data-project-pin", (e) => {
+    toggleProjectPin(e.currentTarget.dataset.projectPin, e.currentTarget.dataset.pinned !== "1").catch((error) => showToast(error.message))
+  }],
+  ["data-project-rename", (e) => openRenameProjectModal(e.currentTarget.dataset.projectRename, e.currentTarget.dataset.projectName || "")],
+  ["data-project-delete", (e) => {
+    state.projectDeleteTarget = { id: e.currentTarget.dataset.projectDelete, name: e.currentTarget.dataset.projectName || "this project" }
+    state.projectRemoving = false
+    state.projectMenu = null
+    render()
+  }],
+  ["data-new-session", (e) => newSession(e.currentTarget.dataset.newSession)],
+  ["data-open-project", (e) => openProject(e.currentTarget.dataset.openProject)],
+  ["data-show-all", (e) => {
+    const id = e.currentTarget.dataset.showAll
+    state.showAll.has(id) ? state.showAll.delete(id) : state.showAll.add(id)
+    scheduleSidebarRender()
+  }],
+  ["data-nav", (e) => {
+    state.nav = e.currentTarget.dataset.nav
+    state.popover = null
+    render()
+  }],
+  ["data-tree-dir", (e) => toggleFileTreeDirectory(e.currentTarget.dataset.treeDir).catch((error) => showToast(error.message))],
+  ["data-tree-file", (e) => openFileTreeFile(e.currentTarget.dataset.treeFile).catch((error) => showToast(error.message))],
+  ["data-popover", (e) => {
+    state.popover = state.popover === e.currentTarget.dataset.popover ? null : e.currentTarget.dataset.popover
+    render()
+    document.getElementById("promptInput")?.focus()
+  }],
+  ["data-model", (e) => {
+    state.selectedModelKey = e.currentTarget.dataset.model
+    state.popover = null
+    render()
+  }],
+  ["data-chip", (e) => sendPrompt(chips[Number(e.currentTarget.dataset.chip)].text)],
+  ["data-provider", (e) => {
+    state.providerId = e.currentTarget.dataset.provider
+    render()
+  }],
+  ["data-settings-section", (e) => {
+    state.settingsSection = e.currentTarget.dataset.settingsSection
+    render()
+  }],
+  ["data-skill-open", (e) => openSkillPreview(e.currentTarget.dataset.skillOpen, e.currentTarget.dataset.skillBuiltin === "1")],
+  ["data-skills-tab", (e) => {
+    state.skillsTab = e.currentTarget.dataset.skillsTab
+    render()
+    if (state.skillsTab === "mcp") refreshMcpStatus()
+    if (state.skillsTab === "memory") loadMemory()
+  }],
+  ["data-memory-save", (e) => saveMemory(e.currentTarget.dataset.memorySave)],
+  ["data-mcp-type", (e) => {
+    if (state.mcpSaving || !state.mcpDraft) return
+    state.mcpDraft.type = e.currentTarget.dataset.mcpType
+    state.mcpError = null
+    render()
+  }],
+  ["data-mcp-toggle", (e) => toggleMcpEnabled(e.currentTarget.dataset.mcpToggle, e.currentTarget.dataset.mcpEnabled !== "1")],
+  ["data-mcp-oauth-mode", (e) => {
+    if (state.mcpSaving || !state.mcpDraft) return
+    const mode = e.currentTarget.dataset.mcpOauthMode
+    state.mcpDraft.oauthMode = mode
+    if (mode === "custom") state.mcpDraft.oauthAdvancedOpen = true
+    state.mcpError = null
+    render()
+  }],
+  ["data-rename-project", (e) => openRenameProjectModal(e.currentTarget.dataset.renameProject, e.currentTarget.dataset.projectName || "")],
+  ["data-remove-project", (e) => {
+    state.projectDeleteTarget = { id: e.currentTarget.dataset.removeProject, name: e.currentTarget.dataset.projectName || "this project" }
+    state.projectRemoving = false
+    render()
+  }],
+  ["data-remove-attachment", (e) => removeAttachment(e.currentTarget.dataset.removeAttachment)],
+  ["data-remove-file-mention", (e) => removeFileMention(e.currentTarget.dataset.removeFileMention)],
+  // Thread-row actions (these used to be wired by bindMessageActions/etc. on every renderThreadContent).
+  ["data-copy-message", (e) => copyMessage(e.currentTarget.dataset.copyMessage).catch((error) => showToast(error.message))],
+  ["data-open-artifact", (e) => openArtifact(e.currentTarget.dataset.openArtifact).catch((error) => showToast(error.message))],
+  ["data-tool-step", (e) => {
+    const disclosure = state.toolDisclosure.get(e.currentTarget.dataset.toolStep)
+    if (!disclosure) return
+    disclosure.open = !disclosure.open
+    renderThreadContent()
+  }],
+  ["data-open-file", (e) => openDocument(e.currentTarget.dataset.openFile, { tab: e.currentTarget.dataset.openTab || null }).catch((error) => showToast(error.message))],
+  ["data-doc-tab", (e) => switchDocumentTab(e.currentTarget.dataset.docTab)],
+  ["data-question-option", (e) => {
+    const requestID = e.currentTarget.dataset.questionOption
+    const index = Number(e.currentTarget.dataset.questionIndex)
+    const value = e.currentTarget.dataset.questionValue
+    if (e.currentTarget.dataset.questionMultiple === "1") {
+      const draft = questionDraft(requestID, index)
+      draft.selected.has(value) ? draft.selected.delete(value) : draft.selected.add(value)
+      renderThreadContent()
+    } else {
+      submitQuestion(requestID, index, [value]).catch((error) => showToast(error.message))
+    }
+  }],
+  ["data-question-other-submit", (e) => {
+    const requestID = e.currentTarget.dataset.questionOtherSubmit
+    const index = Number(e.currentTarget.dataset.questionIndex)
+    const other = questionDraft(requestID, index).other.trim()
+    if (!other) {
+      showToast("Type an answer or pick an option.")
+      return
+    }
+    submitQuestion(requestID, index, [other]).catch((error) => showToast(error.message))
+  }],
+  ["data-question-submit", (e) => {
+    const requestID = e.currentTarget.dataset.questionSubmit
+    const index = Number(e.currentTarget.dataset.questionIndex)
+    const draft = questionDraft(requestID, index)
+    const answers = [...draft.selected]
+    if (draft.other.trim()) answers.push(draft.other.trim())
+    if (!answers.length) {
+      showToast("Select at least one option.")
+      return
+    }
+    submitQuestion(requestID, index, answers).catch((error) => showToast(error.message))
+  }],
+  ["data-question-dismiss", (e) => dismissQuestion(e.currentTarget.dataset.questionDismiss).catch((error) => showToast(error.message))],
+  ["data-permission-reply", (e) => replyPermission(e.currentTarget.dataset.permissionReply, e.currentTarget.dataset.permissionDecision).catch((error) => showToast(error.message))],
+  // data-action is the broad fallback — checked last so specific attributes win.
+  ["data-action", (e) => handleAction(e)],
+]
+
+// input handlers, most-specific first.
+const DELEGATED_INPUT = [
+  ["data-session-rename-input", (e) => {
+    state.sessionRenameDraft = e.currentTarget.value
+    state.sessionRenameError = null
+  }],
+  ["data-project-rename-input", (e) => {
+    state.projectRenameDraft = e.currentTarget.value
+    state.projectRenameError = null
+  }],
+  ["data-field", (e) => updateConfigField(e.currentTarget.dataset.field, e.currentTarget.value)],
+  ["data-model-modalities", (e) => updateModelModalities(e.currentTarget.dataset.modelId, e.currentTarget.dataset.modelModalities, e.currentTarget.value)],
+  ["data-memory-field", (e) => {
+    if (!state.memoryDraft) return
+    state.memoryDraft[e.currentTarget.dataset.memoryField] = e.currentTarget.value
+  }],
+  ["data-mcp-header", (e) => {
+    if (!state.mcpDraft) return
+    const index = Number(e.currentTarget.dataset.mcpHeaderIndex)
+    const row = state.mcpDraft.headers?.[index]
+    if (row) row[e.currentTarget.dataset.mcpHeader] = e.currentTarget.value
+  }],
+  ["data-mcp-env", (e) => {
+    if (!state.mcpDraft) return
+    const index = Number(e.currentTarget.dataset.mcpEnvIndex)
+    const row = state.mcpDraft.env?.[index]
+    if (row) row[e.currentTarget.dataset.mcpEnv] = e.currentTarget.value
+  }],
+  ["data-mcp-field", (e) => {
+    if (!state.mcpDraft) return
+    state.mcpDraft[e.currentTarget.dataset.mcpField] = e.currentTarget.value
+  }],
+  ["data-question-other", (e) => {
+    const draft = questionDraft(e.currentTarget.dataset.questionOther, Number(e.currentTarget.dataset.questionIndex))
+    draft.other = e.currentTarget.value
+  }],
+]
+
+// mousedown handlers (preventDefault to keep textarea focus while clicking a menu item).
+const DELEGATED_MOUSEDOWN = [
+  ["data-command", (e) => {
+    e.preventDefault()
+    selectCommand(e.currentTarget.dataset.command)
+  }],
+  ["data-file-mention", (e) => {
+    e.preventDefault()
+    selectFileMention(e.currentTarget.dataset.fileMention).catch((error) => showToast(error.message))
+  }],
+  ["data-resizer", (e) => startSidebarResize(e)],
+  ["data-document-resizer", (e) => startDocumentViewerResize(e)],
+  ["data-right-file-resizer", (e) => startRightFileSidebarResize(e)],
+]
+
+// Walk an ordered table for the first matching ancestor of event.target and run its handler.
+// `[data-stop-click]` (used on modal content) is a boundary: a matched element that lives OUTSIDE
+// that boundary (e.g. the backdrop's data-action="cancel…") is skipped when the click originated
+// INSIDE the modal, mirroring the old per-element event.stopPropagation() on the modal content.
+// Buttons inside the modal still match normally since they sit within the boundary.
+function dispatchDelegated(event, table) {
+  const stopBoundary = event.target.closest?.("[data-stop-click]") || null
+  for (const [attribute, handler] of table) {
+    const element = event.target.closest?.(`[${attribute}]`)
+    if (!element) continue
+    // If a stop-click boundary exists and the matched element is an ancestor of it (outside the
+    // protected content), this click must not trigger that handler — skip to the next entry.
+    if (stopBoundary && element !== stopBoundary && element.contains?.(stopBoundary)) continue
+    const { shim, isStopped } = delegationShim(event, element)
+    handler(shim)
+    if (isStopped()) return
+    return
+  }
+}
+
+// The two rename inputs share Enter=confirm / Escape=close keydown behavior.
+function handleRenameKeydown(event, element) {
+  if (element.matches("[data-session-rename-input]")) {
+    if (event.key === "Enter") {
+      event.preventDefault()
+      confirmRenameSession().catch((error) => showToast(error.message))
+    }
+    if (event.key === "Escape" && !state.sessionRenaming) {
+      event.preventDefault()
+      closeRenameSessionModal()
+    }
+    return
+  }
+  if (element.matches("[data-project-rename-input]")) {
+    if (event.key === "Enter") {
+      event.preventDefault()
+      confirmRenameProject().catch((error) => showToast(error.message))
+    }
+    if (event.key === "Escape" && !state.projectRenaming) {
+      event.preventDefault()
+      closeRenameProjectModal()
+    }
+  }
+}
+
+// The prompt textarea owns its own input/scroll/keydown logic (command + file-mention menus,
+// height auto-size, Enter-to-send). Delegated off #root by matching #promptInput.
+function handlePromptInput(promptInput) {
+  state.promptDraft = promptInput.value
+  syncPendingFileMentions(promptInput.value, { rerender: true, promptInput })
+  const liveInput = document.getElementById("promptInput") || promptInput
+  const send = document.querySelector(".send")
+  if (send) send.classList.toggle("disabled", !threadAbortable() && !liveInput.value.trim())
+  liveInput.style.height = "auto"
+  liveInput.style.height = `${Math.min(liveInput.scrollHeight, 200)}px`
+  syncPromptOverlay(liveInput)
+  syncPromptAssist(liveInput)
+}
+
+function handlePromptKeydown(event, promptInput) {
+  if (state.commandMenu.open) {
+    const candidates = commandCandidates(state.commandMenu.query)
+    if (event.key === "ArrowDown") {
+      event.preventDefault()
+      state.commandMenu.index = Math.min(state.commandMenu.index + 1, Math.max(candidates.length - 1, 0))
+      paintCommandMenu()
+      return
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault()
+      state.commandMenu.index = Math.max(state.commandMenu.index - 1, 0)
+      paintCommandMenu()
+      return
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault()
+      const choice = candidates[state.commandMenu.index]
+      if (choice) selectCommand(choice.name)
+      else closeCommandMenu()
+      return
+    }
+    if (event.key === "Escape") {
+      event.preventDefault()
+      closeCommandMenu()
+      return
+    }
+  }
+  if (state.fileMentionMenu.open) {
+    const candidates = fileMentionCandidates(state.fileMentionMenu.query)
+    if (event.key === "ArrowDown") {
+      event.preventDefault()
+      state.fileMentionMenu.index = Math.min(state.fileMentionMenu.index + 1, Math.max(candidates.length - 1, 0))
+      paintPromptAssistMenu()
+      return
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault()
+      state.fileMentionMenu.index = Math.max(state.fileMentionMenu.index - 1, 0)
+      paintPromptAssistMenu()
+      return
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault()
+      const choice = candidates[state.fileMentionMenu.index]
+      if (choice) selectFileMention(choice).catch((error) => showToast(error.message))
+      else closeFileMentionMenu()
+      return
+    }
+    if (event.key === "Escape") {
+      event.preventDefault()
+      closeFileMentionMenu()
+      return
+    }
+  }
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault()
+    sendPrompt(promptInput.value)
+  }
+}
+
+// Attach the delegated listeners to #root exactly once. Replaces ~45 per-render bindEvents groups.
+function installDelegatedListeners() {
+  const root = document.getElementById("root")
+  if (!root || root.dataset.delegated === "1") return
+  root.dataset.delegated = "1"
+
+  root.addEventListener("click", (event) => dispatchDelegated(event, DELEGATED_CLICK))
+  root.addEventListener("mousedown", (event) => dispatchDelegated(event, DELEGATED_MOUSEDOWN))
+
+  root.addEventListener("input", (event) => {
+    if (event.target.id === "promptInput") {
+      handlePromptInput(event.target)
+      return
+    }
+    dispatchDelegated(event, DELEGATED_INPUT)
+  })
+
+  root.addEventListener("scroll", (event) => {
+    if (event.target.id === "promptInput") syncPromptOverlay(event.target)
+  }, true)
+
+  root.addEventListener("keydown", (event) => {
+    if (event.target.id === "promptInput") {
+      handlePromptKeydown(event, event.target)
+      return
+    }
+    const renameInput = event.target.closest?.("[data-session-rename-input],[data-project-rename-input]")
+    if (renameInput) handleRenameKeydown(event, renameInput)
+  })
+
+  // The skill-upload dropzone is a single transient element; delegate its drag/drop off #root.
+  root.addEventListener("dragover", (event) => {
+    const zone = event.target.closest?.("[data-skill-drop]")
+    if (!zone) return
+    event.preventDefault()
+    zone.classList.add("dragging")
+  })
+  root.addEventListener("dragleave", (event) => {
+    const zone = event.target.closest?.("[data-skill-drop]")
+    if (zone) zone.classList.remove("dragging")
+  })
+  root.addEventListener("drop", (event) => {
+    const zone = event.target.closest?.("[data-skill-drop]")
+    if (!zone) return
+    event.preventDefault()
+    zone.classList.remove("dragging")
+    const file = event.dataTransfer?.files?.[0]
+    const filePath = file ? window.openworking.skills.pathForFile(file) : ""
+    if (!filePath) {
+      showToast("Drop a .zip or .skill file from disk.")
+      return
+    }
+    uploadSkill(filePath).catch((error) => showToast(error.message))
+  })
 }
 
 if (typeof document !== "undefined") {
@@ -4744,6 +4923,7 @@ if (typeof document !== "undefined") {
     if (dirty) render()
   })
 
+  installDelegatedListeners()
   loadInitialState().catch((error) => {
     document.getElementById("root").innerHTML = `<pre class="fatal">${escapeHtml(error.stack || error.message)}</pre>`
   })

@@ -584,6 +584,9 @@ class RuntimeProcessManager {
     this.eventReconnectTimer = null
     this.exitPromise = null
     this.resolveExit = null
+    // Tracks an in-flight start/stop so reads can wait for the server to settle instead of
+    // throwing "Runtime is not running" during a restart. See waitUntilReady().
+    this.lifecycle = null
     this.sessionStatuses = {}
     this.state = {
       status: "idle",
@@ -648,6 +651,17 @@ class RuntimeProcessManager {
     }
   }
 
+  // Waits for any in-flight start/restart to settle, then asserts the server is up. Read
+  // operations call this so a request issued mid-restart waits for the new server instead of
+  // throwing "Runtime is not running." Bounded by the lifecycle op itself (which has its own
+  // health-check timeout); if no lifecycle is pending and the server is down, this throws as before.
+  async waitUntilReady() {
+    if (this.lifecycle) {
+      try { await this.lifecycle } catch { /* a failed start surfaces via assertReady below */ }
+    }
+    this.assertReady()
+  }
+
   async start({ project }) {
     return this.openProject({ project })
   }
@@ -659,7 +673,19 @@ class RuntimeProcessManager {
     return this.openProject({ project })
   }
 
+  // Public entry. Records the start as the active lifecycle op so concurrent reads
+  // (listMessages/listSessions/…) can await it via waitUntilReady() instead of throwing
+  // "Runtime is not running" during the stop→spawn→healthcheck window.
   async openProject({ project }) {
+    const op = this._openProject({ project })
+    // A settled-but-not-superseded lifecycle clears itself; a newer openProject overwrites it first.
+    const marker = op.then(() => {}, () => {})
+    this.lifecycle = marker
+    marker.finally(() => { if (this.lifecycle === marker) this.lifecycle = null })
+    return op
+  }
+
+  async _openProject({ project }) {
     if (!project?.path) {
       throw new Error("Select a project before opening the runtime.")
     }
@@ -818,7 +844,7 @@ class RuntimeProcessManager {
   }
 
   async listSessions() {
-    this.assertReady()
+    await this.waitUntilReady()
     const sessions = await requestJson({
       url: `${this.state.runtime.serverUrl}/session`,
       auth: this.auth()
@@ -827,8 +853,22 @@ class RuntimeProcessManager {
     return sessions.filter((session) => !session.directory || samePath(session.directory, this.state.runtime.cwd))
   }
 
+  // Lists sessions for an ARBITRARY project directory from the single running server. OpenCode's
+  // GET /session is scoped by directory — with no `directory` query it returns only the server's
+  // active cwd. Passing `directory` lets the renderer populate sidebar history for every project
+  // from the one running server, without spawning a server per project.
+  async listSessionsForDirectory(directory) {
+    await this.waitUntilReady()
+    if (!directory) return []
+    const sessions = await requestJson({
+      url: `${this.state.runtime.serverUrl}/session?directory=${encodeURIComponent(directory)}`,
+      auth: this.auth()
+    })
+    return Array.isArray(sessions) ? sessions : []
+  }
+
   async listCommands() {
-    this.assertReady()
+    await this.waitUntilReady()
     const commands = await requestJson({
       url: `${this.state.runtime.serverUrl}/command`,
       auth: this.auth()
@@ -1004,11 +1044,15 @@ class RuntimeProcessManager {
     }
   }
 
-  async listMessages({ sessionId, limit = 100 }) {
-    this.assertReady()
+  // `directory` targets a session that belongs to a project other than the server's cwd — OpenCode's
+  // message endpoint is directory-scoped, so passing it lets the renderer view ANY project's chat
+  // history against the one running server, with no restart.
+  async listMessages({ sessionId, limit = 100, directory }) {
+    await this.waitUntilReady()
     if (!sessionId) return []
+    const dirParam = directory ? `&directory=${encodeURIComponent(directory)}` : ""
     const messages = await requestJson({
-      url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/message?limit=${limit}`,
+      url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/message?limit=${limit}${dirParam}`,
       auth: this.auth()
     })
     return Array.isArray(messages) ? messages.map(projectMessage).filter(Boolean) : []

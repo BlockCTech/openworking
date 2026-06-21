@@ -461,6 +461,12 @@ const server = http.createServer((req, res) => {
     save()
     res.end(JSON.stringify({ ok: true }))
   })
+  if (req.url.startsWith("/session?") && req.method === "GET") {
+    // OpenCode GET /session is directory-scoped via the directory query param.
+    const dir = new URL(req.url, "http://x").searchParams.get("directory")
+    const scoped = dir ? sessions.filter((s) => s.directory === dir) : sessions
+    return res.end(JSON.stringify(scoped))
+  }
   if (req.url === "/session" && req.method === "GET") return res.end(JSON.stringify(sessions))
   if (req.url === "/session" && req.method === "POST") return body(req, data => {
     capture.created = data
@@ -468,7 +474,7 @@ const server = http.createServer((req, res) => {
     save()
     res.end(JSON.stringify(sessions[0]))
   })
-  if (req.url === "/session/sess_new/message?limit=100") {
+  if (req.url.startsWith("/session/sess_new/message?")) {
     return res.end(JSON.stringify([{
       info: { id: "msg_ready", sessionID: "sess_new", role: "assistant" },
       parts: [
@@ -540,6 +546,14 @@ process.on("SIGTERM", () => process.exit(0))
 
     assert.equal((await manager.openProject({ project })).runtime.pid, firstPid)
     assert.deepEqual(await manager.listSessions(), [
+      { id: "sess_existing", title: "Existing session", directory: fs.realpathSync(projectPath) }
+    ])
+    // listSessionsForDirectory passes ?directory= so the renderer can populate any project's
+    // sidebar history from this one server. Each call returns only that directory's sessions.
+    assert.deepEqual(await manager.listSessionsForDirectory("/tmp/other-project"), [
+      { id: "sess_other", title: "Other project", directory: "/tmp/other-project" }
+    ])
+    assert.deepEqual(await manager.listSessionsForDirectory(fs.realpathSync(projectPath)), [
       { id: "sess_existing", title: "Existing session", directory: fs.realpathSync(projectPath) }
     ])
 
@@ -1140,6 +1154,60 @@ function readyManager(serverUrl) {
   }
   return manager
 }
+
+test("reads wait for an in-flight restart instead of throwing 'Runtime is not running'", async () => {
+  let served = 0
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.method === "GET" && req.url.startsWith("/session/sess_x/message")) {
+      served += 1
+      return res.end(JSON.stringify([]))
+    }
+    res.writeHead(404); res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  // Simulate the stop→spawn window: not yet running, with a lifecycle op that will flip to running.
+  manager.state.status = "starting"
+  manager.child = null
+  let resolveLifecycle
+  manager.lifecycle = new Promise((resolve) => { resolveLifecycle = resolve })
+  try {
+    const pending = manager.listMessages({ sessionId: "sess_x" }) // issued mid-restart
+    // Hasn't thrown; it's waiting. Now finish the "restart".
+    manager.state.status = "running"
+    manager.child = {}
+    resolveLifecycle()
+    await pending // resolves instead of throwing
+    assert.equal(served, 1)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("listMessages forwards a directory query so a cross-project chat can be viewed without a restart", async () => {
+  let capturedUrl = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.method === "GET" && req.url.startsWith("/session/sess_x/message")) {
+      capturedUrl = req.url
+      return res.end(JSON.stringify([]))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    await manager.listMessages({ sessionId: "sess_x", directory: "/Users/me/other-project" })
+    assert.match(capturedUrl, /directory=%2FUsers%2Fme%2Fother-project/)
+    // Without a directory it must NOT append the param (unchanged behavior for the active project).
+    await manager.listMessages({ sessionId: "sess_x" })
+    assert.equal(capturedUrl.includes("directory="), false)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
 
 test("answerQuestion posts to the non-session question reply endpoint", async () => {
   let captured = null

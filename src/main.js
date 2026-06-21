@@ -397,8 +397,32 @@ function registerIpc() {
     return runtimeManager.openProject({ project })
   })
   ipcMain.handle("runtime:stop", () => runtimeManager.stop())
-  ipcMain.handle("runtime:listSessions", () => runtimeManager.listSessions())
-  ipcMain.handle("runtime:listCommands", () => runtimeManager.listCommands())
+  // Best-effort reads (listSessions/listSessionsForDirectory/listCommands) fill the sidebar and the
+  // slash-command menu and are always treated as optional by the renderer (it does .catch(() => [])).
+  // A transient failure — the server stopping/restarting mid-request → ECONNRESET / socket hang up —
+  // must resolve to [] rather than reject, or Electron logs a noisy "Error occurred in handler" for
+  // every dropped socket. waitUntilReady() handles the orderly case; this catch covers the racy one.
+  ipcMain.handle("runtime:listSessions", async () => {
+    try {
+      return await runtimeManager.listSessions()
+    } catch {
+      return []
+    }
+  })
+  ipcMain.handle("runtime:listSessionsForDirectory", async (_event, { directory } = {}) => {
+    try {
+      return await runtimeManager.listSessionsForDirectory(directory)
+    } catch {
+      return []
+    }
+  })
+  ipcMain.handle("runtime:listCommands", async () => {
+    try {
+      return await runtimeManager.listCommands()
+    } catch {
+      return []
+    }
+  })
   ipcMain.handle("runtime:createSession", (_event, payload) => runtimeManager.createSession(payload))
   ipcMain.handle("runtime:renameSession", (_event, payload) => runtimeManager.renameSession(payload))
   ipcMain.handle("runtime:sendPrompt", async (_event, payload) => {
