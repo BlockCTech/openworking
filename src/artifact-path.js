@@ -89,6 +89,10 @@ function isHiddenProjectPath(relativePath) {
     .some((segment) => segment.startsWith("."))
 }
 
+function normalizeProjectRelativePath(relativePath) {
+  return String(relativePath || "").replace(/\\/g, "/")
+}
+
 function assertProjectFile(projectPath, filePath) {
   const projectRoot = fs.realpathSync(path.resolve(projectPath))
   const requestedInput = String(filePath)
@@ -157,7 +161,7 @@ function listProjectDirectory(projectPath, directoryPath = "", options = {}) {
     if (!type) continue
     if (type === "directory" && IGNORED_PROJECT_DIRECTORIES.has(entry.name)) continue
     const absolutePath = path.join(resolved, entry.name)
-    const childRelativePath = path.relative(projectRoot, absolutePath)
+    const childRelativePath = normalizeProjectRelativePath(path.relative(projectRoot, absolutePath))
     rawChildren.push({ entry, type, absolutePath, childRelativePath })
     relativePaths.push(childRelativePath)
   }

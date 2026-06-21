@@ -257,6 +257,23 @@ test("project directory listing can return only visible non-hidden non-gitignore
   ])
 })
 
+test("project directory listing normalizes Windows separators before git ignore checks", (t) => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-projdir-winsep-"))
+  execFileSync("git", ["init"], { cwd: project, stdio: "ignore" })
+  fs.writeFileSync(path.join(project, ".gitignore"), "src/generated.md\n")
+  fs.mkdirSync(path.join(project, "src"), { recursive: true })
+  fs.writeFileSync(path.join(project, "src", "app.js"), "console.log('ok')\n")
+  fs.writeFileSync(path.join(project, "src", "generated.md"), "# generated")
+
+  const originalRelative = path.relative
+  t.mock.method(path, "relative", (from, to) => originalRelative(from, to).replace(/\//g, "\\"))
+
+  const src = listProjectDirectory(project, "src", { mode: "visible-openable-files" })
+  assert.deepEqual(src.children, [
+    { name: "app.js", path: "src/app.js", type: "file", openable: true }
+  ])
+})
+
 test("readProjectFileContent reads small files fully", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-read-"))
   const file = path.join(dir, "small.md")

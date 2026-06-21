@@ -27,13 +27,13 @@ test("translation gateway env resolves managed config without exposing extra pro
   })
 })
 
-test("resolveUserPath preserves the current PATH entries and dedupes", () => {
+test("resolveUserPath preserves the current PATH entries and dedupes", async () => {
   const originalPath = process.env.PATH
   try {
     const unique = path.join(os.tmpdir(), `openworking-path-${Date.now()}`)
     // Duplicate an entry to confirm dedup; include a unique marker dir to confirm preservation.
     process.env.PATH = [unique, "/usr/bin", "/usr/bin", unique].join(path.delimiter)
-    const resolved = resolveUserPath({ force: true })
+    const resolved = await resolveUserPath({ force: true })
     const parts = resolved.split(path.delimiter)
 
     // Every current PATH entry survives.
@@ -43,23 +43,23 @@ test("resolveUserPath preserves the current PATH entries and dedupes", () => {
     assert.equal(new Set(parts).size, parts.length)
   } finally {
     process.env.PATH = originalPath
-    resolveUserPath({ force: true })
+    await resolveUserPath({ force: true })
   }
 })
 
-test("resolveUserPath caches and returns the same value until forced", () => {
+test("resolveUserPath caches and returns the same value until forced", async () => {
   const originalPath = process.env.PATH
   try {
     process.env.PATH = "/usr/bin"
-    const first = resolveUserPath({ force: true })
+    const first = await resolveUserPath({ force: true })
     process.env.PATH = "/somewhere/else"
     // Without force, the cached value (from the previous force call) is returned unchanged.
-    assert.equal(resolveUserPath(), first)
+    assert.equal(await resolveUserPath(), first)
     // Forcing picks up the new PATH.
-    assert.notEqual(resolveUserPath({ force: true }), first)
+    assert.notEqual(await resolveUserPath({ force: true }), first)
   } finally {
     process.env.PATH = originalPath
-    resolveUserPath({ force: true })
+    await resolveUserPath({ force: true })
   }
 })
 
@@ -433,7 +433,9 @@ const capture = {
   projectPath: process.env.OPENWORKING_PROJECT_PATH,
   translationBaseURL: process.env.OPENWORKING_TRANSLATION_BASE_URL,
   translationApiKey: process.env.OPENWORKING_TRANSLATION_API_KEY,
-  translationModel: process.env.OPENWORKING_TRANSLATION_MODEL
+  translationModel: process.env.OPENWORKING_TRANSLATION_MODEL,
+  pathType: typeof process.env.PATH,
+  pathValue: process.env.PATH
 }
 const sessions = [
   { id: "sess_existing", title: "Existing session", directory: process.cwd() },
@@ -524,6 +526,8 @@ process.on("SIGTERM", () => process.exit(0))
     assert.equal(captured.translationBaseURL, "http://127.0.0.1:49152/api/v1")
     assert.equal(captured.translationApiKey, "gateway-key")
     assert.equal(captured.translationModel, "gpt-4o-mini")
+    assert.equal(captured.pathType, "string")
+    assert.notEqual(captured.pathValue, "[object Promise]")
     assert.equal(JSON.stringify(snapshot).includes("gateway-key"), false)
 
     assert.equal((await manager.openProject({ project })).runtime.pid, firstPid)

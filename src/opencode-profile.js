@@ -24,6 +24,7 @@ const BUILT_IN_SKILLS = [
   { name: "webapp-testing", description: "Test local web applications with the project's existing tools or Playwright." }
 ]
 const BUILT_IN_TOOLS = ["translate_document.js"]
+const RESERVED_PERMISSION_KEYS = new Set(["__proto__", "prototype", ...Object.getOwnPropertyNames(Object.prototype)])
 
 function defaultProfileDir(userDataPath) {
   if (process.env.OPENWORKING_OPENCODE_CONFIG_DIR) {
@@ -163,6 +164,7 @@ function parseAskToolPermissions(frontmatter) {
     .split(",")
     .map((part) => part.trim())
     .filter((part) => /^[A-Za-z0-9_*-]+$/.test(part))
+    .filter((part) => !RESERVED_PERMISSION_KEYS.has(part))
   return [...new Set(tools)]
 }
 
@@ -234,7 +236,7 @@ function installCustomSkillArchive(profile, archivePath) {
     // (Allow / Reject) before running them. Only set keys the user has not already configured,
     // so we never override a deliberate "allow"/"deny" the user picked earlier.
     for (const tool of parseAskToolPermissions(frontmatter)) {
-      if (!(tool in config.permission)) config.permission[tool] = "ask"
+      if (!Object.hasOwn(config.permission, tool)) config.permission[tool] = "ask"
     }
     writeProfileConfig(profile, config)
     return { name, description, path: targetDir }

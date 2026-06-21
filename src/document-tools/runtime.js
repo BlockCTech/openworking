@@ -1453,7 +1453,11 @@ async function translatePdf(inputPath, outputPath, args, options) {
 async function translateMarkdown(inputPath, outputPath, args, options) {
   const markdown = fs.readFileSync(inputPath, "utf8")
   const { parts, segments } = collectMarkdownSegments(markdown)
-  if (!segments.length) throw new Error("Markdown did not contain translatable text.")
+  if (!segments.length) {
+    fs.writeFileSync(outputPath, markdown, "utf8")
+    if (!fs.existsSync(outputPath) || !fs.statSync(outputPath).size) throw new Error("Generated Markdown artifact is empty.")
+    return { warnings: [] }
+  }
   const translated = await translateSegments(segments, args.targetLanguage, args.sourceLanguage, {
     ...options,
     maxBatchChars: MARKDOWN_MAX_BATCH_CHARS,

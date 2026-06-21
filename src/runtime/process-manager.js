@@ -1,4 +1,4 @@
-const { spawn, execFileSync } = require("node:child_process")
+const { spawn, execFile } = require("node:child_process")
 const fs = require("node:fs")
 const os = require("node:os")
 const http = require("node:http")
@@ -258,14 +258,14 @@ function commonNodeBinDirs(env = process.env) {
 // The login shell's PATH (set up by ~/.zshrc, ~/.zprofile, nvm, etc.). `-ilc` runs an interactive
 // login shell so version managers initialize. POSIX-only — skipped on win32. Returns [] on any failure.
 function loginShellPathParts() {
-  if (process.platform === "win32") return []
-  const shell = process.env.SHELL || "/bin/zsh"
-  try {
-    const out = execFileSync(shell, ["-ilc", "echo $PATH"], { encoding: "utf8", timeout: 4000, stdio: ["ignore", "pipe", "ignore"] })
-    return String(out).trim().split(path.delimiter).filter(Boolean)
-  } catch {
-    return []
-  }
+  return new Promise((resolve) => {
+    if (process.platform === "win32") return resolve([])
+    const shell = process.env.SHELL || "/bin/zsh"
+    execFile(shell, ["-ilc", "echo $PATH"], { encoding: "utf8", timeout: 4000 }, (error, stdout) => {
+      if (error) return resolve([])
+      resolve(String(stdout).trim().split(path.delimiter).filter(Boolean))
+    })
+  })
 }
 
 let cachedUserPath = null
@@ -274,10 +274,11 @@ let cachedUserPath = null
 // `npx backlog-mcp-server`) resolve. Without this, a packaged macOS app inherits launchd's minimal
 // PATH and opencode reports `Executable not found in $PATH: "npx"`. Cached: the login shell is
 // queried at most once per app session. Pass `force` in tests to bypass the cache.
-function resolveUserPath({ force = false } = {}) {
+async function resolveUserPath({ force = false } = {}) {
   if (cachedUserPath && !force) return cachedUserPath
   const currentParts = (process.env.PATH || "").split(path.delimiter).filter(Boolean)
-  const merged = [...loginShellPathParts(), ...currentParts, ...commonNodeBinDirs()]
+  const shellParts = await loginShellPathParts()
+  const merged = [...shellParts, ...currentParts, ...commonNodeBinDirs()]
   cachedUserPath = Array.from(new Set(merged)).join(path.delimiter)
   return cachedUserPath
 }
@@ -720,11 +721,12 @@ class RuntimeProcessManager {
       configPath,
       configDir
     })
+    const userPath = await resolveUserPath()
     const env = {
       ...process.env,
       // Augment PATH with the user's real toolchain so opencode can spawn local MCP servers
       // (e.g. `npx ...`). A packaged macOS app otherwise inherits launchd's minimal PATH.
-      PATH: resolveUserPath(),
+      PATH: userPath,
       OPENCODE_CONFIG: configPath,
       OPENCODE_CONFIG_DIR: configDir,
       XDG_DATA_HOME: runtimeDataDir,

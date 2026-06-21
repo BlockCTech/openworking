@@ -7,14 +7,18 @@ global.window = {
     applyThreadEvent() {},
     clearPendingPermission() {},
     clearPendingQuestion() {},
-    createThreadStream() {},
+    createThreadStream(sessionId) {
+      return { sessionId, messages: [], pendingQuestions: [], pendingPermissions: [], status: { type: "idle" } }
+    },
     hasRunningTool() { return false },
     hydrateThread() {},
     messageCopyText() { return "" },
     userMessageFileRefs() { return [] },
     messageText() { return "" },
     removeOptimisticUser() {},
-    resetThread() {},
+    resetThread(_thread, sessionId) {
+      return { sessionId, messages: [], pendingQuestions: [], pendingPermissions: [], status: { type: "idle" } }
+    },
     threadIsBusy() { return false }
   },
   OpenWorkingDiffView: {
@@ -39,8 +43,39 @@ const {
   livePendingFileMentions,
   renderPromptOverlayHtml,
   renderTextWithFileMentions,
-  resolveFileMentionsFromPrompt
+  resolveFileMentionsFromPrompt,
+  __test
 } = require("../src/renderer")
+
+function fakeElement() {
+  return {
+    innerHTML: "",
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 0,
+    classList: { add() {}, remove() {}, toggle() {} },
+    dataset: {},
+    addEventListener() {},
+    focus() {},
+    querySelector() { return null },
+    querySelectorAll() { return [] }
+  }
+}
+
+function fakeDocument() {
+  const elements = new Map([
+    ["root", fakeElement()],
+    ["toastHost", fakeElement()]
+  ])
+  return {
+    getElementById(id) {
+      return elements.get(id) || null
+    },
+    querySelector() { return null },
+    querySelectorAll() { return [] },
+    addEventListener() {}
+  }
+}
 
 test("file mentions stay live only for exact standalone tokens", () => {
   const mentions = [{ token: "@health_check.py", path: "src/health_check.py", name: "health_check.py" }]
@@ -175,4 +210,70 @@ test("runtime reconnect falls back to new-session flow when the active session i
     chooseSessionAfterRuntimeReconnect(null, sessions),
     null
   )
+})
+
+test("sendPrompt restores the draft and surfaces runtime startup failures", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+  global.window.openworking = {
+    runtime: {
+      async openProject() {
+        throw new Error("Runtime failed to start")
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  const attachment = { id: "att_1", filename: "diagram.png", mime: "image/png" }
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: null,
+    sessionsByProject: {},
+    threads: new Map(),
+    runtime: null,
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [attachment],
+    pendingFileMentions: [],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    await sendPrompt("Please inspect this")
+
+    assert.equal(state.promptDraft, "Please inspect this")
+    assert.deepEqual(state.pendingAttachments, [attachment])
+    assert.equal(state.loading, false)
+    assert.equal(state.toast, "Runtime failed to start")
+    assert.match(document.getElementById("toastHost").innerHTML, /Runtime failed to start/)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
 })

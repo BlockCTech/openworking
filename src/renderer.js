@@ -487,6 +487,7 @@ function showToast(message) {
     state.toast = null
     renderToast()
   }, 2400)
+  if (typeof showToast.timer?.unref === "function") showToast.timer.unref()
 }
 
 function applyVersionGate(gate) {
@@ -3897,46 +3898,48 @@ async function sendPrompt(rawPrompt) {
   })
   const effectivePrompt = command ? prompt : applyPendingFileMentions(prompt, fileMentions)
   const mode = modes.find((item) => item.id === state.mode) || modes[0]
-  if (state.runtime?.project?.id !== project.id || state.runtime.status !== "running") {
-    state.activeSessionId = await ensureRuntimeProject(project.id, { preserveSessionId: state.activeSessionId })
-  }
-  if (!state.activeSessionId) {
-    const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
-    const session = await window.openworking.runtime.createSession({ title })
-    state.activeSessionId = session.id
-    state.sessionsByProject[project.id] ||= []
-    state.sessionsByProject[project.id].unshift(session)
-    // Discard the unsaved "new session" draft thread and start a clean thread under
-    // the real session id, so subsequent stream events route to it by sessionID.
-    state.threads.delete(null)
-    resetActiveThread(session.id)
-  }
-  const thread = activeThread()
-  const optimisticId = addOptimisticUser(thread, prompt, attachments, {
-    fileRefs: fileMentions,
-    signatureText: command ? undefined : effectivePrompt
-  })
-  if (mode.id === "plan") {
-    const afterMessageIndex = thread.messages.findIndex((message) => message.id === optimisticId)
-    state.planProposal = {
-      sessionId: state.activeSessionId,
-      afterMessageIndex: afterMessageIndex === -1 ? thread.messages.length - 1 : afterMessageIndex
-    }
-    state.planAccepted = null
-    state.planAutoOpened = null
-  } else if (state.planProposal?.sessionId === state.activeSessionId) {
-    state.planProposal = null
-  }
-  const sentAttachmentIds = new Set(attachments.map((attachment) => attachment.id))
-  thread.status = { type: "busy" }
-  state.promptDraft = ""
-  if (!command && sentAttachmentIds.size) {
-    state.pendingAttachments = state.pendingAttachments.filter((attachment) => !sentAttachmentIds.has(attachment.id))
-  }
-  if (!command) state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => !fileMentions.some((sent) => sent.token === fileMention.token))
-  render({ threadScroll: "latest" })
-  const model = selectedModel()
+  let thread = null
+  let optimisticId = null
   try {
+    if (state.runtime?.project?.id !== project.id || state.runtime.status !== "running") {
+      state.activeSessionId = await ensureRuntimeProject(project.id, { preserveSessionId: state.activeSessionId })
+    }
+    if (!state.activeSessionId) {
+      const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
+      const session = await window.openworking.runtime.createSession({ title })
+      state.activeSessionId = session.id
+      state.sessionsByProject[project.id] ||= []
+      state.sessionsByProject[project.id].unshift(session)
+      // Discard the unsaved "new session" draft thread and start a clean thread under
+      // the real session id, so subsequent stream events route to it by sessionID.
+      state.threads.delete(null)
+      resetActiveThread(session.id)
+    }
+    thread = activeThread()
+    optimisticId = addOptimisticUser(thread, prompt, attachments, {
+      fileRefs: fileMentions,
+      signatureText: command ? undefined : effectivePrompt
+    })
+    if (mode.id === "plan") {
+      const afterMessageIndex = thread.messages.findIndex((message) => message.id === optimisticId)
+      state.planProposal = {
+        sessionId: state.activeSessionId,
+        afterMessageIndex: afterMessageIndex === -1 ? thread.messages.length - 1 : afterMessageIndex
+      }
+      state.planAccepted = null
+      state.planAutoOpened = null
+    } else if (state.planProposal?.sessionId === state.activeSessionId) {
+      state.planProposal = null
+    }
+    const sentAttachmentIds = new Set(attachments.map((attachment) => attachment.id))
+    thread.status = { type: "busy" }
+    state.promptDraft = ""
+    if (!command && sentAttachmentIds.size) {
+      state.pendingAttachments = state.pendingAttachments.filter((attachment) => !sentAttachmentIds.has(attachment.id))
+    }
+    if (!command) state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => !fileMentions.some((sent) => sent.token === fileMention.token))
+    render({ threadScroll: "latest" })
+    const model = selectedModel()
     if (command) {
       await window.openworking.runtime.sendCommand({
         sessionId: state.activeSessionId,
@@ -3956,9 +3959,9 @@ async function sendPrompt(rawPrompt) {
     }
     render({ threadScroll: "latest" })
   } catch (error) {
-    removeOptimisticUser(thread, optimisticId)
+    if (thread && optimisticId) removeOptimisticUser(thread, optimisticId)
     if (state.planProposal?.sessionId === state.activeSessionId) state.planProposal = null
-    thread.status = { type: "idle" }
+    if (thread) thread.status = { type: "idle" }
     state.promptDraft = prompt
     if (!command && attachments.length) {
       const pendingIds = new Set(state.pendingAttachments.map((attachment) => attachment.id))
@@ -3975,7 +3978,7 @@ async function sendPrompt(rawPrompt) {
       ]
     }
     render({ threadScroll: "latest" })
-    throw error
+    showToast(error.message || "Could not send prompt.")
   }
 }
 
@@ -4438,7 +4441,11 @@ if (typeof module !== "undefined" && module.exports) {
     livePendingFileMentions,
     renderPromptOverlayHtml,
     renderTextWithFileMentions,
-    resolveFileMentionsFromPrompt
+    resolveFileMentionsFromPrompt,
+    __test: {
+      sendPrompt,
+      state
+    }
   }
 }
 

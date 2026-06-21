@@ -115,6 +115,38 @@ test("Markdown translation preserves frontmatter and fenced code while creating 
   assert.match(translated, /```js\nconst text = "翻訳しない"\n```/)
 })
 
+test("Markdown translation copies files that contain only non-translatable blocks", async () => {
+  const project = tempProject()
+  const input = path.join(project, "diagram.md")
+  const original = [
+    "```mermaid",
+    "graph TD",
+    "  A --> B",
+    "```",
+    "",
+    "```js",
+    "const text = \"翻訳しない\"",
+    "```",
+    ""
+  ].join("\n")
+  fs.writeFileSync(input, original)
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    {
+      translateSegments() {
+        throw new Error("translator should not be called")
+      }
+    }
+  )
+
+  const output = result.metadata.artifacts[0].path
+  assert.equal(output, path.join(project, "diagram-translated-vietnamese.md"))
+  assert.equal(fs.readFileSync(output, "utf8"), original)
+  assert.equal(result.metadata.quality, "verified")
+})
+
 // Build an OOXML zip whose entries set the data-descriptor flag (general-purpose
 // bit 3) the way Excel and other streaming writers do — and which is NOT created by
 // adm-zip. The bundled adm-zip can re-read such an input fine, but throws "No

@@ -392,6 +392,24 @@ test("installs HITL tool gates declared via askToolPermissions and leaves other 
   assert.equal("backlog_get_project" in config.permission, false)
 })
 
+test("askToolPermissions ignores prototype-reserved permission keys", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-skill-reserved-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const archivePath = createSkillArchive(temp, "reserved.zip", {
+    "SKILL.md": "---\nname: reserved-skill\ndescription: Reserved skill\naskToolPermissions: __proto__, constructor, prototype, hasOwnProperty, backlog_add_issue\n---\n"
+  })
+
+  installCustomSkillArchive(profile, archivePath)
+
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(config.permission.skill["reserved-skill"], "allow")
+  assert.equal(config.permission.backlog_add_issue, "ask")
+  assert.equal(Object.hasOwn(config.permission, "__proto__"), false)
+  assert.equal(Object.hasOwn(config.permission, "constructor"), false)
+  assert.equal(Object.hasOwn(config.permission, "prototype"), false)
+  assert.equal(Object.hasOwn(config.permission, "hasOwnProperty"), false)
+})
+
 test("skills without askToolPermissions add no tool gates", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-skill-noask-"))
   const profile = ensureOpenworkingProfile({ userDataPath: temp })
