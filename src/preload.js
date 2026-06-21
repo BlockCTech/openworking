@@ -6,7 +6,12 @@ contextBridge.exposeInMainWorld("openworking", {
     add: () => ipcRenderer.invoke("projects:add"),
     remove: (projectId) => ipcRenderer.invoke("projects:remove", projectId),
     rename: (projectId, name) => ipcRenderer.invoke("projects:rename", projectId, name),
-    touch: (projectId) => ipcRenderer.invoke("projects:touch", projectId)
+    touch: (projectId) => ipcRenderer.invoke("projects:touch", projectId),
+    setPinned: (projectId, pinned) => ipcRenderer.invoke("projects:setPinned", projectId, pinned)
+  },
+  pins: {
+    list: () => ipcRenderer.invoke("pins:list"),
+    set: (sessionId, pinned, meta) => ipcRenderer.invoke("pins:set", { sessionId, pinned, meta })
   },
   config: {
     get: () => ipcRenderer.invoke("config:get"),

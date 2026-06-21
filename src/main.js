@@ -6,6 +6,7 @@ const { AttachmentRegistry } = require("./attachment-registry")
 const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, setActiveProjectMemory, writeEditableProfileConfig } = require("./opencode-profile")
 const { SCOPES, ensureProjectMemory, readMemory, writeMemory } = require("./memory-store")
 const { ProjectRegistry } = require("./project-registry")
+const { PinRegistry } = require("./pin-registry")
 const { RuntimeProcessManager } = require("./runtime/process-manager")
 const { checkDesktopVersion, downloadInstaller, installDmg, versionCheckConfigured } = require("./version-check")
 
@@ -22,6 +23,7 @@ function resolveAppBundlePath(exePath) {
 
 let mainWindow = null
 let projectRegistry = null
+let pinRegistry = null
 let runtimeManager = null
 let opencodeProfile = null
 const attachmentRegistry = new AttachmentRegistry()
@@ -144,6 +146,10 @@ function registerIpc() {
   ipcMain.handle("projects:remove", (_event, projectId) => projectRegistry.remove(projectId))
   ipcMain.handle("projects:rename", (_event, projectId, name) => projectRegistry.rename(projectId, name))
   ipcMain.handle("projects:touch", (_event, projectId) => projectRegistry.touch(projectId))
+  ipcMain.handle("projects:setPinned", (_event, projectId, pinned) => projectRegistry.setPinned(projectId, pinned))
+
+  ipcMain.handle("pins:list", () => pinRegistry.list())
+  ipcMain.handle("pins:set", (_event, { sessionId, pinned, meta }) => pinRegistry.set(sessionId, pinned, meta))
 
   ipcMain.handle("config:get", () => ({
     ...readProfileConfig(opencodeProfile),
@@ -413,6 +419,7 @@ function registerIpc() {
 
 app.whenReady().then(() => {
   projectRegistry = new ProjectRegistry(app.getPath("userData"))
+  pinRegistry = new PinRegistry(app.getPath("userData"))
   opencodeProfile = ensureOpenworkingProfile({ userDataPath: app.getPath("userData") })
   runtimeManager = new RuntimeProcessManager({
     userDataPath: app.getPath("userData"),

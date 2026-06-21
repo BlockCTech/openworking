@@ -40,6 +40,7 @@ const icons = {
   save: '<svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></svg>',
   dots: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>',
+  pin: '<svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 15v5"/></svg>',
   copy: '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M5 16H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v1"/></svg>',
   stop: '<svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>',
   folderPlus: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 12v4M10 14h4"/></svg>',
@@ -130,6 +131,11 @@ const state = {
   // long task in session A is not lost when the user switches to / creates session B.
   // The `null` key holds the "new session" draft thread before the session exists.
   threads: new Map(),
+  // Pinned chat sessions, keyed by sessionId → { projectId, title, updatedAt }. Pinning
+  // is an app-side preference (sessions are owned by OpenCode core), persisted via the
+  // pins:* IPC with cached metadata so the flat, cross-project Pinned section renders
+  // even for sessions whose project runtime is not currently running.
+  pinnedSessions: new Map(),
   toolDisclosure: new Map(),
   document: null,
   expanded: new Set(),
@@ -372,6 +378,23 @@ function projectSessions(projectId) {
   return state.sessionsByProject[projectId] || []
 }
 
+// Pinned projects float to the top, keeping registry order within each group.
+function sortProjectsByPin(projects) {
+  return [
+    ...projects.filter((project) => project.pinned),
+    ...projects.filter((project) => !project.pinned)
+  ]
+}
+
+// Builds the sessionId → metadata map from the pins:list IPC array.
+function pinsToMap(pins) {
+  return new Map((pins || []).map((pin) => [pin.sessionId, {
+    projectId: pin.projectId || null,
+    title: pin.title || "",
+    updatedAt: pin.updatedAt || null
+  }]))
+}
+
 function selectedSession() {
   return projectSessions(state.activeProjectId).find((session) => session.id === state.activeSessionId) || null
 }
@@ -536,12 +559,14 @@ async function startUpdateDownload() {
 }
 
 async function loadInitialState() {
-  const [projects, activeConfig, runtime] = await Promise.all([
+  const [projects, activeConfig, runtime, pins] = await Promise.all([
     window.openworking.projects.list(),
     window.openworking.config.get(),
-    window.openworking.runtime.get()
+    window.openworking.runtime.get(),
+    window.openworking.pins.list()
   ])
   state.projects = projects
+  state.pinnedSessions = pinsToMap(pins)
   state.configPath = activeConfig.path
   state.config = activeConfig.config
   state.customSkills = activeConfig.customSkills || []
@@ -1141,6 +1166,12 @@ function renderSidebar() {
         <button class="nav-item ${state.nav === "skills" ? "active" : ""}" data-nav="skills">
           ${icon("blocks")}<span>Skills</span>
         </button>
+        ${hasPinnedItems() ? `
+          <div class="side-label">
+            <span class="sl-title">Pinned</span>
+          </div>
+          ${renderPinnedSection()}
+        ` : ""}
         <div class="side-label">
           <span class="sl-title">Projects</span>
           <div class="sl-actions">
@@ -1148,7 +1179,7 @@ function renderSidebar() {
             <button class="sl-act" title="Add project" data-action="addProject">${icon("folderPlus")}</button>
           </div>
         </div>
-        ${state.projects.map(renderProjectGroup).join("")}
+        ${renderProjectList()}
       </div>
       <div class="side-foot">
         <button class="side-user ${state.nav === "config" ? "active" : ""}" data-nav="config">
@@ -1224,10 +1255,40 @@ function renderFileTreeRows(directoryPath, depth) {
   }).join("")
 }
 
+// The "Projects" section lists only unpinned projects — pinned projects live in the
+// Pinned section above (rendered by renderPinnedSection), so they are not duplicated.
+function renderProjectList() {
+  return state.projects.filter((project) => !project.pinned).map(renderProjectGroup).join("")
+}
+
+function hasPinnedItems() {
+  return state.pinnedSessions.size > 0 || state.projects.some((project) => project.pinned)
+}
+
+// The unified Pinned section: pinned chat sessions first (flat, cross-project, no folder
+// label), then pinned projects as full accordions. Pinned session metadata is cached in
+// the pin store so rows render even when that session's project runtime isn't running;
+// when the project IS loaded we prefer its live session object for fresh title/time/busy.
+function renderPinnedSection() {
+  const pinnedProjects = state.projects.filter((project) => project.pinned)
+  const sessionRows = [...state.pinnedSessions.entries()].map(([sessionId, meta]) => {
+    const live = (state.sessionsByProject[meta.projectId] || []).find((session) => session.id === sessionId)
+    const session = live || { id: sessionId, title: meta.title, time: { updated: meta.updatedAt } }
+    return renderSessionRow({ id: meta.projectId }, session)
+  }).join("")
+  return `
+    ${sessionRows ? `<div class="pinned-list">${sessionRows}</div>` : ""}
+    ${pinnedProjects.map(renderProjectGroup).join("")}
+  `
+}
+
 function renderProjectGroup(project) {
   const sessions = projectSessions(project.id)
   const open = state.expanded.has(project.id)
-  const shown = state.showAll.has(project.id) ? sessions : sessions.slice(0, 5)
+  // Pinned chats are surfaced in the unified Pinned section, so they are excluded here
+  // to avoid showing the same chat twice.
+  const rest = sessions.filter((session) => !state.pinnedSessions.has(session.id))
+  const shownRest = state.showAll.has(project.id) ? rest : rest.slice(0, 5)
   return `
     <div class="proj-group">
       <div class="proj-head-wrap">
@@ -1239,6 +1300,9 @@ function renderProjectGroup(project) {
         <button class="proj-kebab" data-project-menu="${escapeHtml(project.id)}" title="Options">${icon("dots")}</button>
         ${state.projectMenu === project.id ? `
           <div class="pop project-pop">
+            <button class="pop-item" data-project-pin="${escapeHtml(project.id)}" data-pinned="${project.pinned ? "1" : "0"}">
+              ${icon("pin")}<span>${project.pinned ? "Unpin project" : "Pin project"}</span>
+            </button>
             <button class="pop-item" data-project-rename="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}">
               ${icon("edit")}<span>Rename</span>
             </button>
@@ -1249,28 +1313,37 @@ function renderProjectGroup(project) {
       </div>
       ${open ? `
         <div class="sessions">
-          ${sessions.length ? shown.map((session) => `
-            <div class="session-row-wrap ${session.id === state.activeSessionId ? "active" : ""}" data-session-row="${escapeHtml(session.id)}">
-              <button class="session-row" data-session-id="${escapeHtml(session.id)}" data-project-id="${escapeHtml(project.id)}">
-                <span class="session-busy-dot ${sessionBusy(session.id) ? "on" : ""}" title="Running"></span>
-                <span class="stitle">${escapeHtml(sessionDisplayTitle(session))}</span>
-                <span class="stime">${escapeHtml(relativeTime(sessionUpdatedAt(session)))}</span>
-              </button>
-              <button class="session-kebab" data-session-menu="${escapeHtml(session.id)}" title="Options">${icon("dots")}</button>
-              ${state.sessionMenu === session.id ? `
-                <div class="pop session-pop">
-                  <button class="pop-item" data-session-rename="${escapeHtml(session.id)}" data-session-project="${escapeHtml(project.id)}" data-session-title="${escapeHtml(session.title || "")}" data-session-label="${escapeHtml(sessionDisplayTitle(session))}">
-                    ${icon("edit")}<span>Rename</span>
-                  </button>
-                  <button class="pop-item danger" data-session-delete="${escapeHtml(session.id)}" data-session-title="${escapeHtml(sessionDisplayTitle(session))}">
-                    ${icon("trash")}<span>Delete</span>
-                  </button>
-                </div>` : ""}
-            </div>
-          `).join("") : `<div class="session-empty">${state.loading && project.id === state.activeProjectId ? "Loading..." : "No chats"}</div>`}
-          ${sessions.length > 5 ? `<button class="session-more" data-show-all="${escapeHtml(project.id)}">${state.showAll.has(project.id) ? "Show less" : "Show more"}</button>` : ""}
+          ${rest.length ? shownRest.map((session) => renderSessionRow(project, session)).join("")
+            : `<div class="session-empty">${state.loading && project.id === state.activeProjectId ? "Loading..." : "No chats"}</div>`}
+          ${rest.length > 5 ? `<button class="session-more" data-show-all="${escapeHtml(project.id)}">${state.showAll.has(project.id) ? "Show less" : "Show more"}</button>` : ""}
         </div>
       ` : ""}
+    </div>
+  `
+}
+
+function renderSessionRow(project, session) {
+  const isPinned = state.pinnedSessions.has(session.id)
+  return `
+    <div class="session-row-wrap ${session.id === state.activeSessionId ? "active" : ""}" data-session-row="${escapeHtml(session.id)}">
+      <button class="session-row" data-session-id="${escapeHtml(session.id)}" data-project-id="${escapeHtml(project.id)}">
+        <span class="session-busy-dot ${sessionBusy(session.id) ? "on" : ""}" title="Running"></span>
+        <span class="stitle">${escapeHtml(sessionDisplayTitle(session))}</span>
+        <span class="stime">${escapeHtml(relativeTime(sessionUpdatedAt(session)))}</span>
+      </button>
+      <button class="session-kebab" data-session-menu="${escapeHtml(session.id)}" title="Options">${icon("dots")}</button>
+      ${state.sessionMenu === session.id ? `
+        <div class="pop session-pop">
+          <button class="pop-item" data-session-pin="${escapeHtml(session.id)}" data-pinned="${isPinned ? "1" : "0"}" data-pin-project="${escapeHtml(project.id || "")}" data-pin-title="${escapeHtml(sessionDisplayTitle(session))}" data-pin-updated="${escapeHtml(sessionUpdatedAt(session) || "")}">
+            ${icon("pin")}<span>${isPinned ? "Unpin chat" : "Pin chat"}</span>
+          </button>
+          <button class="pop-item" data-session-rename="${escapeHtml(session.id)}" data-session-project="${escapeHtml(project.id)}" data-session-title="${escapeHtml(session.title || "")}" data-session-label="${escapeHtml(sessionDisplayTitle(session))}">
+            ${icon("edit")}<span>Rename</span>
+          </button>
+          <button class="pop-item danger" data-session-delete="${escapeHtml(session.id)}" data-session-title="${escapeHtml(sessionDisplayTitle(session))}">
+            ${icon("trash")}<span>Delete</span>
+          </button>
+        </div>` : ""}
     </div>
   `
 }
@@ -2434,9 +2507,10 @@ function renderProjectsScreen() {
         <section class="admin-panel">
           <div class="panel-head"><div><h1>Local projects</h1><p>Folder entries stay on this machine.</p></div><button class="primary-btn" data-action="addProject">${icon("plus")}Add</button></div>
           <div class="project-cards">
-            ${state.projects.length ? state.projects.map((project) => `
+            ${state.projects.length ? sortProjectsByPin(state.projects).map((project) => `
               <article class="project-card ${project.id === state.activeProjectId ? "active" : ""}">
-                <button class="project-main" data-open-project="${escapeHtml(project.id)}"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.path)}</span></button>
+                <button class="project-main" data-open-project="${escapeHtml(project.id)}"><strong>${escapeHtml(project.name)}${project.pinned ? `<span class="proj-pin-badge" title="Pinned">${icon("pin")}</span>` : ""}</strong><span>${escapeHtml(project.path)}</span></button>
+                <button class="small-icon-btn" data-project-pin="${escapeHtml(project.id)}" data-pinned="${project.pinned ? "1" : "0"}" title="${project.pinned ? "Unpin" : "Pin"}">${icon("pin")}</button>
                 <button class="small-icon-btn" data-rename-project="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}" title="Rename">${icon("edit")}</button>
                 <button class="small-icon-btn danger" data-remove-project="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}" title="Remove">${icon("trash")}</button>
               </article>
@@ -3051,6 +3125,18 @@ function bindEvents() {
     state.sessionMenu = state.sessionMenu === id ? null : id
     render()
   }))
+  document.querySelectorAll("[data-session-pin]").forEach((element) => element.addEventListener("click", (event) => {
+    // The pin item lives in the session ⋯ menu; stop the click from bubbling into the
+    // row's selectSession handler and close the menu.
+    event.stopPropagation()
+    state.sessionMenu = null
+    const meta = {
+      projectId: element.dataset.pinProject || null,
+      title: element.dataset.pinTitle || "",
+      updatedAt: element.dataset.pinUpdated || null
+    }
+    togglePin(element.dataset.sessionPin, element.dataset.pinned !== "1", meta).catch((error) => showToast(error.message))
+  }))
   document.querySelectorAll("[data-session-delete]").forEach((element) => element.addEventListener("click", (event) => {
     event.stopPropagation()
     state.sessionDeleteTarget = { id: element.dataset.sessionDelete, title: element.dataset.sessionTitle || "Untitled session" }
@@ -3106,6 +3192,10 @@ function bindEvents() {
     const id = element.dataset.projectMenu
     state.projectMenu = state.projectMenu === id ? null : id
     render()
+  }))
+  document.querySelectorAll("[data-project-pin]").forEach((element) => element.addEventListener("click", (event) => {
+    event.stopPropagation()
+    toggleProjectPin(element.dataset.projectPin, element.dataset.pinned !== "1").catch((error) => showToast(error.message))
   }))
   document.querySelectorAll("[data-project-rename]").forEach((element) => element.addEventListener("click", (event) => {
     event.stopPropagation()
@@ -3845,6 +3935,12 @@ async function newSession(projectId, { clearAttachments = true } = {}) {
 }
 
 async function selectSession(projectId, sessionId) {
+  // A pinned session caches its projectId; if it's missing (legacy pin) or its project
+  // was removed, openProject would no-op and the click would silently do nothing.
+  if (!projectId || !state.projects.some((project) => project.id === projectId)) {
+    showToast("This chat's project is no longer available. Re-pin it from the project to restore the link.")
+    return
+  }
   await clearPendingAttachments()
   if (state.runtime?.project?.id !== projectId || state.runtime.status !== "running") {
     await openProject(projectId, { selectLatest: false })
@@ -3881,6 +3977,17 @@ async function deleteSession(sessionId) {
     resetActiveThread()
   }
   state.sessionMenu = null
+  render()
+}
+
+async function togglePin(sessionId, pinned, meta = {}) {
+  try {
+    const pins = await window.openworking.pins.set(sessionId, pinned, meta)
+    state.pinnedSessions = pinsToMap(pins)
+  } catch (error) {
+    showToast(error.message || "Could not update pin.")
+    return
+  }
   render()
 }
 
@@ -4155,6 +4262,18 @@ async function removeProject(projectId) {
     state.threads.clear()
     resetActiveThread()
   }
+  render()
+}
+
+async function toggleProjectPin(projectId, pinned) {
+  try {
+    await window.openworking.projects.setPinned(projectId, pinned)
+    state.projects = await window.openworking.projects.list()
+  } catch (error) {
+    showToast(error.message || "Could not update pin.")
+    return
+  }
+  state.projectMenu = null
   render()
 }
 

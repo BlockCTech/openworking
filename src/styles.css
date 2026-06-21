@@ -311,6 +311,9 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .fic { display: flex; color: var(--text-3); flex-shrink: 0; }
 .active-proj .fic { color: var(--accent); }
 .pname { flex: 1; font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* always-visible pin marker on a pinned project's header, after its name */
+.proj-pin-badge { display: inline-flex; align-items: center; color: var(--accent); flex-shrink: 0; }
+.proj-pin-badge svg { width: 13px; height: 13px; }
 .padd {
   width: 20px; height: 20px; border-radius: 6px; display: grid; place-items: center;
   color: var(--text-3); opacity: 0; transition: opacity .12s, background .12s, color .12s; flex-shrink: 0;
@@ -339,6 +342,10 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .project-pop .pop-item.danger:hover { background: var(--red-soft); }
 
 .sessions { padding-bottom: 4px; }
+/* Flat list of pinned chat sessions at the top of the sidebar (cross-project, no
+   folder grouping). Rows reuse .session-row; a little bottom gap separates them from
+   the pinned-project accordions that follow. */
+.pinned-list { padding-bottom: 6px; }
 .session-row-wrap { position: relative; border-radius: var(--radius-sm); }
 .session-row {
   display: flex; align-items: center; gap: 8px; width: 100%;

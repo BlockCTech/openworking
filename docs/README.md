@@ -10,6 +10,7 @@ Tài liệu của `desktop-client/` được tổ chức theo **giai đoạn SDL
 | Giai đoạn | Thư mục | Tài liệu | Nội dung |
 |---|---|---|---|
 | **Product / UX** | `00-product/` | [session-first-ux.md](00-product/session-first-ux.md) | Phase-1 session-first UX: required shell, workflow, diagnostics, production-data rule. |
+| | | [pin-chats-and-projects.md](00-product/pin-chats-and-projects.md) | ★ Ghim chat session & project lên đầu sidebar: store cục bộ (`PinRegistry` + cờ `pinned` trên project), IPC `pins:*` / `projects:setPinned`, UI nhóm "Pinned". |
 | **Architecture** | `01-architecture/` | [architecture-overview.md](01-architecture/architecture-overview.md) | ★ Bản đồ tổng thể: 3-process model, IPC surface, runtime lifecycle, security boundaries, module↔test map. **Đọc trước khi sửa code.** |
 | **Skills & Runtime** | `03-skills-runtime/` | [built-in-skills.md](03-skills-runtime/built-in-skills.md) | Bundle 14 skill offline, sync idempotent, slash commands, MCP/Extensions. |
 | | | [attachments-office-context.md](03-skills-runtime/attachments-office-context.md) | ★ Attachment registry, trích ngữ cảnh XLSX/PPTX, artifact-path security boundary. |
