@@ -786,14 +786,26 @@ async function refreshSessionData() {
   const staleIds = [...state.threads.keys()].filter((id) => (
     id && needsThreadRehydration(state.threads.get(id), state.runtime?.sessionStatuses?.[id])
   ))
-  for (const id of staleIds) {
-    if (id === activeId) continue
-    await reconcileThread(id)
+  let touchedBackground = false
+  let backgroundError = null
+  try {
+    for (const id of staleIds) {
+      if (id === activeId) continue
+      touchedBackground = true
+      await reconcileThread(id)
+    }
+  } catch (error) {
+    backgroundError = error
+  } finally {
+    if (backgroundError && touchedBackground && activeId) {
+      await window.openworking.runtime.listMessages({ sessionId: activeId }).catch(() => {})
+    }
   }
+  if (backgroundError) throw backgroundError
   if (activeId && needsThreadRehydration(state.threads.get(activeId), state.runtime?.sessionStatuses?.[activeId])) {
     const serverStatus = state.runtime?.sessionStatuses?.[activeId]
     hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId: activeId }), serverStatus)
-  } else if (staleIds.some((id) => id !== activeId) && activeId) {
+  } else if (touchedBackground && activeId) {
     // listMessages updates the runtime's active session; restore focus after background reconciles.
     await window.openworking.runtime.listMessages({ sessionId: activeId })
   }
@@ -4548,6 +4560,7 @@ if (typeof module !== "undefined" && module.exports) {
     renderTextWithFileMentions,
     resolveFileMentionsFromPrompt,
     __test: {
+      refreshSessionData,
       sendPrompt,
       state
     }

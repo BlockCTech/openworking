@@ -1348,7 +1348,7 @@ class RuntimeProcessManager {
       const toolError = properties.part.state?.error
       if (toolStatus === "running") {
         this.log("info", `[Tool] Agent started calling tool: ${toolName}`)
-      } else if (toolStatus === "complete") {
+      } else if (toolStatus === "completed") {
         this.log("info", `[Tool] Tool ${toolName} completed successfully.`)
       } else if (toolStatus === "error") {
         this.log("warn", `[Tool] Tool ${toolName} failed: ${toolError || "Unknown error"}`)

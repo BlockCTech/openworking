@@ -6,6 +6,7 @@
   let optimisticId = 0
   const OFFICE_ATTACHMENT_CONTEXT_MARKER = "Attached document files are provided as local paths plus extracted text context"
   const NO_RESPONSE_DETAIL = "The request ended without a response. Check provider/model/API key or runtime diagnostics."
+  const LIVE_STREAM_STALE_MS = 60 * 1000
 
   function idleStatus() {
     return { type: "idle" }
@@ -17,7 +18,8 @@
       status: idleStatus(),
       messages: [],
       pendingQuestions: [],
-      pendingPermissions: []
+      pendingPermissions: [],
+      lastStreamEventAt: 0
     }
   }
 
@@ -27,6 +29,7 @@
     thread.messages = []
     thread.pendingQuestions = []
     thread.pendingPermissions = []
+    thread.lastStreamEventAt = 0
     return thread
   }
 
@@ -636,12 +639,14 @@
       return { changed: true, reconcile: true }
     }
     if (event.type === "message.updated") {
+      thread.lastStreamEventAt = Date.now()
       const message = normalizeMessage(event.info, thread.messages.length)
       if (!message) return { changed: false, reconcile: false }
       const updated = upsertMessage(thread, message)
       return { changed: Boolean(updated), reconcile: false }
     }
     if (event.type === "message.part.updated") {
+      thread.lastStreamEventAt = Date.now()
       const part = projectPart(event.part, event.part?.id)
       if (!part) return { changed: false, reconcile: false }
       const existing = thread.messages.find((message) => message.id === part.messageID)
@@ -669,6 +674,7 @@
     // inferring type from `field`. If the delta arrives before its part.updated,
     // default to a text part.
     if (event.type === "message.part.delta" && event.field === "text") {
+      thread.lastStreamEventAt = Date.now()
       const existing = thread.messages.find((message) => message.id === event.messageID)
       const message = ensureMessage(thread, event.messageID, existing?.role || "assistant")
       let part = message.parts.find((item) => item.id === event.partID)
@@ -715,7 +721,7 @@
     if (!thread || !threadIsBusy(thread)) return true
     if (serverStatus?.type === "idle") return true
     if (!hasAssistantOutputAfterLastUser(thread)) return true
-    return false
+    return Date.now() - (thread.lastStreamEventAt || 0) > LIVE_STREAM_STALE_MS
   }
 
   function hasRunningTool(thread) {

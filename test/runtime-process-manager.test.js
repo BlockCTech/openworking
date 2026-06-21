@@ -982,6 +982,7 @@ test("runtime manager projects stream events independently from the diagnostic t
   assert.deepEqual(manager.snapshot().activeSessionStatus, { type: "busy" })
   assert.equal(manager.snapshot().activity, "running")
   assert.equal(manager.snapshot().timeline.length, 300)
+  assert.ok(manager.snapshot().logs.some((entry) => entry.message === "[Tool] Tool read completed successfully."))
   assert.deepEqual(stream[1], {
     type: "message.part.updated",
     sessionID: "sess_active",

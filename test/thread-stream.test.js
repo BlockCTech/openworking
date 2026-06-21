@@ -961,6 +961,17 @@ test("needsThreadRehydration rehydrates idle, stale, and stuck threads but prese
     part: { id: "part_1", messageID: "msg_a", type: "text", text: "Working on it" }
   })
   assert.equal(needsThreadRehydration(liveStream, { type: "busy" }), false)
+
+  const stalePartial = createThreadStream("sess_partial")
+  addOptimisticUser(stalePartial, "Hello")
+  stalePartial.status = { type: "busy" }
+  applyThreadEvent(stalePartial, {
+    type: "message.part.updated",
+    sessionID: "sess_partial",
+    part: { id: "part_1", messageID: "msg_a", type: "text", text: "Partial answer" }
+  })
+  stalePartial.lastStreamEventAt = Date.now() - 61_000
+  assert.equal(needsThreadRehydration(stalePartial, { type: "busy" }), true)
 })
 
 // Models the renderer's per-session routing: one thread per session, kept live

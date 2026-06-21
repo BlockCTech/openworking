@@ -213,6 +213,50 @@ test("runtime reconnect falls back to new-session flow when the active session i
   )
 })
 
+test("refreshSessionData restores the active session when background rehydrate fails", async () => {
+  const previousOpenworking = global.window.openworking
+  const { refreshSessionData, state } = __test
+  const calls = []
+
+  global.window.openworking = {
+    runtime: {
+      async listSessions() {
+        return [{ id: "sess_active" }, { id: "sess_background" }]
+      },
+      async listMessages({ sessionId }) {
+        calls.push(sessionId)
+        if (sessionId === "sess_background") throw new Error("background failed")
+        return []
+      }
+    }
+  }
+
+  Object.assign(state, {
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_active",
+    sessionsByProject: {},
+    threads: new Map([
+      ["sess_active", { sessionId: "sess_active", status: { type: "busy" }, messages: [] }],
+      ["sess_background", { sessionId: "sess_background", status: { type: "busy" }, messages: [] }]
+    ]),
+    runtime: {
+      status: "running",
+      project: { id: "proj_1" },
+      sessionStatuses: {
+        sess_active: { type: "busy" },
+        sess_background: { type: "busy" }
+      }
+    }
+  })
+
+  try {
+    await assert.rejects(refreshSessionData(), /background failed/)
+    assert.deepEqual(calls, ["sess_background", "sess_active"])
+  } finally {
+    global.window.openworking = previousOpenworking
+  }
+})
+
 test("sendPrompt restores the draft and surfaces runtime startup failures", async () => {
   const previousDocument = global.document
   const previousRequestAnimationFrame = global.requestAnimationFrame
