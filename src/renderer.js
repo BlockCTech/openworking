@@ -234,6 +234,7 @@ const RIGHT_FILE_MAX_WIDTH = 420
 const DOCUMENT_WIDTH_KEY = "openworking:document-viewer-w"
 const DOCUMENT_MIN_WIDTH = 300
 const DOCUMENT_MAX_WIDTH = 900
+const EXPANDED_KEY = "openworking:expanded-projects"
 
 function setSidebarWidth(width) {
   const clamped = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(width)))
@@ -266,6 +267,26 @@ function applyStoredRightFileSidebarWidth() {
 function applyStoredDocumentViewerWidth() {
   const stored = Number(localStorage.getItem(DOCUMENT_WIDTH_KEY))
   if (Number.isFinite(stored) && stored > 0) setDocumentViewerWidth(stored)
+}
+
+// Reads the persisted set of expanded sidebar project ids. Returns an empty Set on missing or
+// malformed storage so a corrupt value can never throw during startup.
+function loadStoredExpanded() {
+  try {
+    const ids = JSON.parse(localStorage.getItem(EXPANDED_KEY) || "[]")
+    return new Set(Array.isArray(ids) ? ids : [])
+  } catch (error) {
+    return new Set()
+  }
+}
+
+// Writes the current expanded set back to storage. A storage failure must not break a render.
+function persistExpanded() {
+  try {
+    localStorage.setItem(EXPANDED_KEY, JSON.stringify([...state.expanded]))
+  } catch (error) {
+    // Ignore — persistence is best-effort.
+  }
 }
 
 applyStoredSidebarWidth()
@@ -585,10 +606,17 @@ async function loadInitialState() {
     state.installStatus = status
     render()
   })
+  // Restore the accordions the user had open last session, pruning ids for projects that no
+  // longer exist. The active project is always opened below so the very first run still shows
+  // its sessions even with empty storage.
+  for (const id of loadStoredExpanded()) {
+    if (projects.some((project) => project.id === id)) state.expanded.add(id)
+  }
   if (projects[0]) {
     state.activeProjectId = projects[0].id
     state.expanded.add(projects[0].id)
   }
+  persistExpanded()
   render()
   checkAppVersion()
   if (projects[0]) {
@@ -3640,6 +3668,7 @@ async function handleAction(event) {
     if (action === "addProject") await addProject()
     if (action === "collapseAll") {
       state.expanded.clear()
+      persistExpanded()
       render()
     }
     if (action === "toggleSidebar") toggleSidebar()
@@ -3839,6 +3868,7 @@ async function openProject(projectId, { selectLatest = true } = {}) {
   const sameProject = state.activeProjectId === projectId
   if (sameProject && state.expanded.has(projectId) && state.nav === "session" && state.runtime?.project?.id === projectId) {
     state.expanded.delete(projectId)
+    persistExpanded()
     render()
     return
   }
@@ -3850,6 +3880,7 @@ async function openProject(projectId, { selectLatest = true } = {}) {
   resetActiveThread()
   state.nav = "session"
   state.expanded.add(projectId)
+  persistExpanded()
   state.loading = true
   let scrollLatest = false
   render()
@@ -3918,6 +3949,7 @@ async function newSession(projectId, { clearAttachments = true } = {}) {
   resetActiveThread()
   state.nav = "session"
   state.expanded.add(projectId)
+  persistExpanded()
   render()
   if (state.runtime?.project?.id !== projectId || state.runtime.status !== "running") {
     state.loading = true
@@ -4255,6 +4287,8 @@ async function removeProject(projectId) {
   await window.openworking.projects.remove(projectId)
   state.projects = await window.openworking.projects.list()
   delete state.sessionsByProject[projectId]
+  state.expanded.delete(projectId)
+  persistExpanded()
   if (state.activeProjectId === projectId) {
     state.activeProjectId = state.projects[0]?.id || null
     resetFileTree(state.activeProjectId)
@@ -4675,6 +4709,8 @@ if (typeof module !== "undefined" && module.exports) {
     fileMentionTokenPattern,
     filterPromptAttachments,
     livePendingFileMentions,
+    loadStoredExpanded,
+    persistExpanded,
     renderPromptOverlayHtml,
     renderTextWithFileMentions,
     resolveFileMentionsFromPrompt,

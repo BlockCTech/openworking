@@ -42,6 +42,8 @@ const {
   fileMentionTokenPattern,
   filterPromptAttachments,
   livePendingFileMentions,
+  loadStoredExpanded,
+  persistExpanded,
   renderPromptOverlayHtml,
   renderTextWithFileMentions,
   resolveFileMentionsFromPrompt,
@@ -77,6 +79,43 @@ function fakeDocument() {
     addEventListener() {}
   }
 }
+
+function backedLocalStorage(initial = {}) {
+  const store = new Map(Object.entries(initial))
+  return {
+    getItem(key) { return store.has(key) ? store.get(key) : null },
+    setItem(key, value) { store.set(key, String(value)) },
+    removeItem(key) { store.delete(key) }
+  }
+}
+
+test("expanded sidebar projects round-trip through localStorage", () => {
+  const previousStorage = global.localStorage
+  global.localStorage = backedLocalStorage()
+  const previousExpanded = __test.state.expanded
+  try {
+    __test.state.expanded = new Set(["proj_a", "proj_b"])
+    persistExpanded()
+    assert.deepEqual([...loadStoredExpanded()], ["proj_a", "proj_b"])
+  } finally {
+    __test.state.expanded = previousExpanded
+    global.localStorage = previousStorage
+  }
+})
+
+test("loadStoredExpanded returns an empty set for missing or malformed storage", () => {
+  const previousStorage = global.localStorage
+  try {
+    global.localStorage = backedLocalStorage()
+    assert.equal(loadStoredExpanded().size, 0)
+    global.localStorage = backedLocalStorage({ "openworking:expanded-projects": "{not json" })
+    assert.equal(loadStoredExpanded().size, 0)
+    global.localStorage = backedLocalStorage({ "openworking:expanded-projects": '{"a":1}' })
+    assert.equal(loadStoredExpanded().size, 0)
+  } finally {
+    global.localStorage = previousStorage
+  }
+})
 
 test("file mentions stay live only for exact standalone tokens", () => {
   const mentions = [{ token: "@health_check.py", path: "src/health_check.py", name: "health_check.py" }]
