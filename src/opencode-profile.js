@@ -3,6 +3,7 @@ const fs = require("node:fs")
 const path = require("node:path")
 const AdmZip = require("adm-zip")
 const { defaultConfigPath, ensureDefaultAgentPrompt, ensureDefaultManagedModelConfig, ensureOpencodeConfig, readOpencodeConfig, writeOpencodeConfig } = require("./opencode-config")
+const { applyProjectInstruction, ensureGlobalMemory } = require("./memory-store")
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MCP_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MCP_SERVER_TYPES = ["remote", "local"]
@@ -21,9 +22,10 @@ const BUILT_IN_SKILLS = [
   { name: "docx", description: "Read, create, edit and visually validate Word documents." },
   { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
-  { name: "webapp-testing", description: "Test local web applications with the project's existing tools or Playwright." }
+  { name: "webapp-testing", description: "Test local web applications with the project's existing tools or Playwright." },
+  { name: "cross-chat-memory", description: "Remember durable facts, preferences and decisions so they carry across separate chats." }
 ]
-const BUILT_IN_TOOLS = ["translate_document.js"]
+const BUILT_IN_TOOLS = ["translate_document.js", "remember.js"]
 const RESERVED_PERMISSION_KEYS = new Set(["__proto__", "prototype", ...Object.getOwnPropertyNames(Object.prototype)])
 
 function defaultProfileDir(userDataPath) {
@@ -536,6 +538,8 @@ function ensureOpenworkingProfile({ userDataPath }) {
   fs.mkdirSync(profileDir, { recursive: true })
   const skills = syncBuiltInSkills(profileDir)
   const tools = syncBuiltInTools(profileDir)
+  // Cross-chat memory: the global AGENTS.md is loaded by OpenCode into every session automatically.
+  ensureGlobalMemory(profileDir)
   const current = ensureOpencodeConfig(configPath)
   const config = ensureDefaultAgentPrompt(ensureSkillPermissions(ensureDefaultManagedModelConfig(current.config)))
   writeOpencodeConfig(config, configPath)
@@ -544,6 +548,15 @@ function ensureOpenworkingProfile({ userDataPath }) {
 
 function readProfileConfig(profile) {
   return readOpencodeConfig(profile.configPath)
+}
+
+// Point OpenCode's `instructions` at the active project's memory file so its facts load into every
+// session for that project. Keeps exactly one managed entry (swapped per project), leaving any
+// user-authored `instructions` untouched. Pass projectId null to clear it (no project open).
+function setActiveProjectMemory(profile, projectId) {
+  const config = readProfileConfig(profile).config
+  applyProjectInstruction(config, profile.profileDir, projectId || null)
+  return writeProfileConfig(profile, config)
 }
 
 function writeProfileConfig(profile, config) {
@@ -597,6 +610,7 @@ module.exports = {
   removeMcpServer,
   setMcpServerEnabled,
   readProfileConfig,
+  setActiveProjectMemory,
   syncBuiltInSkills,
   syncBuiltInTools,
   writeEditableProfileConfig,

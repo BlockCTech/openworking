@@ -3,7 +3,8 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { assertTranslationArtifact, assertProjectFile, listProjectDirectory, previewTranslationArtifact, readProjectFileContent } = require("./artifact-path")
 const { AttachmentRegistry } = require("./attachment-registry")
-const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, writeEditableProfileConfig } = require("./opencode-profile")
+const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, setActiveProjectMemory, writeEditableProfileConfig } = require("./opencode-profile")
+const { SCOPES, ensureProjectMemory, readMemory, writeMemory } = require("./memory-store")
 const { ProjectRegistry } = require("./project-registry")
 const { RuntimeProcessManager } = require("./runtime/process-manager")
 const { checkDesktopVersion, downloadInstaller, installDmg, versionCheckConfigured } = require("./version-check")
@@ -245,6 +246,38 @@ function registerIpc() {
     }
   })
 
+  // Cross-chat memory: read/write the global and active-project memory files. The active project
+  // comes from the runtime snapshot (its id keys the per-project file). Global memory always exists.
+  function activeProjectId() {
+    return runtimeManager.snapshot().project?.id || null
+  }
+  ipcMain.handle("memory:get", () => {
+    const profileDir = opencodeProfile.profileDir
+    const projectId = activeProjectId()
+    if (projectId) ensureProjectMemory(profileDir, projectId)
+    return {
+      global: readMemory(profileDir, "global"),
+      project: projectId ? readMemory(profileDir, "project", projectId) : "",
+      projectId,
+      hasProject: !!projectId
+    }
+  })
+  ipcMain.handle("memory:save", async (_event, { scope, content }) => {
+    if (!SCOPES.includes(scope)) throw new Error(`Invalid memory scope: ${scope}`)
+    const profileDir = opencodeProfile.profileDir
+    const projectId = activeProjectId()
+    if (scope === "project" && !projectId) throw new Error("Open a project before editing its memory.")
+    writeMemory(profileDir, scope, projectId, content)
+    // Re-read so OpenCode picks up the edited files on the next session.
+    if (runtimeManager.snapshot().status === "running") await runtimeManager.reload()
+    return {
+      global: readMemory(profileDir, "global"),
+      project: projectId ? readMemory(profileDir, "project", projectId) : "",
+      projectId,
+      hasProject: !!projectId
+    }
+  })
+
   ipcMain.handle("attachments:pick", async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: "Attach files",
@@ -344,12 +377,16 @@ function registerIpc() {
   ipcMain.handle("runtime:openProject", async (_event, { project }) => {
     opencodeProfile = ensureOpenworkingProfile({ userDataPath: app.getPath("userData") })
     runtimeManager.profile = opencodeProfile
+    // Point cross-chat memory's `instructions` entry at this project before the runtime reads config.
+    setActiveProjectMemory(opencodeProfile, project.id)
     projectRegistry.touch(project.id)
     return runtimeManager.openProject({ project })
   })
   ipcMain.handle("runtime:start", async (_event, { project }) => {
     opencodeProfile = ensureOpenworkingProfile({ userDataPath: app.getPath("userData") })
     runtimeManager.profile = opencodeProfile
+    // Point cross-chat memory's `instructions` entry at this project before the runtime reads config.
+    setActiveProjectMemory(opencodeProfile, project.id)
     projectRegistry.touch(project.id)
     return runtimeManager.openProject({ project })
   })

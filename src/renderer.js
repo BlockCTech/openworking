@@ -14,7 +14,8 @@ const BUILT_IN_SKILLS = [
   { name: "docx", description: "Read, create, edit and visually validate Word documents." },
   { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
-  { name: "webapp-testing", description: "Test local web applications with focused browser automation." }
+  { name: "webapp-testing", description: "Test local web applications with focused browser automation." },
+  { name: "cross-chat-memory", description: "Remember durable facts, preferences and decisions so they carry across separate chats." }
 ]
 
 const icons = {
@@ -49,6 +50,7 @@ const icons = {
   cloud: '<svg viewBox="0 0 24 24"><path d="M7 18a4.2 4.2 0 0 1-.4-8.38 5 5 0 0 1 9.61-1.1A3.8 3.8 0 0 1 17.5 18z"/></svg>',
   logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
   server: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>',
+  brain: '<svg viewBox="0 0 24 24"><path d="M9.5 3A2.5 2.5 0 0 0 7 5.5v.5a3 3 0 0 0-2 5.6V13a3 3 0 0 0 3 3v1.5A2.5 2.5 0 0 0 12 20m0-17a2.5 2.5 0 0 1 2.5 2.5v.5a3 3 0 0 1 2 5.6V13a3 3 0 0 1-3 3v1.5A2.5 2.5 0 0 1 12 20m0-17v17"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'
 }
 
@@ -139,7 +141,12 @@ const state = {
   mcpStatus: {},                   // name -> "connected" | "needs_auth" | "failed" | "disabled"
   mcpStatusError: {},              // name -> opencode's real failure reason (from GET /mcp), if any
   mcpAuthenticating: {},           // name -> true while an auth flow is in progress
-  skillsTab: "skills",             // skills | mcp (mcp tab is the Extensions marketplace)
+  skillsTab: "skills",             // skills | mcp | memory (mcp tab is the Extensions marketplace)
+  memory: null,                    // { global, project, projectId, hasProject } once loaded
+  memoryDraft: null,               // { global, project } edited text, mirrors `memory` while editing
+  memoryLoading: false,
+  memorySaving: null,              // "global" | "project" while a save is in flight
+  memoryError: null,
   mcpModalOpen: false,
   mcpSaving: false,
   mcpError: null,
@@ -645,6 +652,42 @@ async function refreshMcpStatus() {
     if (state.nav === "skills" && state.skillsTab === "mcp") render()
   } catch {
     // Runtime not ready; leave status empty.
+  }
+}
+
+// Cross-chat memory: load both scopes into state, seeding the editable draft. Called when the
+// Memory tab is opened. Re-seeds the draft from disk so the editor reflects the assistant's writes.
+async function loadMemory() {
+  state.memoryLoading = true
+  state.memoryError = null
+  render()
+  try {
+    const memory = await window.openworking.memory.get()
+    state.memory = memory
+    state.memoryDraft = { global: memory.global || "", project: memory.project || "" }
+  } catch (error) {
+    state.memoryError = error?.message || "Failed to load memory."
+  } finally {
+    state.memoryLoading = false
+    if (state.nav === "skills" && state.skillsTab === "memory") render()
+  }
+}
+
+async function saveMemory(scope) {
+  if (!["global", "project"].includes(scope) || state.memorySaving) return
+  const content = state.memoryDraft?.[scope] ?? ""
+  state.memorySaving = scope
+  state.memoryError = null
+  render()
+  try {
+    const memory = await window.openworking.memory.save(scope, content)
+    state.memory = memory
+    state.memoryDraft = { global: memory.global || "", project: memory.project || "" }
+  } catch (error) {
+    state.memoryError = error?.message || "Failed to save memory."
+  } finally {
+    state.memorySaving = null
+    if (state.nav === "skills" && state.skillsTab === "memory") render()
   }
 }
 
@@ -2443,7 +2486,8 @@ function renderSettingsAdvanced() {
 }
 
 function renderSkillsScreen() {
-  const tab = state.skillsTab === "mcp" ? "mcp" : "skills"
+  const tab = ["mcp", "memory"].includes(state.skillsTab) ? state.skillsTab : "skills"
+  const panel = tab === "mcp" ? renderMcpPanel() : tab === "memory" ? renderMemoryPanel() : renderSkillsPanel()
   return `
     <main class="main">
       ${renderHeader("Skills", "Bundled and custom OpenCode skills")}
@@ -2451,11 +2495,39 @@ function renderSkillsScreen() {
         <div class="skills-tabs">
           <button class="skills-tab ${tab === "skills" ? "active" : ""}" data-skills-tab="skills">${icon("blocks")}<span>Skills</span></button>
           <button class="skills-tab ${tab === "mcp" ? "active" : ""}" data-skills-tab="mcp">${icon("server")}<span>Extensions</span></button>
+          <button class="skills-tab ${tab === "memory" ? "active" : ""}" data-skills-tab="memory">${icon("brain")}<span>Memory</span></button>
         </div>
-        ${tab === "mcp" ? renderMcpPanel() : renderSkillsPanel()}
+        ${panel}
       </div>
       ${renderSkillPreviewModal()}
     </main>
+  `
+}
+
+// Cross-chat memory: editable text for the global memory (applies everywhere) and the active
+// project's memory (applies only to it). The assistant writes these via the `remember` tool; here
+// the user can review, edit, or clear them. Edits are saved per-scope and re-read by the runtime.
+function renderMemoryPanel() {
+  if (state.memoryLoading && !state.memory) {
+    return `<section class="admin-panel"><div class="config-note">Loading memory…</div></section>`
+  }
+  const draft = state.memoryDraft || { global: "", project: "" }
+  const hasProject = state.memory?.hasProject
+  const card = (scope, title, subtitle, value, disabled) => `
+    <section class="admin-panel memory-panel">
+      <div class="panel-head"><div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(subtitle)}</p></div>
+        <button class="primary-btn" data-memory-save="${scope}" ${disabled || state.memorySaving ? "disabled" : ""}>
+          ${state.memorySaving === scope ? "Saving…" : "Save"}
+        </button>
+      </div>
+      <textarea class="memory-editor" data-memory-field="${scope}" spellcheck="false" ${disabled ? "disabled" : ""}
+        placeholder="${disabled ? "Open a project to edit its memory." : "Nothing remembered yet. The assistant adds facts here, or you can add them manually as Markdown bullets."}">${escapeHtml(value || "")}</textarea>
+    </section>
+  `
+  return `
+    ${state.memoryError ? `<div class="config-note field-error">${escapeHtml(state.memoryError)}</div>` : ""}
+    ${card("global", "Global memory", "Facts the assistant recalls in every chat across all projects.", draft.global, false)}
+    ${card("project", "Project memory", hasProject ? "Facts the assistant recalls in chats for the current project only." : "Open a project to give it its own memory.", draft.project, !hasProject)}
   `
 }
 
@@ -3071,6 +3143,14 @@ function bindEvents() {
     state.skillsTab = element.dataset.skillsTab
     render()
     if (state.skillsTab === "mcp") refreshMcpStatus()
+    if (state.skillsTab === "memory") loadMemory()
+  }))
+  document.querySelectorAll("[data-memory-field]").forEach((element) => element.addEventListener("input", () => {
+    if (!state.memoryDraft) return
+    state.memoryDraft[element.dataset.memoryField] = element.value
+  }))
+  document.querySelectorAll("[data-memory-save]").forEach((element) => element.addEventListener("click", () => {
+    saveMemory(element.dataset.memorySave)
   }))
   document.querySelectorAll("[data-mcp-type]").forEach((element) => element.addEventListener("click", () => {
     if (state.mcpSaving || !state.mcpDraft) return

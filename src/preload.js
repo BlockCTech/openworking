@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld("openworking", {
     clearAuth: (name) => ipcRenderer.invoke("mcp:clearAuth", name),
     openDocs: (url) => ipcRenderer.invoke("mcp:openDocs", url)
   },
+  memory: {
+    get: () => ipcRenderer.invoke("memory:get"),
+    save: (scope, content) => ipcRenderer.invoke("memory:save", { scope, content })
+  },
   attachments: {
     pick: () => ipcRenderer.invoke("attachments:pick"),
     addProjectFile: (filePath) => ipcRenderer.invoke("attachments:addProjectFile", filePath),

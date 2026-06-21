@@ -1081,6 +1081,11 @@ input[readonly], label textarea[readonly] { color: var(--text-2); background: va
 .provider-tabs button.active { border-color: var(--accent); color: var(--accent-text); background: var(--accent-soft); }
 .provider-tabs svg { width: 15px; height: 15px; }
 .config-note { margin-top: 12px; overflow-wrap: anywhere; }
+.memory-panel { margin-bottom: 14px; }
+.memory-editor { width: 100%; min-height: 160px; margin-top: 12px; padding: 10px 12px; resize: vertical; border: 1px solid var(--border-input); border-radius: var(--radius-sm); outline: 0; background: var(--surface-2); color: var(--text); font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12.5px; line-height: 1.5; }
+.memory-editor::placeholder { color: var(--text-3); }
+.memory-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.memory-editor:disabled { color: var(--text-3); background: var(--bg); cursor: not-allowed; }
 .empty-state { display: grid; flex: 1; place-content: center; justify-items: center; gap: 10px; text-align: center; }
 .empty-state h1 { font-size: 22px; }
 .empty-state p { color: var(--text-2); }
