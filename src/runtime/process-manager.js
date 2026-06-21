@@ -1,5 +1,6 @@
-const { spawn } = require("node:child_process")
+const { spawn, execFile } = require("node:child_process")
 const fs = require("node:fs")
+const os = require("node:os")
 const http = require("node:http")
 const net = require("node:net")
 const path = require("node:path")
@@ -7,30 +8,34 @@ const { fileURLToPath } = require("node:url")
 const { defaultConfigPath, readOpencodeConfig } = require("../opencode-config")
 const { officeAttachmentContext } = require("../office-attachment-context")
 
-// Office formats the model/gateway cannot ingest as media. They are routed to the
-// bundled translate_document tool (via the translate-office-document skill) by their
-// local path instead of being sent as a `file` part — mirrors document-tools mimeTypes.
+// Document formats the model/gateway should translate through the bundled
+// translate_document tool by local path instead of ingesting as a raw `file` part.
 const OFFICE_ATTACHMENT_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",   // .docx
   "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"          // .xlsx
 ])
+const MARKDOWN_ATTACHMENT_MIMES = new Set(["text/markdown", "text/x-markdown"])
 const EXTRACTABLE_OFFICE_ATTACHMENT_MIMES = new Set([
   "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"          // .xlsx
 ])
 
 // Build the OpenCode prompt `parts`: media attachments (pdf/image/...) stay as `file`
-// parts the model can read; Office attachments are surfaced as local-path lines in the
-// text so the skill can pick them up as translate_document `inputPath`.
+// parts the model can read; translated document attachments are surfaced as
+// local-path lines in the text so the skill can pick them up as translate_document `inputPath`.
 function buildPromptParts({ prompt, attachments = [] }) {
-  const officePaths = []
+  const documentPaths = []
   const officeContexts = []
+  const localPaths = []
   const fileParts = []
   for (const attachment of attachments) {
-    if (OFFICE_ATTACHMENT_MIMES.has(attachment.mime)) {
-      const localPath = attachmentLocalPath(attachment)
-      officePaths.push(localPath)
+    const localPath = attachmentLocalPath(attachment)
+    const extension = path.extname(localPath || attachment.filename || "").toLowerCase()
+    const isOffice = OFFICE_ATTACHMENT_MIMES.has(attachment.mime)
+    const isMarkdown = MARKDOWN_ATTACHMENT_MIMES.has(attachment.mime) || extension === ".md" || extension === ".markdown"
+    if (isOffice || isMarkdown) {
+      documentPaths.push(localPath)
       if (EXTRACTABLE_OFFICE_ATTACHMENT_MIMES.has(attachment.mime)) {
         officeContexts.push(officeAttachmentContext({
           filePath: localPath,
@@ -38,6 +43,10 @@ function buildPromptParts({ prompt, attachments = [] }) {
           mime: attachment.mime
         }))
       }
+      continue
+    }
+    if (attachment.mime === "application/octet-stream") {
+      localPaths.push(attachmentLocalPath(attachment))
       continue
     }
     fileParts.push({
@@ -48,15 +57,22 @@ function buildPromptParts({ prompt, attachments = [] }) {
     })
   }
   const base = String(prompt).trim()
-  const text = officePaths.length
-    ? [
-      base,
-      "Attached Office files are provided as local paths plus extracted text context because the configured gateway accepts text/images, not raw Office binaries.",
-      "If the user asks to translate an Office file, call the translate_document tool with the exact local inputPath. Do not use shell/write scripts for translation artifacts. Do not claim an output path unless it is returned in translate_document metadata.artifacts.",
-      `Attached files (local paths):\n${officePaths.map((p) => `- ${p}`).join("\n")}`,
+  const sections = [base]
+  if (documentPaths.length) {
+    sections.push(
+      "Attached document files are provided as local paths plus extracted text context when available because the configured gateway accepts text/images, not raw document binaries.",
+      "If the user asks to translate a DOCX, Markdown, PDF, PPTX, or XLSX file, call the translate_document tool with the exact local inputPath. Do not use shell/write scripts for translation artifacts. Do not claim an output path unless it is returned in translate_document metadata.artifacts.",
+      `Attached files (local paths):\n${documentPaths.map((p) => `- ${p}`).join("\n")}`,
       officeContexts.filter(Boolean).length ? `Extracted Office context:\n${officeContexts.filter(Boolean).join("\n\n")}` : ""
-    ].filter(Boolean).join("\n\n")
-    : base
+    )
+  }
+  if (localPaths.length) {
+    sections.push(
+      "Attached files are provided as local paths because their media type cannot be sent to the model as a binary file part.",
+      `Attached files (local paths):\n${localPaths.map((p) => `- ${p}`).join("\n")}`
+    )
+  }
+  const text = sections.filter(Boolean).join("\n\n")
   return [...fileParts, { type: "text", text }]
 }
 
@@ -79,6 +95,11 @@ function redactString(value) {
   return String(value)
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/g, "Bearer [redacted]")
     .replace(/(OPENWORKING_TRANSLATION_API_KEY)=\S+/g, "$1=[redacted]")
+    // Raising the opencode log level can surface OAuth material in log lines / query strings.
+    // Redact secrets and authorization-code grant material in both `key=value` and `"key":"value"`
+    // shapes so nothing sensitive reaches state.logs / the Diagnostics panel.
+    .replace(/(client_secret|code_verifier|access_token|refresh_token|id_token|authorization_code)["']?\s*[=:]\s*["']?[A-Za-z0-9._~+/=-]+/gi, "$1=[redacted]")
+    .replace(/([?&]code=)[A-Za-z0-9._~+/=-]+/g, "$1[redacted]")
 }
 
 function redactValue(value, key = "") {
@@ -210,6 +231,56 @@ function translationGatewayEnv(configPath, env = process.env) {
     ...(apiKey ? { OPENWORKING_TRANSLATION_API_KEY: apiKey } : {}),
     ...(model ? { OPENWORKING_TRANSLATION_MODEL: model } : {})
   }
+}
+
+// Directories where Node (and therefore `npx`) is commonly installed but which a GUI app launched
+// from Finder/Dock never sees: launchd hands the app a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin),
+// missing Homebrew, nvm, Volta, etc. Used as a fallback when the login shell can't be queried.
+function commonNodeBinDirs(env = process.env) {
+  const home = os.homedir()
+  const dirs = ["/opt/homebrew/bin", "/usr/local/bin", path.join(home, ".volta", "bin"), path.join(home, ".bun", "bin")]
+  // nvm installs one bin dir per Node version; include them all (newest is resolved by opencode's lookup).
+  const nvmVersions = path.join(home, ".nvm", "versions", "node")
+  try {
+    for (const entry of fs.readdirSync(nvmVersions)) {
+      dirs.push(path.join(nvmVersions, entry, "bin"))
+    }
+  } catch {}
+  return dirs.filter((dir) => {
+    try {
+      return fs.statSync(dir).isDirectory()
+    } catch {
+      return false
+    }
+  })
+}
+
+// The login shell's PATH (set up by ~/.zshrc, ~/.zprofile, nvm, etc.). `-ilc` runs an interactive
+// login shell so version managers initialize. POSIX-only — skipped on win32. Returns [] on any failure.
+function loginShellPathParts() {
+  return new Promise((resolve) => {
+    if (process.platform === "win32") return resolve([])
+    const shell = process.env.SHELL || "/bin/zsh"
+    execFile(shell, ["-ilc", "echo $PATH"], { encoding: "utf8", timeout: 4000 }, (error, stdout) => {
+      if (error) return resolve([])
+      resolve(String(stdout).trim().split(path.delimiter).filter(Boolean))
+    })
+  })
+}
+
+let cachedUserPath = null
+
+// Builds a PATH that includes the user's real toolchain so spawned local MCP servers (e.g.
+// `npx backlog-mcp-server`) resolve. Without this, a packaged macOS app inherits launchd's minimal
+// PATH and opencode reports `Executable not found in $PATH: "npx"`. Cached: the login shell is
+// queried at most once per app session. Pass `force` in tests to bypass the cache.
+async function resolveUserPath({ force = false } = {}) {
+  if (cachedUserPath && !force) return cachedUserPath
+  const currentParts = (process.env.PATH || "").split(path.delimiter).filter(Boolean)
+  const shellParts = await loginShellPathParts()
+  const merged = [...shellParts, ...currentParts, ...commonNodeBinDirs()]
+  cachedUserPath = Array.from(new Set(merged)).join(path.delimiter)
+  return cachedUserPath
 }
 
 function commandModelValue(model) {
@@ -374,15 +445,40 @@ function projectQuestion(properties) {
   }
 }
 
-// OpenCode's permission subsystem asks the user to approve a tool action. Whitelist only
-// the display fields needed to describe what is being requested.
+// Flatten a permission's `metadata` object into a small list of displayable key/value strings so
+// the renderer can show what is actually being approved (e.g. which ticket, which status). Only
+// primitive values are surfaced; nested objects/arrays are JSON-stringified and truncated. This
+// keeps the renderer↔main boundary to whitelisted, display-only data.
+function projectPermissionDetails(metadata) {
+  if (!metadata || typeof metadata !== "object") return []
+  const details = []
+  for (const [key, value] of Object.entries(metadata)) {
+    if (value == null) continue
+    let text
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      text = String(value)
+    } else {
+      try { text = JSON.stringify(value) } catch { continue }
+    }
+    if (!text) continue
+    details.push({ key: String(key), value: text.length > 200 ? `${text.slice(0, 200)}…` : text })
+    if (details.length >= 12) break
+  }
+  return details
+}
+
+// OpenCode's permission subsystem asks the user to approve a tool action. Whitelist only the
+// display fields needed to describe what is being requested. `permission` is the tool name
+// (e.g. `backlog_update_issue`); `metadata` carries the tool call arguments we surface as details.
 function projectPermission(properties) {
+  const details = projectPermissionDetails(properties?.metadata)
   return {
     ...(properties?.title ? { title: String(properties.title) } : {}),
+    ...(properties?.permission ? { permission: String(properties.permission) } : {}),
     ...(properties?.type ? { type: String(properties.type) } : {}),
     ...(properties?.pattern ? { pattern: String(properties.pattern) } : {}),
     ...(properties?.callID ? { callID: String(properties.callID) } : {}),
-    ...(properties?.metadata && typeof properties.metadata === "object" ? { metadata: properties.metadata } : {})
+    ...(details.length ? { details } : {})
   }
 }
 
@@ -441,6 +537,19 @@ function projectRuntimeEvent(event) {
   if (event?.type === "permission.replied") {
     const requestID = requestIdOf(properties)
     if (properties.sessionID && requestID) return { type: event.type, sessionID: properties.sessionID, requestID }
+  }
+  if (
+    event?.type === "mcp.status.needs_auth" ||
+    event?.type === "mcp.status.connected" ||
+    event?.type === "mcp.status.failed" ||
+    event?.type === "mcp.status.disabled"
+  ) {
+    const name = properties.name || properties.mcpName
+    if (name) return { type: event.type, name: String(name), status: event.type.slice("mcp.status.".length) }
+  }
+  if (event?.type === "mcp.browser.open.failed") {
+    const name = properties.mcpName || properties.name
+    if (name) return { type: event.type, name: String(name), url: properties.url || "" }
   }
   return null
 }
@@ -573,9 +682,14 @@ class RuntimeProcessManager {
     const runtimeStateDir = path.join(configDir, "state")
     const runtimeCacheDir = path.join(configDir, "cache")
     const runtimeBin = resolveRuntimeBin()
+    // `--print-logs` routes opencode's structured logs to stderr (captured into state.logs / the
+    // Diagnostics panel) at its default level. Without it, opencode errors — e.g. an MCP OAuth
+    // connect failure — only land in opencode's log file and surface to us as an opaque
+    // "HTTP 500 UnknownError". We intentionally do NOT raise to --log-level DEBUG, which would dump
+    // OAuth request bodies (secrets) into logs. The OPENWORKING_RUNTIME_ARGS override is unchanged.
     const runtimeArgs = process.env.OPENWORKING_RUNTIME_ARGS
       ? process.env.OPENWORKING_RUNTIME_ARGS.split(" ").filter(Boolean)
-      : ["serve", "--port", String(port), "--hostname", "127.0.0.1"]
+      : ["serve", "--port", String(port), "--hostname", "127.0.0.1", "--print-logs"]
     const password = `ow_${Date.now().toString(36)}_${Math.random().toString(16).slice(2)}`
     const serverUrl = `http://127.0.0.1:${port}`
     const auth = basicAuth("opencode", password)
@@ -607,8 +721,12 @@ class RuntimeProcessManager {
       configPath,
       configDir
     })
+    const userPath = await resolveUserPath()
     const env = {
       ...process.env,
+      // Augment PATH with the user's real toolchain so opencode can spawn local MCP servers
+      // (e.g. `npx ...`). A packaged macOS app otherwise inherits launchd's minimal PATH.
+      PATH: userPath,
       OPENCODE_CONFIG: configPath,
       OPENCODE_CONFIG_DIR: configDir,
       XDG_DATA_HOME: runtimeDataDir,
@@ -724,6 +842,130 @@ class RuntimeProcessManager {
       model: command.model,
       hints: Array.isArray(command.hints) ? command.hints : []
     }))
+  }
+
+  async listMcpStatus() {
+    this.assertReady()
+    const result = await requestJson({
+      url: `${this.state.runtime.serverUrl}/mcp`,
+      auth: this.auth()
+    })
+    // The runtime returns a map of name -> { status, error? }. opencode's connect path records the
+    // real failure reason in `error` (the WARN log only prints the status), so we surface it here —
+    // this is how the actual cause of a `failed`/`needs_client_registration` server reaches the UI.
+    if (!result || typeof result !== "object") return []
+    const entries = Array.isArray(result) ? result : Object.entries(result)
+    return entries
+      .map((entry) => {
+        const [name, info] = Array.isArray(entry) ? entry : [entry?.name, entry]
+        if (!name) return null
+        const status = typeof info === "string" ? info : info?.status
+        const error = info && typeof info === "object" && info.error ? String(info.error) : null
+        return { name: String(name), status: status ? String(status) : "unknown", ...(error ? { error } : {}) }
+      })
+      .filter(Boolean)
+  }
+
+  // opencode collapses MCP connect/auth failures into an opaque "HTTP 500 UnknownError" with a
+  // `ref`. The real cause is logged to stderr (now captured into state.logs thanks to
+  // --print-logs). Pull the most recent error/warn log lines so the renderer can show the actual
+  // reason on the MCP card instead of "UnknownError".
+  recentRuntimeErrorText(limit = 4) {
+    const lines = (this.state.logs || [])
+      .filter((entry) => entry.level === "stderr" || entry.level === "error")
+      .map((entry) => String(entry.message || ""))
+      .filter((message) => /error|fail|unauthor|invalid|oauth|mcp|exception|panic/i.test(message))
+      .slice(-limit)
+    return lines.join("\n").trim()
+  }
+
+  // Wrap an MCP auth/connect HTTP call so a generic opencode 500 is enriched with the real error
+  // text from the captured runtime logs.
+  async mcpAuthRequest(name, path, label) {
+    try {
+      return await requestJson({
+        url: `${this.state.runtime.serverUrl}/mcp/${encodeURIComponent(name)}${path}`,
+        method: "POST",
+        auth: this.auth()
+      })
+    } catch (error) {
+      // Give opencode a moment to flush the correlated log line to stderr.
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      const detail = this.recentRuntimeErrorText()
+      this.log("error", `${label} failed for "${name}": ${error.message}${detail ? `\n${detail}` : ""}`)
+      if (detail) error.message = `${error.message}\nRuntime log:\n${detail}`
+      throw error
+    }
+  }
+
+  async startMcpAuth(name) {
+    this.assertReady()
+    if (!name) throw new Error("MCP server name is required.")
+    const result = await this.mcpAuthRequest(name, "/auth", "MCP start-auth")
+    return {
+      authorizationUrl: result?.authorizationUrl || "",
+      oauthState: result?.oauthState || null
+    }
+  }
+
+  async authenticateMcp(name) {
+    this.assertReady()
+    if (!name) throw new Error("MCP server name is required.")
+    return await this.mcpAuthRequest(name, "/auth/authenticate", "MCP authenticate")
+  }
+
+  async connectMcp(name) {
+    this.assertReady()
+    if (!name) throw new Error("MCP server name is required.")
+    return await requestJson({
+      url: `${this.state.runtime.serverUrl}/mcp/${encodeURIComponent(name)}/connect`,
+      method: "POST",
+      auth: this.auth()
+    })
+  }
+
+  async disconnectMcp(name) {
+    this.assertReady()
+    if (!name) throw new Error("MCP server name is required.")
+    return await requestJson({
+      url: `${this.state.runtime.serverUrl}/mcp/${encodeURIComponent(name)}/disconnect`,
+      method: "POST",
+      auth: this.auth()
+    })
+  }
+
+  // Path to opencode's MCP auth store inside the app-managed profile. opencode persists MCP OAuth
+  // material (tokens, dynamically-registered clientInfo, oauthState, codeVerifier) here keyed by
+  // the MCP server name. NOTE: this is `mcp-auth.json` — provider/login credentials live in a
+  // separate `auth.json`; we must only touch the MCP one.
+  authStorePath() {
+    const configDir = this.profile?.profileDir || path.join(this.userDataPath, "opencode-profile")
+    return path.join(configDir, "data", "opencode", "mcp-auth.json")
+  }
+
+  // Remove a server's stale MCP OAuth entry so the next auth starts clean. A failed first attempt
+  // (e.g. a dynamic registration before clientId was supplied) can leave partial clientInfo/oauthState
+  // that collides with a later pre-registered-app reconnect. Only entries that look like MCP OAuth
+  // entries are removed, so provider credentials sharing the name space are left untouched.
+  clearMcpAuth(name) {
+    const serverName = String(name || "")
+    if (!serverName) throw new Error("MCP server name is required.")
+    const storePath = this.authStorePath()
+    if (!fs.existsSync(storePath)) return { cleared: false }
+    let store
+    try {
+      store = JSON.parse(fs.readFileSync(storePath, "utf8"))
+    } catch {
+      return { cleared: false }
+    }
+    const entry = store && store[serverName]
+    const looksLikeMcpOauth = entry && typeof entry === "object" &&
+      ("tokens" in entry || "clientInfo" in entry || "oauthState" in entry || "codeVerifier" in entry)
+    if (!looksLikeMcpOauth) return { cleared: false }
+    delete store[serverName]
+    fs.writeFileSync(storePath, JSON.stringify(store, null, 2))
+    this.log("info", `Cleared stored MCP OAuth credentials for "${serverName}".`)
+    return { cleared: true }
   }
 
   async createSession({ title } = {}) {
@@ -895,7 +1137,7 @@ class RuntimeProcessManager {
     this.timeline("session.question.reply", { sessionId, requestID })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/question/${encodeURIComponent(requestID)}/reply`,
+        url: `${this.state.runtime.serverUrl}/question/${encodeURIComponent(requestID)}/reply`,
         method: "POST",
         auth: this.auth(),
         body: { answers: Array.isArray(answers) ? answers : [] }
@@ -914,7 +1156,7 @@ class RuntimeProcessManager {
     this.timeline("session.question.reject", { sessionId, requestID })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/question/${encodeURIComponent(requestID)}/reject`,
+        url: `${this.state.runtime.serverUrl}/question/${encodeURIComponent(requestID)}/reject`,
         method: "POST",
         auth: this.auth()
       })
@@ -935,7 +1177,7 @@ class RuntimeProcessManager {
     this.timeline("session.permission.reply", { sessionId, requestID, reply })
     try {
       return await requestJson({
-        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestID)}/reply`,
+        url: `${this.state.runtime.serverUrl}/permission/${encodeURIComponent(requestID)}/reply`,
         method: "POST",
         auth: this.auth(),
         body: { reply, ...(message ? { message: String(message) } : {}) }
@@ -1113,5 +1355,6 @@ module.exports = {
   projectToolMetadata,
   requestJson,
   resolveRuntimeBin,
+  resolveUserPath,
   translationGatewayEnv
 }

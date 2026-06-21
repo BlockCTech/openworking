@@ -12,7 +12,7 @@ const BUILT_IN_SKILLS = [
   { name: "skill-creator", description: "Create and validate reusable OpenCode-native skills." },
   { name: "xlsx", description: "Read, create, edit and validate spreadsheet workbooks." },
   { name: "docx", description: "Read, create, edit and visually validate Word documents." },
-  { name: "translate-document", description: "Translate PDF and DOCX files into new layout-preserving document artifacts." },
+  { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
   { name: "webapp-testing", description: "Test local web applications with focused browser automation." }
 ]
@@ -64,6 +64,40 @@ const chips = [
   { label: "Summarize changes", icon: "activity", text: "Summarize the most recent changes in this project." }
 ]
 
+// Curated catalog of well-known remote MCP servers, surfaced as one-click presets in the
+// Extensions marketplace. This is a static prefill list (no network call, no remote
+// registry) — clicking a card just opens the Add Custom App modal pre-filled. `needsClientApp`
+// marks servers that do NOT support dynamic client registration and require a pre-registered
+// OAuth app (clientId/clientSecret), e.g. Slack.
+const MCP_PRESETS = [
+  {
+    id: "slack",
+    name: "Slack",
+    url: "https://mcp.slack.com/mcp",
+    blurb: "Search channels, read and post messages.",
+    icon: "activity",
+    iconUrl: "https://images.icon-icons.com/2699/PNG/512/slack_logo_icon_170727.png",
+    needsClientApp: true,
+    docsUrl: "https://docs.slack.dev/ai/mcp/"
+  },
+  {
+    id: "backlog",
+    name: "Backlog",
+    // Backlog is a local stdio MCP server (run via npx), not a remote URL. It requires the
+    // BACKLOG_DOMAIN + BACKLOG_API_KEY env vars — pre-filled here with blank values for the user.
+    type: "local",
+    command: "npx backlog-mcp-server",
+    env: [
+      { key: "BACKLOG_DOMAIN", value: "" },
+      { key: "BACKLOG_API_KEY", value: "" }
+    ],
+    blurb: "Manage projects, issues, and pull requests on Nulab Backlog.",
+    icon: "blocks",
+    iconUrl: "https://devio2023-media.developers.io/wp-content/uploads/2018/02/backlog-favicon.svg",
+    docsUrl: "https://github.com/nulab/backlog-mcp-server"
+  }
+]
+
 const {
   addOptimisticUser,
   applyThreadEvent,
@@ -73,6 +107,7 @@ const {
   hasRunningTool,
   hydrateThread,
   messageCopyText,
+  userMessageFileRefs,
   messageText,
   removeOptimisticUser,
   resetThread,
@@ -101,11 +136,20 @@ const state = {
   config: null,
   customSkills: [],
   mcpServers: [],
-  skillsTab: "skills",             // skills | mcp
+  mcpStatus: {},                   // name -> "connected" | "needs_auth" | "failed" | "disabled"
+  mcpStatusError: {},              // name -> opencode's real failure reason (from GET /mcp), if any
+  mcpAuthenticating: {},           // name -> true while an auth flow is in progress
+  skillsTab: "skills",             // skills | mcp (mcp tab is the Extensions marketplace)
   mcpModalOpen: false,
   mcpSaving: false,
   mcpError: null,
-  mcpDraft: null,                  // { name, type, url, command, oauth, headers: [{key,value}] }
+  mcpErrorTarget: null,            // server name an inline error belongs to, or null for panel-level
+  // Draft for the Add/Edit Custom App modal:
+  // { name, type, url, command, headers: [{key,value}],
+  //   oauthMode: "auto"|"custom"|"disabled", oauthClientId, oauthClientSecret, oauthScope,
+  //   oauthAdvancedOpen, hasStoredSecret }
+  mcpDraft: null,
+  mcpEditTarget: null,             // name of the server being edited, or null when adding
   mcpDeleteTarget: null,           // { name } của MCP server chờ xác nhận xóa
   mcpRemoving: false,
   modalityErrors: {},
@@ -117,8 +161,10 @@ const state = {
   selectedModelKey: "",
   promptDraft: "",
   pendingAttachments: [],
+  pendingFileMentions: [],
   commands: [],
   commandMenu: { open: false, query: "", index: 0 },
+  fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
   popover: null,
   sessionMenu: null,          // sessionId đang mở menu, hoặc null
   sessionDeleteTarget: null,  // { id, title } của session chờ xác nhận xóa trong modal
@@ -235,6 +281,83 @@ function resetFileTree(projectId = state.activeProjectId) {
   state.fileTreeError = ""
   state.fileTreeExpanded.clear()
   state.fileTreeChildren.clear()
+  if (state.fileMentionMenu.projectId !== (projectId || null)) {
+    state.fileMentionMenu = { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: projectId || null, loadPromise: null }
+  }
+}
+
+function closeFileMentionMenu() {
+  state.fileMentionMenu.open = false
+  state.fileMentionMenu.query = ""
+  state.fileMentionMenu.index = 0
+  paintPromptAssistMenu()
+}
+
+function selectableProjectFiles() {
+  if (state.fileMentionMenu.projectId !== state.activeProjectId) return []
+  return state.fileMentionMenu.files
+}
+
+function fileMentionCandidates(query = "") {
+  const needle = String(query || "").toLowerCase()
+  const files = selectableProjectFiles()
+  if (!needle) return files.slice(0, 12)
+  const basenameStarts = []
+  const pathStarts = []
+  const basenameIncludes = []
+  const pathIncludes = []
+  for (const filePath of files) {
+    const lowerPath = filePath.toLowerCase()
+    const lowerName = filename(filePath).toLowerCase()
+    if (lowerName.startsWith(needle)) basenameStarts.push(filePath)
+    else if (lowerPath.startsWith(needle)) pathStarts.push(filePath)
+    else if (lowerName.includes(needle)) basenameIncludes.push(filePath)
+    else if (lowerPath.includes(needle)) pathIncludes.push(filePath)
+  }
+  return [...basenameStarts, ...pathStarts, ...basenameIncludes, ...pathIncludes].slice(0, 12)
+}
+
+async function ensureProjectFileCandidates() {
+  const project = selectedProject()
+  if (!project) return []
+  if (state.fileMentionMenu.projectId !== project.id) {
+    state.fileMentionMenu = { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: project.id, loadPromise: null }
+  }
+  if (state.fileMentionMenu.files.length) return state.fileMentionMenu.files
+  if (state.fileMentionMenu.loadPromise) return state.fileMentionMenu.loadPromise
+
+  const crawl = async (directoryPath = "") => {
+    const listing = await window.openworking.files.list({
+      directoryPath,
+      options: { mode: "visible-openable-files", recursive: true }
+    })
+    return (listing.children || []).filter((child) => child.type === "file" && child.openable).map((child) => child.path)
+  }
+
+  state.fileMentionMenu.loading = true
+  state.fileMentionMenu.error = ""
+  paintPromptAssistMenu()
+  state.fileMentionMenu.loadPromise = crawl("")
+    .then((files) => {
+      if (state.fileMentionMenu.projectId === project.id) {
+        state.fileMentionMenu.files = files.sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" }))
+      }
+      return state.fileMentionMenu.files
+    })
+    .catch((error) => {
+      if (state.fileMentionMenu.projectId === project.id) {
+        state.fileMentionMenu.error = error.message || "Could not load project files."
+      }
+      return []
+    })
+    .finally(() => {
+      if (state.fileMentionMenu.projectId === project.id) {
+        state.fileMentionMenu.loading = false
+        state.fileMentionMenu.loadPromise = null
+      }
+      paintPromptAssistMenu()
+    })
+  return state.fileMentionMenu.loadPromise
 }
 
 function projectSessions(projectId) {
@@ -364,6 +487,7 @@ function showToast(message) {
     state.toast = null
     renderToast()
   }, 2400)
+  if (typeof showToast.timer?.unref === "function") showToast.timer.unref()
 }
 
 function applyVersionGate(gate) {
@@ -457,6 +581,11 @@ function handleRuntimeStream(event) {
   // screen — this is what keeps a backgrounded session streaming. We only touch a
   // thread we already track (active or previously opened); unknown sessions are
   // picked up lazily by the periodic refresh when the user opens them.
+  // MCP connection-status events carry no sessionID; update the badge in place.
+  if (event?.type && event.type.startsWith("mcp.")) {
+    handleMcpStreamEvent(event)
+    return
+  }
   const sessionId = event?.sessionID
   if (!sessionId) return
   const thread = state.threads.get(sessionId)
@@ -477,6 +606,46 @@ function handleRuntimeStream(event) {
     scheduleThreadRender()
   }
   if (result.reconcile) scheduleRefresh()
+}
+
+// Live-update MCP server connection status from runtime stream events. Only repaint
+// when the MCP panel is on screen to avoid spurious full renders.
+function handleMcpStreamEvent(event) {
+  if (!event?.name) return
+  if (event.type === "mcp.browser.open.failed") {
+    // The browser failed to open automatically; surface the link so the user can
+    // complete authentication manually.
+    state.mcpError = `Could not open the browser. Open this link to authenticate ${event.name}: ${event.url}`
+    state.mcpErrorTarget = event.name
+  } else if (event.status) {
+    state.mcpStatus = { ...state.mcpStatus, [event.name]: event.status }
+    if (event.status !== "needs_auth") state.mcpAuthenticating = { ...state.mcpAuthenticating, [event.name]: false }
+  }
+  if (state.nav === "skills" && state.skillsTab === "mcp") render()
+}
+
+// Apply a status array from GET /mcp into the status + error maps.
+function applyMcpStatusList(status) {
+  const map = {}
+  const errors = {}
+  for (const entry of Array.isArray(status) ? status : []) {
+    if (!entry?.name) continue
+    map[entry.name] = entry.status
+    if (entry.error) errors[entry.name] = entry.error
+  }
+  state.mcpStatus = map
+  state.mcpStatusError = errors
+}
+
+// Fetch MCP connection status from the runtime and repaint the panel. Errors are
+// swallowed (e.g. no project open yet) so the panel still renders.
+async function refreshMcpStatus() {
+  try {
+    applyMcpStatusList(await window.openworking.mcp.status())
+    if (state.nav === "skills" && state.skillsTab === "mcp") render()
+  } catch {
+    // Runtime not ready; leave status empty.
+  }
 }
 
 function activePlanProposal() {
@@ -515,11 +684,10 @@ const PLAN_TEXT_MIN_LENGTH = 200
 // Render a text-only plan (no file on disk) in the document-viewer panel.
 function openInlinePlan(text) {
   if (!text) return
-  state.document = {
+  showDocument({
     requestedPath: INLINE_PLAN_PATH, path: "", name: "Plan", relativePath: "Plan",
     content: text, loading: false, error: "", truncated: false, renderMode: "markdown"
-  }
-  render()
+  })
 }
 
 function maybeAutoOpenPlan() {
@@ -881,11 +1049,8 @@ function renderUpdatePill() {
 }
 
 function renderSidebar() {
-  if (state.sidebarCollapsed) {
-    return ""
-  }
   return `
-    <aside class="sidebar">
+    <aside class="sidebar"${state.sidebarCollapsed ? ' aria-hidden="true" inert' : ""}>
       <div class="side-top">
         ${renderUpdatePill()}
         <button class="side-collapse-btn" data-action="toggleSidebar" title="Collapse sidebar">${icon("sidebarToggle")}</button>
@@ -1046,13 +1211,11 @@ function renderHeader(title, subtitle) {
   const fileTitle = state.rightSidebarOpen ? "Close files" : "Open current folder"
   return `
     <div class="main-head">
+      <button class="head-icon-btn head-sidebar-btn" data-action="toggleSidebar" title="Show sidebar" aria-label="Show sidebar">
+        ${icon("sidebarToggle")}
+      </button>
       <div class="head-copy"><div class="head-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div><div class="head-path" title="${escapeHtml(subtitle || "")}">${escapeHtml(subtitle || "")}</div></div>
       <div class="head-actions">
-        ${state.sidebarCollapsed ? `
-          <button class="head-icon-btn" data-action="toggleSidebar" title="Show sidebar" aria-label="Show sidebar">
-            ${icon("sidebarToggle")}
-          </button>
-        ` : ""}
         <button class="status-pill ${label}" data-action="toggleDiagnostics"><span class="status-dot"></span>${escapeHtml(label)}</button>
         <button class="head-icon-btn ${state.rightSidebarOpen ? "active" : ""}" data-action="toggleRightSidebar" title="${fileTitle}" aria-label="${fileTitle}">
           ${icon("sidebarRight")}
@@ -1160,10 +1323,12 @@ function pendingPrompts() {
 function renderThreadMessage(message) {
   const actions = renderMessageActions(message)
   if (message.role === "user") {
-    const text = messageText(message)
+    const projectFiles = selectableProjectFiles()
+    const text = messageText(message, projectFiles)
     const attachments = message.parts.filter((part) => part.type === "file")
-    return text || attachments.length
-      ? `<div class="msg-user"><div class="message-stack user-message"><div class="message-card bubble">${text ? `<div>${escapeHtml(text).replaceAll("\n", "<br>")}</div>` : ""}${renderAttachmentChips(attachments)}</div>${actions}</div></div>`
+    const fileMentions = userMessageFileRefs(message, projectFiles)
+    return text || attachments.length || fileMentions.length
+      ? `<div class="msg-user"><div class="message-stack user-message"><div class="message-card bubble">${text ? `<div>${renderTextWithFileMentions(text, fileMentions)}</div>` : ""}${renderAttachmentChips(attachments)}</div>${actions}</div></div>`
       : ""
   }
   const parts = message.parts.map(renderAssistantPart).join("")
@@ -1214,6 +1379,7 @@ function messageFileRefs(message) {
   for (const part of message.parts || []) {
     if (part.type !== "tool") continue
     if (!MUTATING_FILE_TOOLS.has(part.tool)) continue
+    if (part.state?.status !== "completed") continue
     const candidates = []
     if (part.tool === "edit" || part.tool === "write") {
       candidates.push(part.state?.input?.filePath)
@@ -1264,8 +1430,12 @@ function renderDocumentViewer() {
     body = `<div class="doc-state error">${escapeHtml(doc.error)}</div>`
   } else if (tab === "diff") {
     body = renderUnifiedDiff(doc.diff, path)
+  } else if (doc.previewMode === "pdf") {
+    body = `${renderArtifactExternalAction(doc)}<iframe class="doc-pdf" src="${escapeHtml(doc.url || "")}" title="${escapeHtml(doc.name || "PDF preview")}"></iframe>`
+  } else if (doc.previewMode === "external") {
+    body = renderArtifactShell(doc)
   } else if ((doc.renderMode || (isMarkdownFilePath(path) ? "markdown" : "code")) === "markdown") {
-    body = `<div class="doc-content assistant-text">${renderMarkdown(doc.content)}</div>${doc.truncated ? `<small class="doc-truncated">File truncated.</small>` : ""}`
+    body = `${renderArtifactExternalAction(doc)}<div class="doc-content assistant-text">${renderMarkdown(doc.content)}</div>${doc.truncated ? `<small class="doc-truncated">File truncated.</small>` : ""}`
   } else {
     body = `<pre class="doc-code"><code class="hljs">${highlightCode(doc.content, path)}</code></pre>${doc.truncated ? `<small class="doc-truncated">File truncated.</small>` : ""}`
   }
@@ -1288,6 +1458,34 @@ function renderDocumentViewer() {
   `
 }
 
+function artifactTypeLabel(doc) {
+  const extension = String(doc.extension || fileExtension(doc.path || doc.requestedPath || "")).replace(/^\./, "").toUpperCase()
+  if (extension) return extension
+  return doc.mime || "Artifact"
+}
+
+function renderArtifactExternalAction(doc) {
+  if (!doc.artifact || !doc.path || doc.loading || doc.error) return ""
+  return `
+    <div class="doc-artifact-actions">
+      <span>${escapeHtml(artifactTypeLabel(doc))} artifact preview</span>
+      <button class="secondary-btn" data-action="openExternalArtifact" data-artifact-path="${escapeHtml(doc.path)}">${icon("arrowUp")}Open externally</button>
+    </div>
+  `
+}
+
+function renderArtifactShell(doc) {
+  return `
+    <div class="doc-artifact-shell">
+      ${icon("doc")}
+      <strong>${escapeHtml(doc.name || filename(doc.path))}</strong>
+      <span>${escapeHtml(artifactTypeLabel(doc))} preview is available as file metadata in this panel.</span>
+      <small>${escapeHtml(doc.path || "")}</small>
+      <button class="secondary-btn" data-action="openExternalArtifact" data-artifact-path="${escapeHtml(doc.path || "")}">${icon("arrowUp")}Open externally</button>
+    </div>
+  `
+}
+
 // Finds the most recent diff produced for `filePath` across the active thread's
 // messages, so opening a file can default to its Diff tab. Reuses collectMessageDiffs.
 function findDiffForPath(filePath) {
@@ -1306,8 +1504,7 @@ async function openDocument(filePath, { diff = null, tab = null } = {}) {
   const renderMode = isMarkdownFilePath(filePath) ? "markdown" : "code"
   const resolvedDiff = diff || findDiffForPath(filePath)
   const resolvedTab = tab || (resolvedDiff ? "diff" : "code")
-  state.document = { requestedPath: filePath, path: filePath, name: filename(filePath), relativePath: "", content: "", loading: true, error: "", renderMode, diff: resolvedDiff, tab: resolvedTab }
-  render()
+  showDocument({ requestedPath: filePath, path: filePath, name: filename(filePath), relativePath: "", content: "", loading: true, error: "", renderMode, diff: resolvedDiff, tab: resolvedTab })
   try {
     const doc = await window.openworking.files.read(filePath)
     if (state.document?.requestedPath !== filePath) return
@@ -1326,15 +1523,95 @@ function switchDocumentTab(tab) {
   render()
 }
 
-function closeDocument() {
-  state.document = null
+function appElement() {
+  return document.querySelector(".app")
+}
+
+function afterTransitionOrTimeout(element, callback, timeout = 240) {
+  if (!element) {
+    callback()
+    return
+  }
+  let done = false
+  const finish = () => {
+    if (done) return
+    done = true
+    element.removeEventListener("transitionend", onTransitionEnd)
+    clearTimeout(timer)
+    callback()
+  }
+  const onTransitionEnd = (event) => {
+    if (event.target === element) finish()
+  }
+  const timer = setTimeout(finish, timeout)
+  element.addEventListener("transitionend", onTransitionEnd)
+}
+
+function syncSidebarCollapsedDom(collapsed = state.sidebarCollapsed) {
+  const app = appElement()
+  if (app) app.classList.toggle("collapsed", collapsed)
+  const sidebar = document.querySelector(".sidebar")
+  if (!sidebar) return
+  if (collapsed) {
+    sidebar.setAttribute("aria-hidden", "true")
+    sidebar.setAttribute("inert", "")
+  } else {
+    sidebar.removeAttribute("aria-hidden")
+    sidebar.removeAttribute("inert")
+  }
+}
+
+function startPanelOpenTransition(preopenClass) {
+  const app = appElement()
+  if (!app) return
+  app.classList.add(preopenClass)
+  requestAnimationFrame(() => {
+    const current = appElement()
+    if (!current) return
+    current.classList.remove(preopenClass)
+  })
+}
+
+function showDocument(document) {
+  const opening = !state.document
+  state.document = document
   render()
+  if (opening) startPanelOpenTransition("document-preopen")
+}
+
+function closeDocument() {
+  if (!state.document) return
+  const app = appElement()
+  if (!app) {
+    state.document = null
+    render()
+    return
+  }
+  app.classList.add("document-closing")
+  afterTransitionOrTimeout(app, () => {
+    state.document = null
+    render()
+  })
+}
+
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed
+  syncSidebarCollapsedDom()
 }
 
 async function toggleRightSidebar() {
   if (state.rightSidebarOpen) {
-    state.rightSidebarOpen = false
-    render()
+    const app = appElement()
+    if (!app) {
+      state.rightSidebarOpen = false
+      render()
+      return
+    }
+    app.classList.add("right-sidebar-closing")
+    afterTransitionOrTimeout(app, () => {
+      state.rightSidebarOpen = false
+      render()
+    })
     return
   }
   const project = selectedProject()
@@ -1342,10 +1619,10 @@ async function toggleRightSidebar() {
     showToast("Open a project before browsing files.")
     return
   }
-  state.sidebarCollapsed = true
   state.rightSidebarOpen = true
   if (state.fileTreeProjectId !== project.id) resetFileTree(project.id)
   render()
+  startPanelOpenTransition("right-sidebar-preopen")
   await loadFileTreeDirectory("")
 }
 
@@ -1441,6 +1718,186 @@ function renderAttachmentChips(attachments, { removable = false } = {}) {
       `).join("")}
     </div>
   `
+}
+
+function renderFileMentionChips(fileMentions, { removable = false } = {}) {
+  if (!fileMentions.length) return ""
+  return `
+    <div class="${removable ? "composer-file-mentions" : "message-file-mentions"}">
+      ${fileMentions.map((fileMention) => `
+        <span class="file-mention-chip" title="${escapeHtml(fileMention.path)}">
+          ${icon("doc")}<span>${escapeHtml(fileMention.token || `@${fileMention.name}`)}</span>
+          ${removable ? `<button data-remove-file-mention="${escapeHtml(fileMention.token)}" title="Remove ${escapeHtml(fileMention.token || fileMention.name)}">${icon("x")}</button>` : ""}
+        </span>
+      `).join("")}
+    </div>
+  `
+}
+
+function renderInlineFileMention(fileMention) {
+  const label = fileMention.token || `@${fileMention.name}`
+  return `<span class="file-mention-token" title="${escapeHtml(fileMention.path)}"><span>${escapeHtml(label)}</span></span>`
+}
+
+function findFileMentionMatches(text, fileMentions) {
+  const prompt = String(text || "")
+  const matches = []
+  for (const fileMention of fileMentions) {
+    const token = String(fileMention?.token || "")
+    if (!token) continue
+    const pattern = new RegExp(`(^|\\s)(${escapeRegex(token)})(?=$|\\s)`, "g")
+    let match = null
+    while ((match = pattern.exec(prompt))) {
+      const prefix = match[1] || ""
+      const start = match.index + prefix.length
+      matches.push({ start, end: start + token.length, fileMention })
+      if (pattern.lastIndex === match.index) pattern.lastIndex += 1
+    }
+  }
+  return matches.sort((left, right) => left.start - right.start || left.end - right.end)
+}
+
+function renderTextWithFileMentions(text, fileMentions) {
+  const message = String(text || "")
+  const matches = findFileMentionMatches(message, fileMentions)
+  if (!matches.length) return escapeHtml(message).replaceAll("\n", "<br>")
+
+  let html = ""
+  let cursor = 0
+  for (const match of matches) {
+    if (match.start < cursor) continue
+    html += escapeHtml(message.slice(cursor, match.start)).replaceAll("\n", "<br>")
+    html += renderInlineFileMention(match.fileMention)
+    cursor = match.end
+  }
+  html += escapeHtml(message.slice(cursor)).replaceAll("\n", "<br>")
+  return html
+}
+
+function renderPromptOverlayHtml(promptText, fileMentions = []) {
+  const prompt = String(promptText || "")
+  const liveMentions = livePendingFileMentions(prompt, fileMentions)
+  if (!liveMentions.length) return escapeHtml(prompt).replaceAll("\n", "<br>")
+  return renderTextWithFileMentions(prompt, liveMentions)
+}
+
+function escapeRegex(text) {
+  return String(text || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+function fileMentionTokenPattern(token) {
+  return new RegExp(`(^|\\s)${escapeRegex(token)}(?=$|\\s)`)
+}
+
+function livePendingFileMentions(promptText, pendingFileMentions = state.pendingFileMentions) {
+  const prompt = String(promptText || "")
+  return pendingFileMentions.filter((fileMention) => fileMention?.token && fileMentionTokenPattern(fileMention.token).test(prompt))
+}
+
+function resolveFileMentionsFromPrompt(promptText, files = selectableProjectFiles()) {
+  const prompt = String(promptText || "")
+  if (!prompt.includes("@")) return []
+  const mentions = []
+  const seen = new Set()
+  const pattern = /(^|\s)@([^\s@]+)(?=$|\s)/g
+  let match = null
+  while ((match = pattern.exec(prompt))) {
+    const candidate = match[2]
+    const token = `@${candidate}`
+    if (seen.has(token)) continue
+    let filePath = files.includes(candidate) ? candidate : null
+    if (!filePath) {
+      const basenameMatches = files.filter((file) => filename(file) === candidate)
+      if (basenameMatches.length === 1) filePath = basenameMatches[0]
+    }
+    if (!filePath) continue
+    const resolvedToken = fileMentionTokenForPath(filePath, files)
+    if (!fileMentionTokenPattern(resolvedToken).test(prompt)) continue
+    seen.add(resolvedToken)
+    mentions.push({ token: resolvedToken, path: filePath, name: filename(filePath) })
+  }
+  return mentions
+}
+
+function collectLiveFileMentions(promptText, overrides = {}) {
+  const pendingFileMentions = overrides.pendingFileMentions ?? state.pendingFileMentions
+  const files = overrides.files ?? selectableProjectFiles()
+  const prompt = String(promptText || "")
+  const livePending = livePendingFileMentions(prompt, pendingFileMentions)
+  if (livePending.length !== pendingFileMentions.length && !overrides.pendingFileMentions) {
+    state.pendingFileMentions = livePending
+  }
+  const byToken = new Map()
+  for (const fileMention of [
+    ...livePending,
+    ...resolveFileMentionsFromPrompt(prompt, files)
+  ]) {
+    if (!fileMention?.token || !fileMentionTokenPattern(fileMention.token).test(prompt)) continue
+    byToken.set(fileMention.token, fileMention)
+  }
+  return [...byToken.values()]
+}
+
+async function fileMentionsForSubmit(prompt, command) {
+  if (command) return []
+  if (String(prompt || "").includes("@")) await ensureProjectFileCandidates()
+  return collectLiveFileMentions(prompt)
+}
+
+function syncPendingFileMentions(promptText, { rerender = false, promptInput = null } = {}) {
+  const live = livePendingFileMentions(promptText)
+  if (live.length === state.pendingFileMentions.length) return live
+  state.pendingFileMentions = live
+  if (rerender) {
+    const selectionStart = promptInput?.selectionStart ?? null
+    const selectionEnd = promptInput?.selectionEnd ?? selectionStart
+    render()
+    const freshInput = document.getElementById("promptInput")
+    if (freshInput && selectionStart !== null && selectionEnd !== null) {
+      freshInput.focus()
+      freshInput.setSelectionRange(selectionStart, selectionEnd)
+      freshInput.style.height = "auto"
+      freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
+      syncPromptOverlay(freshInput)
+    }
+  }
+  return live
+}
+
+function applyPendingFileMentions(promptText, fileMentions) {
+  let prompt = String(promptText || "")
+  for (const fileMention of fileMentions) {
+    if (!fileMention?.token || !fileMention?.path) continue
+    const pattern = new RegExp(`(^|\\s)(${escapeRegex(fileMention.token)})(?=$|\\s)`, "g")
+    prompt = prompt.replace(pattern, (_, prefix) => `${prefix}\`${fileMention.path}\``)
+  }
+  return prompt
+}
+
+function fileMentionTokenForPath(filePath, files = selectableProjectFiles()) {
+  const normalizedPath = String(filePath || "").trim()
+  if (!normalizedPath) return "@"
+  const basename = filename(normalizedPath)
+  const duplicates = files.filter((candidate) => filename(candidate) === basename)
+  return duplicates.length > 1 ? `@${normalizedPath}` : `@${basename}`
+}
+
+function filterPromptAttachments(attachments, fileMentions, { forceTextOnly = false } = {}) {
+  const pending = Array.isArray(attachments) ? attachments.slice() : []
+  if (!pending.length) return pending
+  if (forceTextOnly && Array.isArray(fileMentions) && fileMentions.length) return []
+  if (!Array.isArray(fileMentions) || !fileMentions.length) return pending
+  const mentionedNames = new Set(fileMentions.map((fileMention) => String(fileMention?.name || filename(fileMention?.path || "") || "").trim()).filter(Boolean))
+  // ponytail: stale attachment ids from the old @file flow are worse than dropping a duplicate of the same file name.
+  return pending.filter((attachment) => !mentionedNames.has(String(attachment?.filename || "").trim()))
+}
+
+function computePromptAttachments({ command, pendingAttachments, fileMentions }) {
+  return command
+    ? []
+    : filterPromptAttachments(pendingAttachments, fileMentions, {
+        forceTextOnly: true
+      })
 }
 
 function toolInfo(part) {
@@ -1600,6 +2057,28 @@ function permissionSummary(request) {
   return parts.join(" · ")
 }
 
+// The card header names the action: prefer an explicit title, else the tool name
+// (e.g. `backlog_update_issue`), so the user knows exactly which tool is being approved.
+function permissionHeader(request) {
+  if (request.title) return String(request.title)
+  if (request.permission) return `Run ${request.permission}?`
+  return "Allow this action?"
+}
+
+// Renders the per-argument detail rows (e.g. issueIdOrKey: TSD-131, statusId: 2) so the user can
+// see exactly what the gated tool will do before approving.
+function renderPermissionDetails(request) {
+  const details = Array.isArray(request.details) ? request.details : []
+  if (!details.length) return ""
+  const rows = details.map((detail) => `
+    <div class="ask-permission-detail">
+      <span class="ask-permission-detail-key">${escapeHtml(detail.key)}</span>
+      <span class="ask-permission-detail-value">${escapeHtml(detail.value)}</span>
+    </div>
+  `).join("")
+  return `<div class="ask-permission-details">${rows}</div>`
+}
+
 // Renders the tool-approval card OpenCode raises when an action is gated to "ask".
 function renderPendingPermissions() {
   const pending = activeThread().pendingPermissions || []
@@ -1609,10 +2088,12 @@ function renderPendingPermissions() {
 
 function renderPermissionCard(request) {
   const summary = permissionSummary(request)
+  const details = renderPermissionDetails(request)
   return `
     <div class="ask-card permission-card" data-permission-card="${escapeHtml(request.requestID)}">
-      <div class="ask-card-header">${escapeHtml(request.title || "Allow this action?")}</div>
+      <div class="ask-card-header">${escapeHtml(permissionHeader(request))}</div>
       ${summary ? `<div class="ask-permission-meta">${escapeHtml(summary)}</div>` : ""}
+      ${details || (summary ? "" : `<div class="ask-permission-meta">No additional details.</div>`)}
       <div class="ask-permission-actions">
         <button class="ask-permission-btn allow" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-decision="once">Allow once</button>
         <button class="ask-permission-btn always" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-decision="always">Always allow</button>
@@ -1774,7 +2255,7 @@ function renderToolArtifacts(metadata) {
   return `
     <div class="tool-artifacts ${metadata?.quality === "warning" ? "warning" : ""}">
       ${artifacts.map((artifact) => `
-        <button class="artifact-chip" data-open-artifact="${escapeHtml(artifact.path)}" title="${escapeHtml(artifact.path)}">
+        <button class="artifact-chip ${state.document?.requestedPath === artifact.path || state.document?.path === artifact.path ? "active" : ""}" data-open-artifact="${escapeHtml(artifact.path)}" title="${escapeHtml(artifact.path)}">
           ${icon("doc")}<span><strong>${escapeHtml(artifact.filename)}</strong><small>${escapeHtml(artifact.path)}</small></span>
         </button>
       `).join("")}
@@ -1784,7 +2265,7 @@ function renderToolArtifacts(metadata) {
 }
 
 function renderThinkingRow() {
-  return `<div class="msg-ai stream-row"><div class="thinking"><img class="thinking-logo" src="./assets/techtus_logo.apng" alt="" width="24" height="24"><span>Thinking</span></div></div>`
+  return `<div class="msg-ai stream-row"><div class="thinking"><img class="thinking-logo" src="./assets/logo.png" alt="" width="24" height="24"><span>Thinking</span></div></div>`
 }
 
 function renderRetryRow(status) {
@@ -1815,7 +2296,23 @@ function renderCommandMenu() {
           <span class="cmd-source">${escapeHtml(command.source)}</span>
         </button>`).join("")
     : `<div class="pop-empty">No matching commands.</div>`
-  return `<div class="pop pop-up cmd-pop"><div class="pop-label">Commands</div>${rows}</div>`
+  return `<div class="pop pop-up prompt-pop cmd-pop"><div class="pop-label">Commands</div>${rows}</div>`
+}
+
+function renderFileMentionMenu() {
+  if (!state.fileMentionMenu.open) return ""
+  const candidates = fileMentionCandidates(state.fileMentionMenu.query)
+  let rows = ""
+  if (state.fileMentionMenu.loading) rows = `<div class="pop-empty">Loading files…</div>`
+  else if (state.fileMentionMenu.error) rows = `<div class="pop-empty">${escapeHtml(state.fileMentionMenu.error)}</div>`
+  else if (candidates.length) {
+    rows = candidates.map((filePath, position) => `
+      <button class="pop-item cmd-item ${position === state.fileMentionMenu.index ? "active" : ""}" data-file-mention="${escapeHtml(filePath)}">
+        <span><strong>@${escapeHtml(filename(filePath))}</strong><small>${escapeHtml(filePath)}</small></span>
+        <span class="cmd-source">file</span>
+      </button>`).join("")
+  } else rows = `<div class="pop-empty">No matching files.</div>`
+  return `<div class="pop pop-up prompt-pop cmd-pop"><div class="pop-label">Project files</div>${rows}</div>`
 }
 
 function renderComposer(project, dock = false) {
@@ -1826,6 +2323,10 @@ function renderComposer(project, dock = false) {
     <div class="composer">
       <div class="ta-wrap">
         ${renderCommandMenu()}
+        ${renderFileMentionMenu()}
+        <div class="prompt-overlay" aria-hidden="true">
+          <div id="promptOverlay" class="prompt-overlay-text">${renderPromptOverlayHtml(state.promptDraft, state.pendingFileMentions)}</div>
+        </div>
         <textarea id="promptInput" rows="1" placeholder="${dock ? "Reply to" : "Describe a task for"} ${escapeHtml(project.name)}...">${escapeHtml(state.promptDraft)}</textarea>
       </div>
       ${renderAttachmentChips(state.pendingAttachments, { removable: true })}
@@ -1949,7 +2450,7 @@ function renderSkillsScreen() {
       <div class="admin-content skills-screen">
         <div class="skills-tabs">
           <button class="skills-tab ${tab === "skills" ? "active" : ""}" data-skills-tab="skills">${icon("blocks")}<span>Skills</span></button>
-          <button class="skills-tab ${tab === "mcp" ? "active" : ""}" data-skills-tab="mcp">${icon("server")}<span>MCP Servers</span></button>
+          <button class="skills-tab ${tab === "mcp" ? "active" : ""}" data-skills-tab="mcp">${icon("server")}<span>Extensions</span></button>
         </div>
         ${tab === "mcp" ? renderMcpPanel() : renderSkillsPanel()}
       </div>
@@ -1985,44 +2486,164 @@ function mcpServerSubtitle(server) {
   return server.url || ""
 }
 
+// Resolve the connection state of a server into a status pill + whether an auth action
+// is offered. Returns { pill: html, action: "authenticate"|"reconnect"|null }.
+function mcpStatusInfo(server) {
+  const oauthEligible = server.type === "remote" && server.oauth !== false
+  if (state.mcpAuthenticating?.[server.name]) {
+    return { pill: `<span class="mcp-pill mcp-pill-pending">Authenticating…</span>`, action: null }
+  }
+  const status = state.mcpStatus?.[server.name]
+  if (!server.enabled) return { pill: `<span class="mcp-pill mcp-pill-muted">Disabled</span>`, action: null }
+  if (status === "connected") return { pill: `<span class="mcp-pill mcp-pill-ok">Connected</span>`, action: null }
+  if (status === "failed") {
+    return { pill: `<span class="mcp-pill mcp-pill-bad">Failed</span>`, action: oauthEligible ? "reconnect" : null }
+  }
+  if (status === "needs_auth") {
+    return { pill: `<span class="mcp-pill mcp-pill-warn">Needs auth</span>`, action: oauthEligible ? "authenticate" : null }
+  }
+  if (status === "needs_client_registration") {
+    return { pill: `<span class="mcp-pill mcp-pill-warn">Needs OAuth app</span>`, action: oauthEligible ? "authenticate" : null }
+  }
+  return { pill: "", action: null }
+}
+
+function renderMcpServerCard(server) {
+  const { pill, action } = mcpStatusInfo(server)
+  // Prefer the transient action error (from a click); otherwise show opencode's persistent
+  // connect-failure reason from GET /mcp so the real cause is always visible on a failed card.
+  const errorText = (state.mcpError && state.mcpErrorTarget === server.name)
+    ? state.mcpError
+    : (state.mcpStatusError?.[server.name] || "")
+  const error = errorText ? `<div class="mcp-card-error">${escapeHtml(errorText)}</div>` : ""
+  const authBtn = action
+    ? `<button class="secondary-btn" data-action="authenticateMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}${action === "reconnect" ? "Reconnect" : "Authenticate"}</button>`
+    : ""
+  // On a failed connect, offer a reset that clears any stale stored OAuth state before re-auth —
+  // this recovers from a partial/dynamic registration left by an earlier attempt.
+  const clearBtn = action === "reconnect"
+    ? `<button class="secondary-btn" data-action="clearMcpAuth" data-mcp-name="${escapeHtml(server.name)}" title="Clear stored credentials and authenticate again">${icon("trash")}Reset auth</button>`
+    : ""
+  return `
+    <div class="mcp-card">
+      <div class="mcp-card-main">
+        <span class="mcp-card-icon">${icon("server")}</span>
+        <span class="mcp-card-text">
+          <strong>${escapeHtml(server.name)}</strong>
+          <small>${escapeHtml(mcpServerSubtitle(server))}</small>
+        </span>
+        ${pill}
+      </div>
+      <div class="mcp-card-actions">
+        ${authBtn}
+        ${clearBtn}
+        <button class="secondary-btn" data-action="editMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("edit")}Edit</button>
+        <span class="mcp-pill mcp-pill-type">${server.type === "remote" ? "Remote" : "Local"}</span>
+        <button class="switch ${server.enabled ? "on" : ""}" role="switch" aria-checked="${server.enabled ? "true" : "false"}" data-mcp-toggle="${escapeHtml(server.name)}" data-mcp-enabled="${server.enabled ? "1" : "0"}" title="${server.enabled ? "Disable" : "Enable"}"></button>
+        <button class="small-icon-btn mcp-delete" data-action="removeMcp" data-mcp-name="${escapeHtml(server.name)}" aria-label="Remove ${escapeHtml(server.name)}">${icon("trash")}</button>
+      </div>
+      ${error}
+    </div>
+  `
+}
+
+function renderMcpPresetCard(preset) {
+  const connected = (state.mcpServers || []).some((server) => server.name === preset.id)
+  // Prefer a remote image when the preset ships an iconUrl (e.g. Slack, Backlog), otherwise
+  // fall back to the inline SVG from the icon map.
+  const iconHtml = preset.iconUrl
+    ? `<img class="mcp-card-img" src="${escapeHtml(preset.iconUrl)}" alt="${escapeHtml(preset.name)}" loading="lazy">`
+    : icon(preset.icon)
+  return `
+    <div class="mcp-preset ${connected ? "connected" : ""}">
+      <div class="mcp-preset-head">
+        <span class="mcp-card-icon">${iconHtml}</span>
+        <strong>${escapeHtml(preset.name)}</strong>
+        ${preset.needsClientApp ? `<span class="mcp-pill mcp-pill-type">OAuth app</span>` : ""}
+      </div>
+      <p class="mcp-preset-blurb">${escapeHtml(preset.blurb)}</p>
+      ${connected
+        ? `<button class="secondary-btn" disabled>${icon("check")}Added</button>`
+        : `<button class="secondary-btn" data-action="connectPreset" data-preset-id="${escapeHtml(preset.id)}">${icon("plus")}Connect</button>`}
+    </div>
+  `
+}
+
 function renderMcpPanel() {
   const servers = state.mcpServers || []
   return `
     <section class="admin-panel skills-panel">
-      <div class="panel-head"><div><h1>MCP Servers</h1><p>Connect custom MCP servers by URL or local command.</p></div><button class="secondary-btn" data-action="openMcpModal">${icon("plus")}Add MCP server</button></div>
-      <div class="skill-list">
-        ${servers.length ? servers.map((server) => `
-          <div class="skill-list-item mcp-list-item">
-            <span class="sli-icon">${icon("server")}</span>
-            <span class="sli-text">
-              <strong>${escapeHtml(server.name)}</strong>
-              <small>${escapeHtml(mcpServerSubtitle(server))}</small>
-            </span>
-            <span class="sli-badge ${server.type === "remote" ? "builtin" : "custom"}">${server.type === "remote" ? "Remote" : "Local"}</span>
-            <button class="switch ${server.enabled ? "on" : ""}" role="switch" aria-checked="${server.enabled ? "true" : "false"}" data-mcp-toggle="${escapeHtml(server.name)}" data-mcp-enabled="${server.enabled ? "1" : "0"}" title="${server.enabled ? "Disable" : "Enable"}"></button>
-            <button class="small-icon-btn mcp-delete" data-action="removeMcp" data-mcp-name="${escapeHtml(server.name)}" aria-label="Remove ${escapeHtml(server.name)}">${icon("trash")}</button>
-          </div>
-        `).join("") : `<div class="config-note">No MCP servers yet. Click "Add MCP server" to connect one.</div>`}
+      <div class="panel-head"><div><h1>Extensions (MCP servers)</h1><p>Each extension is an MCP server that gives the agent extra tools. Pick a featured app or connect your own.</p></div><button class="primary-btn" data-action="openMcpModal">${icon("plus")}Add Custom App</button></div>
+
+      <div class="mcp-section-label">Featured</div>
+      <div class="mcp-preset-grid">
+        ${MCP_PRESETS.map(renderMcpPresetCard).join("")}
       </div>
+
+      <div class="mcp-section-label">Connected</div>
+      <div class="mcp-card-list">
+        ${servers.length ? servers.map(renderMcpServerCard).join("") : `<div class="config-note">No apps connected yet. Pick a featured app above or click "Add Custom App".</div>`}
+      </div>
+      ${state.mcpError && !state.mcpErrorTarget && !state.mcpModalOpen ? `<div class="config-note field-error">${escapeHtml(state.mcpError)}</div>` : ""}
     </section>
+  `
+}
+
+function renderMcpOauthSection(draft) {
+  const lock = state.mcpSaving ? "disabled" : ""
+  const mode = draft.oauthMode || "auto"
+  const advanced = !!draft.oauthAdvancedOpen
+  const secretPlaceholder = draft.hasStoredSecret ? "•••• (stored — leave blank to keep)" : "Paste the OAuth client secret"
+  return `
+    <div class="mcp-field-label">Authentication</div>
+    <div class="mcp-type-toggle">
+      <button class="mcp-type-opt ${mode === "auto" ? "active" : ""}" data-mcp-oauth-mode="auto" ${lock}>Auto</button>
+      <button class="mcp-type-opt ${mode === "custom" ? "active" : ""}" data-mcp-oauth-mode="custom" ${lock}>OAuth app</button>
+      <button class="mcp-type-opt ${mode === "disabled" ? "active" : ""}" data-mcp-oauth-mode="disabled" ${lock}>None</button>
+    </div>
+    <div class="config-note mcp-oauth-hint">${
+      mode === "auto" ? "The server registers a client automatically (works for most MCP servers). You'll sign in after adding."
+      : mode === "custom" ? "Use this for servers that need a pre-registered OAuth app, such as Slack MCP."
+      : "No OAuth — the server is reached directly (or via custom headers)."
+    }</div>
+    ${mode === "custom" ? `
+      <button class="mcp-advanced-toggle" data-action="toggleMcpAdvanced" ${lock}>${icon(advanced ? "chevDown" : "chevRight")}Advanced OAuth</button>
+      ${advanced ? `
+        <div class="mcp-advanced">
+          <label for="mcpOauthClientId">OAuth client ID
+            <input id="mcpOauthClientId" type="text" value="${escapeHtml(draft.oauthClientId || "")}" placeholder="Paste the OAuth client ID" data-mcp-field="oauthClientId" ${lock}>
+          </label>
+          <label for="mcpOauthClientSecret">OAuth client secret
+            <input id="mcpOauthClientSecret" type="password" value="${escapeHtml(draft.oauthClientSecret || "")}" placeholder="${escapeHtml(secretPlaceholder)}" data-mcp-field="oauthClientSecret" autocomplete="off" ${lock}>
+          </label>
+          <label for="mcpOauthScope">OAuth scopes
+            <input id="mcpOauthScope" type="text" value="${escapeHtml(draft.oauthScope || "")}" placeholder="Optional, space-separated scopes" data-mcp-field="oauthScope" ${lock}>
+          </label>
+          <div class="mcp-warning">Keep client secrets out of chats and source control. Store only credentials issued for this app.</div>
+          ${draft.presetDocsUrl ? `<button class="link-btn" data-action="openMcpDocs" data-docs-url="${escapeHtml(draft.presetDocsUrl)}">${icon("book")}Where do I get these?</button>` : ""}
+        </div>
+      ` : ""}
+    ` : ""}
   `
 }
 
 function renderMcpModal() {
   const draft = state.mcpDraft
   if (!state.mcpModalOpen || !draft) return ""
+  const editing = !!state.mcpEditTarget
   const disable = state.mcpSaving ? " disabled" : ""
   const isRemote = draft.type !== "local"
   const headers = Array.isArray(draft.headers) ? draft.headers : []
+  const env = Array.isArray(draft.env) ? draft.env : []
   return `
     <div class="update-backdrop" ${state.mcpSaving ? "" : 'data-action="closeMcpModal"'}>
       <div class="confirm-modal rename-modal mcp-modal" role="dialog" aria-modal="true" aria-labelledby="mcpModalTitle" data-stop-click>
-        <div class="confirm-title" id="mcpModalTitle">Add MCP Server</div>
+        <div class="confirm-title" id="mcpModalTitle">${editing ? "Edit App" : "Add Custom App"}</div>
         <p>Connect a custom MCP server by URL or local command.</p>
         <div class="rename-modal-body">
           <label for="mcpName">
             App name
-            <input id="mcpName" type="text" value="${escapeHtml(draft.name)}" placeholder="sentry-mcp" data-mcp-field="name" ${state.mcpSaving ? "disabled" : ""}>
+            <input id="mcpName" type="text" value="${escapeHtml(draft.name)}" placeholder="sentry-mcp" data-mcp-field="name" ${editing || state.mcpSaving ? "disabled" : ""}>
           </label>
           <div class="mcp-field-label">Type</div>
           <div class="mcp-type-toggle">
@@ -2034,10 +2655,7 @@ function renderMcpModal() {
               Server URL
               <input id="mcpUrl" type="text" value="${escapeHtml(draft.url)}" placeholder="https://mcp.sentry.dev/mcp" data-mcp-field="url" ${state.mcpSaving ? "disabled" : ""}>
             </label>
-            <label class="mcp-checkbox">
-              <input type="checkbox" data-mcp-field="oauth" ${draft.oauth ? "checked" : ""} ${state.mcpSaving ? "disabled" : ""}>
-              <span>Requires OAuth sign-in</span>
-            </label>
+            ${renderMcpOauthSection(draft)}
             <div class="mcp-headers">
               <div class="mcp-field-label">Custom headers</div>
               ${headers.map((header, index) => `
@@ -2054,12 +2672,23 @@ function renderMcpModal() {
               Command
               <input id="mcpCommand" type="text" value="${escapeHtml(draft.command)}" placeholder="npx -y some-mcp-server" data-mcp-field="command" ${state.mcpSaving ? "disabled" : ""}>
             </label>
+            <div class="mcp-headers">
+              <div class="mcp-field-label">Environment variables</div>
+              ${env.map((row, index) => `
+                <div class="mcp-headers-row">
+                  <input type="text" value="${escapeHtml(row.key)}" placeholder="KEY" data-mcp-env="key" data-mcp-env-index="${index}" ${state.mcpSaving ? "disabled" : ""}>
+                  <input type="text" value="${escapeHtml(row.value)}" placeholder="Value" data-mcp-env="value" data-mcp-env-index="${index}" ${state.mcpSaving ? "disabled" : ""}>
+                  <button class="small-icon-btn" data-action="removeMcpEnv" data-mcp-env-index="${index}" aria-label="Remove variable" ${disable}>${icon("x")}</button>
+                </div>
+              `).join("")}
+              <button class="link-btn" data-action="addMcpEnv" ${disable}>${icon("plus")}Add variable</button>
+            </div>
           `}
-          <div class="field-error">${state.mcpError ? escapeHtml(state.mcpError) : ""}</div>
+          <div class="field-error">${state.mcpError && state.mcpModalOpen ? escapeHtml(state.mcpError) : ""}</div>
         </div>
         <div class="confirm-actions">
           <button class="secondary-btn${disable}" data-action="closeMcpModal">Cancel</button>
-          <button class="primary-btn${disable}" data-action="submitMcpServer">${icon("plus")}${state.mcpSaving ? "Adding…" : "Add server"}</button>
+          <button class="primary-btn${disable}" data-action="submitMcpServer">${icon(editing ? "save" : "plus")}${state.mcpSaving ? "Saving…" : (editing ? "Save changes" : "Add App")}</button>
         </div>
       </div>
     </div>
@@ -2441,6 +3070,7 @@ function bindEvents() {
   document.querySelectorAll("[data-skills-tab]").forEach((element) => element.addEventListener("click", () => {
     state.skillsTab = element.dataset.skillsTab
     render()
+    if (state.skillsTab === "mcp") refreshMcpStatus()
   }))
   document.querySelectorAll("[data-mcp-type]").forEach((element) => element.addEventListener("click", () => {
     if (state.mcpSaving || !state.mcpDraft) return
@@ -2453,14 +3083,27 @@ function bindEvents() {
   }))
   document.querySelectorAll("[data-mcp-field]").forEach((element) => element.addEventListener("input", () => {
     if (!state.mcpDraft) return
-    const field = element.dataset.mcpField
-    state.mcpDraft[field] = field === "oauth" ? element.checked : element.value
+    state.mcpDraft[element.dataset.mcpField] = element.value
+  }))
+  document.querySelectorAll("[data-mcp-oauth-mode]").forEach((element) => element.addEventListener("click", () => {
+    if (state.mcpSaving || !state.mcpDraft) return
+    const mode = element.dataset.mcpOauthMode
+    state.mcpDraft.oauthMode = mode
+    if (mode === "custom") state.mcpDraft.oauthAdvancedOpen = true
+    state.mcpError = null
+    render()
   }))
   document.querySelectorAll("[data-mcp-header]").forEach((element) => element.addEventListener("input", () => {
     if (!state.mcpDraft) return
     const index = Number(element.dataset.mcpHeaderIndex)
     const row = state.mcpDraft.headers?.[index]
     if (row) row[element.dataset.mcpHeader] = element.value
+  }))
+  document.querySelectorAll("[data-mcp-env]").forEach((element) => element.addEventListener("input", () => {
+    if (!state.mcpDraft) return
+    const index = Number(element.dataset.mcpEnvIndex)
+    const row = state.mcpDraft.env?.[index]
+    if (row) row[element.dataset.mcpEnv] = element.value
   }))
   document.querySelectorAll("[data-rename-project]").forEach((element) => element.addEventListener("click", () => openRenameProjectModal(element.dataset.renameProject, element.dataset.projectName || "")))
   document.querySelectorAll("[data-remove-project]").forEach((element) => element.addEventListener("click", () => {
@@ -2469,6 +3112,7 @@ function bindEvents() {
     render()
   }))
   document.querySelectorAll("[data-remove-attachment]").forEach((element) => element.addEventListener("click", () => removeAttachment(element.dataset.removeAttachment)))
+  document.querySelectorAll("[data-remove-file-mention]").forEach((element) => element.addEventListener("click", () => removeFileMention(element.dataset.removeFileMention)))
   bindMessageActions()
   bindArtifactActions()
   bindToolStepActions()
@@ -2482,13 +3126,22 @@ function bindEvents() {
   }))
   const promptInput = document.getElementById("promptInput")
   if (promptInput) {
+    promptInput.style.height = "auto"
+    promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
+    syncPromptOverlay(promptInput)
     promptInput.addEventListener("input", () => {
       state.promptDraft = promptInput.value
+      syncPendingFileMentions(promptInput.value, { rerender: true, promptInput })
+      const liveInput = document.getElementById("promptInput") || promptInput
       const send = document.querySelector(".send")
-      if (send) send.classList.toggle("disabled", !threadAbortable() && !promptInput.value.trim())
-      promptInput.style.height = "auto"
-      promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
-      syncCommandMenu(promptInput)
+      if (send) send.classList.toggle("disabled", !threadAbortable() && !liveInput.value.trim())
+      liveInput.style.height = "auto"
+      liveInput.style.height = `${Math.min(liveInput.scrollHeight, 200)}px`
+      syncPromptOverlay(liveInput)
+      syncPromptAssist(liveInput)
+    })
+    promptInput.addEventListener("scroll", () => {
+      syncPromptOverlay(promptInput)
     })
     promptInput.addEventListener("keydown", (event) => {
       if (state.commandMenu.open) {
@@ -2518,6 +3171,33 @@ function bindEvents() {
           return
         }
       }
+      if (state.fileMentionMenu.open) {
+        const candidates = fileMentionCandidates(state.fileMentionMenu.query)
+        if (event.key === "ArrowDown") {
+          event.preventDefault()
+          state.fileMentionMenu.index = Math.min(state.fileMentionMenu.index + 1, Math.max(candidates.length - 1, 0))
+          paintPromptAssistMenu()
+          return
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault()
+          state.fileMentionMenu.index = Math.max(state.fileMentionMenu.index - 1, 0)
+          paintPromptAssistMenu()
+          return
+        }
+        if (event.key === "Enter" || event.key === "Tab") {
+          event.preventDefault()
+          const choice = candidates[state.fileMentionMenu.index]
+          if (choice) selectFileMention(choice).catch((error) => showToast(error.message))
+          else closeFileMentionMenu()
+          return
+        }
+        if (event.key === "Escape") {
+          event.preventDefault()
+          closeFileMentionMenu()
+          return
+        }
+      }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault()
         sendPrompt(promptInput.value)
@@ -2529,32 +3209,71 @@ function bindEvents() {
 // Updates only the slash-command menu DOM in place, so the textarea value/caret/focus
 // survive (a full render() would rebuild the composer and drop the caret).
 function paintCommandMenu() {
+  paintPromptAssistMenu()
+}
+
+function paintPromptAssistMenu() {
   const wrap = document.querySelector(".ta-wrap")
   if (!wrap) return
-  const existing = wrap.querySelector(".cmd-pop")
+  const existing = wrap.querySelector(".prompt-pop")
   if (existing) existing.remove()
-  const html = renderCommandMenu()
+  const html = renderCommandMenu() || renderFileMentionMenu()
   if (html) wrap.insertAdjacentHTML("afterbegin", html)
   wrap.querySelectorAll("[data-command]").forEach((element) => element.addEventListener("mousedown", (event) => {
     event.preventDefault()
     selectCommand(element.dataset.command)
   }))
+  wrap.querySelectorAll("[data-file-mention]").forEach((element) => element.addEventListener("mousedown", (event) => {
+    event.preventDefault()
+    selectFileMention(element.dataset.fileMention).catch((error) => showToast(error.message))
+  }))
 }
 
-function syncCommandMenu(promptInput) {
+function syncPromptOverlay(promptInput) {
+  const overlay = document.getElementById("promptOverlay")
+  const overlayFrame = overlay?.parentElement
+  if (!overlay || !overlayFrame || !promptInput) return
+  overlay.innerHTML = renderPromptOverlayHtml(promptInput.value, state.pendingFileMentions)
+  overlayFrame.scrollTop = promptInput.scrollTop
+}
+
+function syncPromptAssist(promptInput) {
   const caret = promptInput.selectionStart ?? promptInput.value.length
-  const match = promptInput.value.slice(0, caret).match(/(?:^|\s)\/([\w-]*)$/)
-  if (!match) {
-    closeCommandMenu()
+  const beforeCaret = promptInput.value.slice(0, caret)
+  const commandMatch = beforeCaret.match(/(?:^|\s)\/([\w-]*)$/)
+  if (commandMatch) {
+    state.commandMenu = { open: true, query: commandMatch[1], index: 0 }
+    state.fileMentionMenu.open = false
+    paintPromptAssistMenu()
     return
   }
-  state.commandMenu = { open: true, query: match[1], index: 0 }
-  paintCommandMenu()
+  const fileMatch = beforeCaret.match(/(?:^|\s)@([^\s@]*)$/)
+  if (fileMatch) {
+    state.commandMenu = { open: false, query: "", index: 0 }
+    state.fileMentionMenu.open = true
+    state.fileMentionMenu.query = fileMatch[1]
+    state.fileMentionMenu.index = 0
+    if (state.fileMentionMenu.projectId !== state.activeProjectId) {
+      state.fileMentionMenu.files = []
+      state.fileMentionMenu.loading = false
+      state.fileMentionMenu.error = ""
+      state.fileMentionMenu.loadPromise = null
+      state.fileMentionMenu.projectId = state.activeProjectId
+    }
+    paintPromptAssistMenu()
+    ensureProjectFileCandidates().catch((error) => showToast(error.message))
+    return
+  }
+  state.commandMenu = { open: false, query: "", index: 0 }
+  state.fileMentionMenu.open = false
+  state.fileMentionMenu.query = ""
+  state.fileMentionMenu.index = 0
+  paintPromptAssistMenu()
 }
 
 function closeCommandMenu() {
   state.commandMenu = { open: false, query: "", index: 0 }
-  paintCommandMenu()
+  paintPromptAssistMenu()
 }
 
 function selectCommand(name) {
@@ -2570,14 +3289,47 @@ function selectCommand(name) {
   const next = `${before}${value.slice(caret)}`
   state.promptDraft = next
   state.commandMenu = { open: false, query: "", index: 0 }
+  state.fileMentionMenu.open = false
   promptInput.value = next
   promptInput.focus()
   promptInput.setSelectionRange(before.length, before.length)
   promptInput.style.height = "auto"
   promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
+  syncPromptOverlay(promptInput)
   const send = document.querySelector(".send")
   if (send) send.classList.toggle("disabled", !threadAbortable() && !next.trim())
-  paintCommandMenu()
+  paintPromptAssistMenu()
+}
+
+async function selectFileMention(filePath) {
+  const promptInput = document.getElementById("promptInput")
+  if (!filePath || !promptInput) {
+    closeFileMentionMenu()
+    return
+  }
+  const token = fileMentionTokenForPath(filePath)
+  const value = promptInput.value
+  const caret = promptInput.selectionStart ?? value.length
+  const before = value.slice(0, caret).replace(/(^|\s)@([^\s@]*)$/, `$1${token}`)
+  const after = value.slice(caret)
+  const spacer = after && /^\s/.test(after) ? "" : " "
+  const next = `${before}${spacer}${after}`
+  state.promptDraft = next
+  state.pendingFileMentions = [
+    ...state.pendingFileMentions.filter((fileMention) => fileMention.token !== token),
+    { token, path: filePath, name: filename(filePath) }
+  ]
+  closeFileMentionMenu()
+  render()
+  const freshInput = document.getElementById("promptInput")
+  if (freshInput) {
+    freshInput.focus()
+    const selection = before.length + spacer.length
+    freshInput.setSelectionRange(selection, selection)
+    freshInput.style.height = "auto"
+    freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
+    syncPromptOverlay(freshInput)
+  }
 }
 
 function startSidebarResize(event) {
@@ -2660,6 +3412,21 @@ async function copyMessage(messageId) {
 }
 
 async function openArtifact(artifactPath) {
+  if (!artifactPath) return
+  showDocument({ requestedPath: artifactPath, path: artifactPath, name: filename(artifactPath), relativePath: "", content: "", loading: true, error: "", artifact: true, previewMode: "loading", renderMode: "markdown", tab: "code" })
+  try {
+    const preview = await window.openworking.artifacts.preview(artifactPath)
+    if (state.document?.requestedPath !== artifactPath) return
+    const renderMode = preview.previewMode === "markdown" ? "markdown" : preview.previewMode
+    state.document = { requestedPath: artifactPath, ...preview, artifact: true, loading: false, error: "", renderMode, tab: "code" }
+  } catch (error) {
+    if (state.document?.requestedPath !== artifactPath) return
+    state.document = { requestedPath: artifactPath, path: artifactPath, name: filename(artifactPath), relativePath: "", content: "", loading: false, error: error.message, artifact: true, previewMode: "error", renderMode: "markdown", tab: "code" }
+  }
+  render()
+}
+
+async function openArtifactExternally(artifactPath) {
   await window.openworking.artifacts.open(artifactPath)
   showToast("Artifact opened")
 }
@@ -2672,10 +3439,7 @@ async function handleAction(event) {
       state.expanded.clear()
       render()
     }
-    if (action === "toggleSidebar") {
-      state.sidebarCollapsed = !state.sidebarCollapsed
-      render()
-    }
+    if (action === "toggleSidebar") toggleSidebar()
     if (action === "toggleRightSidebar") await toggleRightSidebar()
     if (action === "newSession") await newSession(state.activeProjectId)
     if (action === "togglePlanMode") {
@@ -2715,6 +3479,16 @@ async function handleAction(event) {
     if (action === "openMcpModal") openMcpModal()
     if (action === "closeMcpModal") closeMcpModal()
     if (action === "submitMcpServer") await submitMcpServer()
+    if (action === "connectPreset") openMcpModalForPreset(event.currentTarget.dataset.presetId)
+    if (action === "editMcp") openMcpModalForEdit(event.currentTarget.dataset.mcpName)
+    if (action === "toggleMcpAdvanced") {
+      state.mcpDraft.oauthAdvancedOpen = !state.mcpDraft.oauthAdvancedOpen
+      render()
+    }
+    if (action === "openMcpDocs") {
+      const url = event.currentTarget.dataset.docsUrl
+      if (url) await window.openworking.mcp.openDocs(url)
+    }
     if (action === "addMcpHeader") {
       state.mcpDraft.headers = [...(state.mcpDraft.headers || []), { key: "", value: "" }]
       render()
@@ -2724,10 +3498,25 @@ async function handleAction(event) {
       state.mcpDraft.headers = (state.mcpDraft.headers || []).filter((_, i) => i !== index)
       render()
     }
+    if (action === "addMcpEnv") {
+      state.mcpDraft.env = [...(state.mcpDraft.env || []), { key: "", value: "" }]
+      render()
+    }
+    if (action === "removeMcpEnv") {
+      const index = Number(event.currentTarget.dataset.mcpEnvIndex)
+      state.mcpDraft.env = (state.mcpDraft.env || []).filter((_, i) => i !== index)
+      render()
+    }
     if (action === "removeMcp") {
       state.mcpDeleteTarget = { name: event.currentTarget.dataset.mcpName }
       state.mcpRemoving = false
       render()
+    }
+    if (action === "authenticateMcp") {
+      await authenticateMcp(event.currentTarget.dataset.mcpName)
+    }
+    if (action === "clearMcpAuth") {
+      await authenticateMcp(event.currentTarget.dataset.mcpName, { clear: true })
     }
     if (action === "cancelRemoveMcp") {
       if (state.mcpRemoving) return
@@ -2768,6 +3557,7 @@ async function handleAction(event) {
       render()
     }
     if (action === "closeDocument") closeDocument()
+    if (action === "openExternalArtifact") await openArtifactExternally(event.currentTarget.dataset.artifactPath)
     if (action === "attachment") {
       // Triggered from the "+" popover - close it so the menu does not stay open.
       state.popover = null
@@ -2805,9 +3595,29 @@ async function removeAttachment(id) {
   await window.openworking.attachments.discard([id])
 }
 
+function removeFileMention(token) {
+  if (!token) return
+  const promptInput = document.getElementById("promptInput")
+  const currentValue = promptInput?.value ?? state.promptDraft
+  const next = currentValue.replace(token, "").replace(/\s{2,}/g, " ")
+  state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => fileMention.token !== token)
+  state.promptDraft = next
+  render()
+  const freshInput = document.getElementById("promptInput")
+  if (freshInput) {
+    freshInput.focus()
+    const caret = next.length
+    freshInput.setSelectionRange(caret, caret)
+    freshInput.style.height = "auto"
+    freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
+    syncPromptOverlay(freshInput)
+  }
+}
+
 async function clearPendingAttachments() {
   const ids = state.pendingAttachments.map((attachment) => attachment.id)
   state.pendingAttachments = []
+  state.pendingFileMentions = []
   if (ids.length) await window.openworking.attachments.discard(ids)
 }
 
@@ -2832,7 +3642,7 @@ async function openProject(projectId, { selectLatest = true } = {}) {
   await clearPendingAttachments()
   const switchingProject = state.activeProjectId !== projectId
   state.activeProjectId = projectId
-  if (switchingProject) resetFileTree(projectId)
+  resetFileTree(projectId)
   state.activeSessionId = null
   resetActiveThread()
   state.nav = "session"
@@ -2870,14 +3680,37 @@ function pruneThreads(keepSessionIds) {
   }
 }
 
+function chooseSessionAfterRuntimeReconnect(currentSessionId, sessions) {
+  if (!currentSessionId) return null
+  return sessions.some((session) => session.id === currentSessionId) ? currentSessionId : null
+}
+
+async function ensureRuntimeProject(projectId, { preserveSessionId = null } = {}) {
+  const project = state.projects.find((item) => item.id === projectId)
+  if (!project) return null
+
+  state.loading = true
+  render()
+  try {
+    state.runtime = await window.openworking.runtime.openProject(project)
+    state.commands = await window.openworking.runtime.listCommands().catch(() => [])
+    state.commandMenu = { open: false, query: "", index: 0 }
+    const sessions = await window.openworking.runtime.listSessions()
+    state.sessionsByProject[projectId] = sessions
+    return chooseSessionAfterRuntimeReconnect(preserveSessionId, sessions)
+  } finally {
+    state.loading = false
+    render()
+  }
+}
+
 async function newSession(projectId, { clearAttachments = true } = {}) {
   if (!projectId) return
   const project = state.projects.find((item) => item.id === projectId)
   if (!project) return
-  const switchingProject = state.activeProjectId !== projectId
   if (clearAttachments) await clearPendingAttachments()
   state.activeProjectId = projectId
-  if (switchingProject) resetFileTree(projectId)
+  resetFileTree(projectId)
   state.activeSessionId = null
   resetActiveThread()
   state.nav = "session"
@@ -3048,50 +3881,65 @@ async function rejectPlan() {
 
 async function sendPrompt(rawPrompt) {
   state.commandMenu = { open: false, query: "", index: 0 }
+  state.fileMentionMenu.open = false
+  state.fileMentionMenu.query = ""
+  state.fileMentionMenu.index = 0
   const prompt = String(rawPrompt || "").trim()
   const project = selectedProject()
   if (!prompt || !project) return
   const commandMatch = prompt.match(/^\/([\w-]+)(?:\s+([\s\S]*))?$/)
   const command = commandMatch && findCommand(commandMatch[1]) ? commandMatch[1] : null
   const commandArgs = command ? (commandMatch[2] || "") : ""
-  const attachments = command ? [] : state.pendingAttachments.slice()
+  const fileMentions = command ? [] : await fileMentionsForSubmit(prompt, command)
+  const attachments = computePromptAttachments({
+    command,
+    pendingAttachments: state.pendingAttachments,
+    fileMentions
+  })
+  const effectivePrompt = command ? prompt : applyPendingFileMentions(prompt, fileMentions)
   const mode = modes.find((item) => item.id === state.mode) || modes[0]
-  if (state.runtime?.project?.id !== project.id || state.runtime.status !== "running") {
-    await newSession(project.id, { clearAttachments: false })
-  }
-  if (!state.activeSessionId) {
-    const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
-    const session = await window.openworking.runtime.createSession({ title })
-    state.activeSessionId = session.id
-    state.sessionsByProject[project.id] ||= []
-    state.sessionsByProject[project.id].unshift(session)
-    // Discard the unsaved "new session" draft thread and start a clean thread under
-    // the real session id, so subsequent stream events route to it by sessionID.
-    state.threads.delete(null)
-    resetActiveThread(session.id)
-  }
-  const thread = activeThread()
-  const optimisticId = addOptimisticUser(thread, prompt, attachments)
-  if (mode.id === "plan") {
-    const afterMessageIndex = thread.messages.findIndex((message) => message.id === optimisticId)
-    state.planProposal = {
-      sessionId: state.activeSessionId,
-      afterMessageIndex: afterMessageIndex === -1 ? thread.messages.length - 1 : afterMessageIndex
-    }
-    state.planAccepted = null
-    state.planAutoOpened = null
-  } else if (state.planProposal?.sessionId === state.activeSessionId) {
-    state.planProposal = null
-  }
-  const sentAttachmentIds = new Set(attachments.map((attachment) => attachment.id))
-  thread.status = { type: "busy" }
-  state.promptDraft = ""
-  if (!command && sentAttachmentIds.size) {
-    state.pendingAttachments = state.pendingAttachments.filter((attachment) => !sentAttachmentIds.has(attachment.id))
-  }
-  render({ threadScroll: "latest" })
-  const model = selectedModel()
+  let thread = null
+  let optimisticId = null
   try {
+    if (state.runtime?.project?.id !== project.id || state.runtime.status !== "running") {
+      state.activeSessionId = await ensureRuntimeProject(project.id, { preserveSessionId: state.activeSessionId })
+    }
+    if (!state.activeSessionId) {
+      const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
+      const session = await window.openworking.runtime.createSession({ title })
+      state.activeSessionId = session.id
+      state.sessionsByProject[project.id] ||= []
+      state.sessionsByProject[project.id].unshift(session)
+      // Discard the unsaved "new session" draft thread and start a clean thread under
+      // the real session id, so subsequent stream events route to it by sessionID.
+      state.threads.delete(null)
+      resetActiveThread(session.id)
+    }
+    thread = activeThread()
+    optimisticId = addOptimisticUser(thread, prompt, attachments, {
+      fileRefs: fileMentions,
+      signatureText: command ? undefined : effectivePrompt
+    })
+    if (mode.id === "plan") {
+      const afterMessageIndex = thread.messages.findIndex((message) => message.id === optimisticId)
+      state.planProposal = {
+        sessionId: state.activeSessionId,
+        afterMessageIndex: afterMessageIndex === -1 ? thread.messages.length - 1 : afterMessageIndex
+      }
+      state.planAccepted = null
+      state.planAutoOpened = null
+    } else if (state.planProposal?.sessionId === state.activeSessionId) {
+      state.planProposal = null
+    }
+    const sentAttachmentIds = new Set(attachments.map((attachment) => attachment.id))
+    thread.status = { type: "busy" }
+    state.promptDraft = ""
+    if (!command && sentAttachmentIds.size) {
+      state.pendingAttachments = state.pendingAttachments.filter((attachment) => !sentAttachmentIds.has(attachment.id))
+    }
+    if (!command) state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => !fileMentions.some((sent) => sent.token === fileMention.token))
+    render({ threadScroll: "latest" })
+    const model = selectedModel()
     if (command) {
       await window.openworking.runtime.sendCommand({
         sessionId: state.activeSessionId,
@@ -3103,7 +3951,7 @@ async function sendPrompt(rawPrompt) {
     } else {
       await window.openworking.runtime.sendPrompt({
         sessionId: state.activeSessionId,
-        prompt,
+        prompt: effectivePrompt,
         attachmentIds: attachments.map((attachment) => attachment.id),
         agent: mode.agent,
         model: model ? { providerID: model.providerID, modelID: model.modelID } : undefined
@@ -3111,9 +3959,9 @@ async function sendPrompt(rawPrompt) {
     }
     render({ threadScroll: "latest" })
   } catch (error) {
-    removeOptimisticUser(thread, optimisticId)
+    if (thread && optimisticId) removeOptimisticUser(thread, optimisticId)
     if (state.planProposal?.sessionId === state.activeSessionId) state.planProposal = null
-    thread.status = { type: "idle" }
+    if (thread) thread.status = { type: "idle" }
     state.promptDraft = prompt
     if (!command && attachments.length) {
       const pendingIds = new Set(state.pendingAttachments.map((attachment) => attachment.id))
@@ -3122,8 +3970,15 @@ async function sendPrompt(rawPrompt) {
         ...state.pendingAttachments
       ]
     }
+    if (!command && fileMentions.length) {
+      const pendingTokens = new Set(state.pendingFileMentions.map((fileMention) => fileMention.token))
+      state.pendingFileMentions = [
+        ...fileMentions.filter((fileMention) => !pendingTokens.has(fileMention.token)),
+        ...state.pendingFileMentions
+      ]
+    }
     render({ threadScroll: "latest" })
-    throw error
+    showToast(error.message || "Could not send prompt.")
   }
 }
 
@@ -3178,6 +4033,7 @@ async function removeProject(projectId) {
   delete state.sessionsByProject[projectId]
   if (state.activeProjectId === projectId) {
     state.activeProjectId = state.projects[0]?.id || null
+    resetFileTree(state.activeProjectId)
     state.activeSessionId = null
     state.threads.clear()
     resetActiveThread()
@@ -3244,6 +4100,11 @@ function redactedConfigJson() {
   const config = JSON.parse(JSON.stringify(state.config))
   for (const provider of Object.values(config?.provider || {})) {
     if (provider.options?.apiKey) provider.options.apiKey = "[redacted]"
+  }
+  for (const server of Object.values(config?.mcp || {})) {
+    if (server?.oauth && typeof server.oauth === "object" && server.oauth.clientSecret) {
+      server.oauth.clientSecret = "[redacted]"
+    }
   }
   return JSON.stringify(config, null, 2)
 }
@@ -3327,36 +4188,130 @@ async function uninstallSkill(name) {
   }
 }
 
+function newMcpDraft(overrides = {}) {
+  return {
+    name: "",
+    type: "remote",
+    url: "",
+    command: "",
+    headers: [],
+    env: [],                    // [{key, value}] environment variables for local servers
+    oauthMode: "auto",          // auto | custom | disabled
+    oauthClientId: "",
+    oauthClientSecret: "",
+    oauthScope: "",
+    oauthAdvancedOpen: false,
+    hasStoredSecret: false,
+    presetDocsUrl: "",
+    ...overrides
+  }
+}
+
 function openMcpModal() {
   state.mcpModalOpen = true
+  state.mcpEditTarget = null
   state.mcpSaving = false
   state.mcpError = null
-  state.mcpDraft = { name: "", type: "remote", url: "", command: "", oauth: true, headers: [] }
+  state.mcpDraft = newMcpDraft()
+  render()
+}
+
+function openMcpModalForPreset(presetId) {
+  const preset = MCP_PRESETS.find((entry) => entry.id === presetId)
+  if (!preset) return openMcpModal()
+  state.mcpModalOpen = true
+  state.mcpEditTarget = null
+  state.mcpSaving = false
+  state.mcpError = null
+  state.mcpDraft = newMcpDraft({
+    name: preset.id,
+    type: preset.type === "local" ? "local" : "remote",
+    url: preset.url || "",
+    command: preset.command || "",
+    env: Array.isArray(preset.env) ? preset.env.map((row) => ({ ...row })) : [],
+    oauthMode: preset.needsClientApp ? "custom" : "auto",
+    oauthAdvancedOpen: !!preset.needsClientApp,
+    presetDocsUrl: preset.docsUrl || ""
+  })
+  render()
+}
+
+function openMcpModalForEdit(name) {
+  const server = (state.mcpServers || []).find((entry) => entry.name === name)
+  if (!server) return
+  let oauthMode = "auto"
+  let oauthClientId = ""
+  let oauthScope = ""
+  let hasStoredSecret = false
+  if (server.oauth === false) {
+    oauthMode = "disabled"
+  } else if (server.oauth && typeof server.oauth === "object") {
+    oauthMode = "custom"
+    oauthClientId = server.oauth.clientId || ""
+    oauthScope = server.oauth.scope || ""
+    hasStoredSecret = !!server.oauth.hasClientSecret
+  }
+  state.mcpModalOpen = true
+  state.mcpEditTarget = name
+  state.mcpSaving = false
+  state.mcpError = null
+  state.mcpDraft = newMcpDraft({
+    name: server.name,
+    type: server.type,
+    url: server.url || "",
+    command: Array.isArray(server.command) ? server.command.join(" ") : "",
+    headers: Object.entries(server.headers || {}).map(([key, value]) => ({ key, value })),
+    env: Object.entries(server.environment || {}).map(([key, value]) => ({ key, value })),
+    oauthMode,
+    oauthClientId,
+    oauthScope,
+    oauthAdvancedOpen: oauthMode === "custom",
+    hasStoredSecret
+  })
   render()
 }
 
 function closeMcpModal() {
   if (state.mcpSaving) return
   state.mcpModalOpen = false
+  state.mcpEditTarget = null
   state.mcpDraft = null
   state.mcpError = null
   render()
 }
 
+// Translate the modal draft into the payload buildMcpServer/updateMcpServer expects.
 function serializeMcpDraft(draft) {
   if (draft.type === "local") {
-    return { name: draft.name.trim(), type: "local", command: draft.command }
+    const environment = {}
+    for (const row of draft.env || []) {
+      const key = String(row.key || "").trim()
+      if (key) environment[key] = String(row.value ?? "")
+    }
+    const payload = { name: draft.name.trim(), type: "local", command: draft.command }
+    if (Object.keys(environment).length) payload.environment = environment
+    return payload
   }
   const headers = {}
   for (const row of draft.headers || []) {
     const key = String(row.key || "").trim()
     if (key) headers[key] = String(row.value ?? "")
   }
+  let oauth
+  if (draft.oauthMode === "disabled") {
+    oauth = false
+  } else if (draft.oauthMode === "custom") {
+    // Omit a blank secret on edit so updateMcpServer preserves the stored one.
+    oauth = { clientId: draft.oauthClientId, scope: draft.oauthScope }
+    if (String(draft.oauthClientSecret || "").trim()) oauth.clientSecret = draft.oauthClientSecret
+  } else {
+    oauth = true // auto-negotiate → buildMcpServer omits the key
+  }
   return {
     name: draft.name.trim(),
     type: "remote",
     url: draft.url,
-    oauth: !!draft.oauth,
+    oauth,
     headers
   }
 }
@@ -3379,19 +4334,58 @@ async function submitMcpServer() {
     render()
     return
   }
+  if (draft.type === "remote" && draft.oauthMode === "custom" && !String(draft.oauthClientId || "").trim()) {
+    state.mcpError = "OAuth client ID is required for a pre-registered OAuth app."
+    render()
+    return
+  }
+  const editing = !!state.mcpEditTarget
   state.mcpSaving = true
   state.mcpError = null
   render()
   try {
-    const result = await window.openworking.mcp.add(serializeMcpDraft(draft))
+    const payload = serializeMcpDraft(draft)
+    const result = editing
+      ? await window.openworking.mcp.update(state.mcpEditTarget, payload)
+      : await window.openworking.mcp.add(payload)
     state.mcpServers = result?.servers || state.mcpServers
     state.mcpModalOpen = false
+    state.mcpEditTarget = null
     state.mcpDraft = null
-    showToast(`Added ${draft.name.trim()}`)
+    showToast(`${editing ? "Updated" : "Added"} ${draft.name.trim()}`)
+    // A freshly added/edited OAuth server reports needs_auth once the runtime reconnects.
+    refreshMcpStatus()
   } catch (error) {
     state.mcpError = error.message
   } finally {
     state.mcpSaving = false
+    render()
+  }
+}
+
+async function authenticateMcp(name, { clear = false } = {}) {
+  const serverName = String(name || "")
+  if (!serverName || state.mcpAuthenticating?.[serverName]) return
+  state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: true }
+  state.mcpError = null
+  state.mcpErrorTarget = null
+  render()
+  try {
+    const result = clear
+      ? await window.openworking.mcp.clearAuth(serverName)
+      : await window.openworking.mcp.authenticate(serverName)
+    if (result?.error) {
+      state.mcpError = result.error
+      state.mcpErrorTarget = serverName
+    } else {
+      if (result.servers) state.mcpServers = result.servers
+      applyMcpStatusList(result.status)
+      if (state.mcpStatus[serverName] === "connected") showToast(`Connected ${serverName}`)
+    }
+  } catch (error) {
+    state.mcpError = error.message
+  } finally {
+    state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: false }
     render()
   }
 }
@@ -3434,57 +4428,50 @@ async function reloadConfig() {
   selectedModel()
 }
 
-async function login() {
-  state.authLoading = true
-  render()
-  try {
-    state.auth = await window.openworking.auth.login()
-    await reloadConfig()
-    render()
-    if (isAuthenticated() && state.projects[0]) {
-      await openProject(state.projects[0].id, { selectLatest: false })
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    applyPendingFileMentions,
+    chooseSessionAfterRuntimeReconnect,
+    collectLiveFileMentions,
+    computePromptAttachments,
+    escapeRegex,
+    fileMentionTokenForPath,
+    fileMentionTokenPattern,
+    filterPromptAttachments,
+    livePendingFileMentions,
+    renderPromptOverlayHtml,
+    renderTextWithFileMentions,
+    resolveFileMentionsFromPrompt,
+    __test: {
+      sendPrompt,
+      state
     }
-  } finally {
-    state.authLoading = false
-    render()
   }
 }
 
-async function logout() {
-  state.popover = null
-  state.accountMenuOpen = false
-  state.authLoading = true
-  render()
-  try {
-    state.auth = await window.openworking.auth.logout()
-    state.runtime = await window.openworking.runtime.get()
-    state.activeSessionId = null
-    state.threads.clear()
-    resetActiveThread()
-  } finally {
-    state.authLoading = false
-    render()
-  }
+if (typeof document !== "undefined") {
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".composer")) {
+      if (state.commandMenu.open) closeCommandMenu()
+      if (state.fileMentionMenu.open) closeFileMentionMenu()
+    }
+    let dirty = false
+    if (state.sessionMenu && !event.target.closest(".session-row-wrap")) {
+      state.sessionMenu = null
+      dirty = true
+    }
+    if (state.projectMenu && !event.target.closest(".proj-head-wrap")) {
+      state.projectMenu = null
+      dirty = true
+    }
+    if (state.popover && !event.target.closest(".popover-anchor")) {
+      state.popover = null
+      dirty = true
+    }
+    if (dirty) render()
+  })
+
+  loadInitialState().catch((error) => {
+    document.getElementById("root").innerHTML = `<pre class="fatal">${escapeHtml(error.stack || error.message)}</pre>`
+  })
 }
-
-document.addEventListener("click", (event) => {
-  if (state.commandMenu.open && !event.target.closest(".composer")) closeCommandMenu()
-  let dirty = false
-  if (state.sessionMenu && !event.target.closest(".session-row-wrap")) {
-    state.sessionMenu = null
-    dirty = true
-  }
-  if (state.projectMenu && !event.target.closest(".proj-head-wrap")) {
-    state.projectMenu = null
-    dirty = true
-  }
-  if (state.popover && !event.target.closest(".popover-anchor")) {
-    state.popover = null
-    dirty = true
-  }
-  if (dirty) render()
-})
-
-loadInitialState().catch((error) => {
-  document.getElementById("root").innerHTML = `<pre class="fatal">${escapeHtml(error.stack || error.message)}</pre>`
-})

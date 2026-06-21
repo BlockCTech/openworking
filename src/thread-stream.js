@@ -4,7 +4,7 @@
   if (root) root.OpenWorkingThreadStream = api
 })(typeof window === "object" ? window : globalThis, function createThreadStreamApi() {
   let optimisticId = 0
-  const OFFICE_ATTACHMENT_CONTEXT_MARKER = "Attached Office files are provided as local paths plus extracted text context"
+  const OFFICE_ATTACHMENT_CONTEXT_MARKER = "Attached document files are provided as local paths plus extracted text context"
   const NO_RESPONSE_DETAIL = "The request ended without a response. Check provider/model/API key or runtime diagnostics."
 
   function idleStatus() {
@@ -67,6 +67,17 @@
         type: "file",
         filename: part.filename || "file",
         mime: part.mime || "application/octet-stream"
+      }
+    }
+    if (part.type === "file-ref") {
+      return {
+        id: part.id || fallbackId,
+        sessionID: part.sessionID,
+        messageID: part.messageID,
+        type: "file-ref",
+        token: part.token || "",
+        path: part.path || "",
+        name: part.name || part.token || part.path || "file"
       }
     }
     if (part.type === "reasoning") {
@@ -169,10 +180,96 @@
     return { id, role, parts }
   }
 
-  function messageText(message) {
-    return message.parts
+  function basenameFromPath(filePath) {
+    const normalized = String(filePath || "").replace(/\\/g, "/")
+    const index = normalized.lastIndexOf("/")
+    return index === -1 ? normalized : normalized.slice(index + 1)
+  }
+
+  const VIEWABLE_FILE_EXTENSIONS = new Set([
+    ".md", ".markdown",
+    ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".css", ".scss", ".html",
+    ".json", ".jsonc", ".yml", ".yaml", ".toml", ".xml",
+    ".py", ".rb", ".go", ".rs", ".java", ".kt", ".swift",
+    ".c", ".cpp", ".h", ".cs", ".php", ".sql",
+    ".vue", ".svelte", ".astro",
+    ".sh", ".bash", ".zsh"
+  ])
+  const VIEWABLE_FILE_BASENAMES = new Set(["Dockerfile", "Makefile", "Procfile", ".gitignore", ".eslintrc", ".prettierrc", ".editorconfig"])
+
+  function isViewableFilePath(filePath) {
+    const name = basenameFromPath(filePath)
+    if (VIEWABLE_FILE_BASENAMES.has(name)) return true
+    const dot = name.lastIndexOf(".")
+    if (dot <= 0) return false
+    return VIEWABLE_FILE_EXTENSIONS.has(name.slice(dot).toLowerCase())
+  }
+
+  function resolveKnownProjectFilePath(candidatePath, projectFiles = []) {
+    const path = String(candidatePath || "").trim()
+    if (!path || /\s/.test(path)) return null
+    if (Array.isArray(projectFiles) && projectFiles.length) {
+      if (projectFiles.includes(path)) return path
+      const basename = basenameFromPath(path)
+      const basenameMatches = projectFiles.filter((file) => basenameFromPath(file) === basename)
+      if (basenameMatches.length === 1) return basenameMatches[0]
+      return null
+    }
+    return isViewableFilePath(path) ? path : null
+  }
+
+  function tokenForKnownProjectFile(filePath, projectFiles = []) {
+    const name = basenameFromPath(filePath)
+    if (Array.isArray(projectFiles) && projectFiles.length) {
+      const duplicates = projectFiles.filter((file) => basenameFromPath(file) === name)
+      return duplicates.length > 1 ? `@${filePath}` : `@${name}`
+    }
+    return `@${name}`
+  }
+
+  function fileRefsFromBacktickPaths(text, projectFiles = []) {
+    const refs = []
+    const seen = new Set()
+    const pattern = /`([^`\n]+)`/g
+    let match = null
+    while ((match = pattern.exec(String(text || "")))) {
+      const path = resolveKnownProjectFilePath(match[1], projectFiles)
+      if (!path || seen.has(path)) continue
+      seen.add(path)
+      const name = basenameFromPath(path)
+      refs.push({ token: tokenForKnownProjectFile(path, projectFiles), path, name })
+    }
+    return refs
+  }
+
+  function userMessageFileRefs(message, projectFiles = []) {
+    const explicit = message.parts.filter((part) => part.type === "file-ref")
+    if (explicit.length) return explicit
+    if (message?.role !== "user") return []
+    const rawText = message.parts
       .filter((part) => part.type === "text")
       .map((part) => part.text)
+      .join("\n\n")
+    return fileRefsFromBacktickPaths(rawText, projectFiles)
+  }
+
+  function renderUserText(text, fileRefs = []) {
+    let rendered = String(text || "")
+    for (const part of fileRefs) {
+      const path = String(part?.path || "").trim()
+      const token = String(part?.token || "").trim()
+      if (!path || !token) continue
+      rendered = rendered.replaceAll(`\`${path}\``, token)
+    }
+    return rendered
+  }
+
+  function messageText(message, projectFiles = []) {
+    const fileRefs = userMessageFileRefs(message, projectFiles)
+    return message.parts
+      .filter((part) => part.type === "text")
+      .map((part) => message.role === "user" ? renderUserText(part.text, fileRefs) : part.text)
       .join("\n\n")
   }
 
@@ -188,9 +285,17 @@
     ].join("\n")
   }
 
+  function messageSignatureText(message) {
+    if (message.signatureText) return message.signatureText
+    return message.parts
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("\n\n")
+  }
+
   function messageSignature(message) {
     return JSON.stringify({
-      text: messageText(message),
+      text: messageSignatureText(message),
       files: message.parts
         .filter((part) => part.type === "file")
         .map((part) => ({ filename: part.filename, mime: part.mime }))
@@ -283,6 +388,31 @@
     if (index !== -1) thread.messages.splice(index, 1)
   }
 
+  function findMatchingOptimisticMessage(messages, message) {
+    if (message?.role !== "user") return null
+    const signature = messageSignature(message)
+    return messages.find((item) => item.optimistic && item.role === "user" && messageSignature(item) === signature) || null
+  }
+
+  function mergeOptimisticFileRefs(message, optimistic) {
+    if (!message || !optimistic) return message
+    const fileRefs = optimistic.parts.filter((part) => part.type === "file-ref")
+    if (!fileRefs.length) return message
+
+    return {
+      ...message,
+      signatureText: message.signatureText || messageSignatureText(message),
+      parts: [
+        ...fileRefs.map((part, index) => ({
+          ...part,
+          id: `${message.id}_ref_${index}`,
+          messageID: message.id
+        })),
+        ...message.parts.filter((part) => part.type !== "file-ref")
+      ]
+    }
+  }
+
   function optimisticMatchesPart(message, part) {
     if (!message.optimistic || message.role !== "user") return false
     if (part.type === "file") {
@@ -349,7 +479,10 @@
       ? previousMessages.filter((message) => message.syntheticError)
       : []
     const normalized = Array.isArray(messages)
-      ? messages.map(normalizeMessage).filter(Boolean)
+      ? messages
+        .map(normalizeMessage)
+        .filter(Boolean)
+        .map((message) => mergeOptimisticFileRefs(message, sameSession ? findMatchingOptimisticMessage(previousMessages, message) : null))
       : []
 
     thread.sessionId = sessionId
@@ -378,12 +511,13 @@
     return thread
   }
 
-  function addOptimisticUser(thread, text, attachments = []) {
+  function addOptimisticUser(thread, text, attachments = [], options = {}) {
     const id = `local_${++optimisticId}`
     thread.messages.push({
       id,
       role: "user",
       optimistic: true,
+      ...(options.signatureText ? { signatureText: options.signatureText } : {}),
       parts: [
         ...attachments.map((attachment, index) => ({
           id: `${id}_file_${index}`,
@@ -392,6 +526,14 @@
           filename: attachment.filename,
           mime: attachment.mime
         })),
+        ...((Array.isArray(options.fileRefs) ? options.fileRefs : []).map((ref, index) => ({
+          id: `${id}_ref_${index}`,
+          messageID: id,
+          type: "file-ref",
+          token: ref.token || "",
+          path: ref.path || "",
+          name: ref.name || ref.token || ref.path || "file"
+        }))),
         { id: `${id}_text`, messageID: id, type: "text", text }
       ]
     })
@@ -597,8 +739,10 @@
     clearPendingQuestion,
     createThreadStream,
     hasRunningTool,
+    fileRefsFromBacktickPaths,
     hydrateThread,
     messageCopyText,
+    userMessageFileRefs,
     messageText,
     removeOptimisticUser,
     resetThread,

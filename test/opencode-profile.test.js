@@ -12,6 +12,7 @@ const {
   readSkillMarkdown,
   uninstallCustomSkill,
   addMcpServer,
+  updateMcpServer,
   listMcpServers,
   removeMcpServer,
   setMcpServerEnabled,
@@ -371,6 +372,87 @@ test("uninstalls custom skills and refuses to remove built-ins", () => {
   assert.throws(() => uninstallCustomSkill(profile, "removable-skill"), /not installed/)
 })
 
+test("installs HITL tool gates declared via askToolPermissions and leaves other tools alone", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-skill-ask-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const archivePath = createSkillArchive(temp, "gated.zip", {
+    "SKILL.md": "---\nname: gated-skill\ndescription: Gated skill\naskToolPermissions: backlog_add_issue, backlog_update_issue, backlog_add_issue_comment, backlog_delete_issue\n---\n"
+  })
+
+  installCustomSkillArchive(profile, archivePath)
+
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(config.permission.skill["gated-skill"], "allow")
+  assert.equal(config.permission.backlog_add_issue, "ask")
+  assert.equal(config.permission.backlog_update_issue, "ask")
+  assert.equal(config.permission.backlog_add_issue_comment, "ask")
+  assert.equal(config.permission.backlog_delete_issue, "ask")
+  // Read tools are never gated.
+  assert.equal("backlog_get_issue" in config.permission, false)
+  assert.equal("backlog_get_project" in config.permission, false)
+})
+
+test("askToolPermissions ignores prototype-reserved permission keys", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-skill-reserved-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const archivePath = createSkillArchive(temp, "reserved.zip", {
+    "SKILL.md": "---\nname: reserved-skill\ndescription: Reserved skill\naskToolPermissions: __proto__, constructor, prototype, hasOwnProperty, backlog_add_issue\n---\n"
+  })
+
+  installCustomSkillArchive(profile, archivePath)
+
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(config.permission.skill["reserved-skill"], "allow")
+  assert.equal(config.permission.backlog_add_issue, "ask")
+  assert.equal(Object.hasOwn(config.permission, "__proto__"), false)
+  assert.equal(Object.hasOwn(config.permission, "constructor"), false)
+  assert.equal(Object.hasOwn(config.permission, "prototype"), false)
+  assert.equal(Object.hasOwn(config.permission, "hasOwnProperty"), false)
+})
+
+test("skills without askToolPermissions add no tool gates", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-skill-noask-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const archivePath = createSkillArchive(temp, "plain.zip", {
+    "SKILL.md": "---\nname: plain-skill\ndescription: Plain skill\n---\n"
+  })
+
+  installCustomSkillArchive(profile, archivePath)
+
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(config.permission.skill["plain-skill"], "allow")
+  // A skill that declares no askToolPermissions must not add any MCP tool gates.
+  const backlogKeys = Object.keys(config.permission).filter((key) => key.startsWith("backlog_"))
+  assert.deepEqual(backlogKeys, [])
+})
+
+test("uninstall removes HITL tool gates but respects user overrides", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-skill-ask-clean-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const archivePath = createSkillArchive(temp, "gated.zip", {
+    "SKILL.md": "---\nname: gated-skill\ndescription: Gated skill\naskToolPermissions: backlog_add_issue, backlog_update_issue, backlog_delete_issue\n---\n"
+  })
+  installCustomSkillArchive(profile, archivePath)
+
+  // User deliberately changes one gate to "allow" — that choice must survive uninstall.
+  const edited = readProfileConfigForTest(profile)
+  edited.permission.backlog_update_issue = "allow"
+  writeProfileConfig(profile, edited)
+
+  uninstallCustomSkill(profile, "gated-skill")
+
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal("backlog_add_issue" in config.permission, false)
+  assert.equal("backlog_delete_issue" in config.permission, false)
+  // The user-overridden key is preserved.
+  assert.equal(config.permission.backlog_update_issue, "allow")
+  assert.equal("gated-skill" in (config.permission.skill || {}), false)
+})
+
+function readProfileConfigForTest(profile) {
+  return JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+}
+
 test("adds a remote MCP server and round-trips through listMcpServers", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
   const profile = ensureOpenworkingProfile({ userDataPath: temp })
@@ -428,6 +510,58 @@ test("adds a local MCP server and splits the command into an array", () => {
   })
 })
 
+test("adds a local MCP server with environment variables and round-trips them", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  const added = addMcpServer(profile, {
+    name: "backlog",
+    type: "local",
+    command: "npx backlog-mcp-server",
+    environment: { BACKLOG_DOMAIN: "example.backlog.com", BACKLOG_API_KEY: "secret-key", BLANK_KEY: "" }
+  })
+  assert.deepEqual(added.command, ["npx", "backlog-mcp-server"])
+  assert.deepEqual(added.environment, {
+    BACKLOG_DOMAIN: "example.backlog.com",
+    BACKLOG_API_KEY: "secret-key",
+    BLANK_KEY: ""
+  })
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.deepEqual(saved.mcp["backlog"], {
+    type: "local",
+    command: ["npx", "backlog-mcp-server"],
+    enabled: true,
+    environment: { BACKLOG_DOMAIN: "example.backlog.com", BACKLOG_API_KEY: "secret-key", BLANK_KEY: "" }
+  })
+
+  const listed = listMcpServers(profile).find((entry) => entry.name === "backlog")
+  assert.deepEqual(listed.environment, {
+    BACKLOG_DOMAIN: "example.backlog.com",
+    BACKLOG_API_KEY: "secret-key",
+    BLANK_KEY: ""
+  })
+
+  const updated = updateMcpServer(profile, "backlog", {
+    type: "local",
+    command: "npx backlog-mcp-server",
+    environment: { BACKLOG_DOMAIN: "updated.backlog.com", BACKLOG_API_KEY: "new-key" }
+  })
+  assert.deepEqual(updated.environment, {
+    BACKLOG_DOMAIN: "updated.backlog.com",
+    BACKLOG_API_KEY: "new-key"
+  })
+})
+
+test("omits the environment key for a local MCP server with no env vars", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  addMcpServer(profile, { name: "bare", type: "local", command: "npx some-server" })
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.ok(!("environment" in saved.mcp["bare"]))
+})
+
 test("rejects invalid MCP server input", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
   const profile = ensureOpenworkingProfile({ userDataPath: temp })
@@ -439,6 +573,76 @@ test("rejects invalid MCP server input", () => {
 
   addMcpServer(profile, { name: "dupe", type: "remote", url: "https://x.test/mcp" })
   assert.throws(() => addMcpServer(profile, { name: "dupe", type: "remote", url: "https://y.test/mcp" }), /already exists/)
+})
+
+test("stores a pre-registered OAuth app and redacts the client secret in the view", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  const added = addMcpServer(profile, {
+    name: "slack",
+    type: "remote",
+    url: "https://mcp.slack.com/mcp",
+    oauth: { clientId: " client-123 ", clientSecret: " secret-xyz ", scope: "channels:read chat:write" }
+  })
+
+  // The view never exposes the raw secret — only a boolean flag.
+  assert.deepEqual(added.oauth, {
+    clientId: "client-123",
+    scope: "channels:read chat:write",
+    callbackPort: undefined,
+    redirectUri: "",
+    hasClientSecret: true
+  })
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.deepEqual(saved.mcp.slack.oauth, {
+    clientId: "client-123",
+    clientSecret: "secret-xyz",
+    scope: "channels:read chat:write"
+  })
+})
+
+test("validates the OAuth callback port", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  assert.throws(
+    () => addMcpServer(profile, { name: "bad-port", type: "remote", url: "https://x.test/mcp", oauth: { clientId: "a", callbackPort: 70000 } }),
+    /callback port/
+  )
+  const added = addMcpServer(profile, { name: "ok-port", type: "remote", url: "https://x.test/mcp", oauth: { clientId: "a", callbackPort: "20000" } })
+  assert.equal(added.oauth.callbackPort, 20000)
+})
+
+test("updateMcpServer preserves the stored secret when left blank and rejects unknown names", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  addMcpServer(profile, {
+    name: "slack",
+    type: "remote",
+    url: "https://mcp.slack.com/mcp",
+    oauth: { clientId: "client-1", clientSecret: "secret-1", scope: "old:scope" }
+  })
+  setMcpServerEnabled(profile, "slack", false)
+
+  // Edit scopes but leave the secret blank → the stored secret must survive, and the
+  // enabled flag must be preserved.
+  const updated = updateMcpServer(profile, "slack", {
+    type: "remote",
+    url: "https://mcp.slack.com/mcp",
+    oauth: { clientId: "client-1", clientSecret: "", scope: "new:scope" }
+  })
+  assert.equal(updated.oauth.hasClientSecret, true)
+  assert.equal(updated.enabled, false)
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(saved.mcp.slack.oauth.clientSecret, "secret-1")
+  assert.equal(saved.mcp.slack.oauth.scope, "new:scope")
+  assert.equal(saved.mcp.slack.enabled, false)
+
+  assert.throws(() => updateMcpServer(profile, "ghost", { type: "remote", url: "https://x.test/mcp" }), /does not exist/)
 })
 
 test("toggles enabled and removes MCP servers", () => {

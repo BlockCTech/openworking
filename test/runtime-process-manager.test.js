@@ -6,7 +6,7 @@ const os = require("node:os")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
 const AdmZip = require("adm-zip")
-const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, translationGatewayEnv } = require("../src/runtime/process-manager")
+const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, resolveUserPath, translationGatewayEnv } = require("../src/runtime/process-manager")
 
 test("translation gateway env resolves managed config without exposing extra provider fields", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-gateway-"))
@@ -25,6 +25,42 @@ test("translation gateway env resolves managed config without exposing extra pro
     OPENWORKING_TRANSLATION_API_KEY: "secret",
     OPENWORKING_TRANSLATION_MODEL: "gemma/model"
   })
+})
+
+test("resolveUserPath preserves the current PATH entries and dedupes", async () => {
+  const originalPath = process.env.PATH
+  try {
+    const unique = path.join(os.tmpdir(), `openworking-path-${Date.now()}`)
+    // Duplicate an entry to confirm dedup; include a unique marker dir to confirm preservation.
+    process.env.PATH = [unique, "/usr/bin", "/usr/bin", unique].join(path.delimiter)
+    const resolved = await resolveUserPath({ force: true })
+    const parts = resolved.split(path.delimiter)
+
+    // Every current PATH entry survives.
+    assert.ok(parts.includes(unique))
+    assert.ok(parts.includes("/usr/bin"))
+    // No duplicates in the merged result.
+    assert.equal(new Set(parts).size, parts.length)
+  } finally {
+    process.env.PATH = originalPath
+    await resolveUserPath({ force: true })
+  }
+})
+
+test("resolveUserPath caches and returns the same value until forced", async () => {
+  const originalPath = process.env.PATH
+  try {
+    process.env.PATH = "/usr/bin"
+    const first = await resolveUserPath({ force: true })
+    process.env.PATH = "/somewhere/else"
+    // Without force, the cached value (from the previous force call) is returned unchanged.
+    assert.equal(await resolveUserPath(), first)
+    // Forcing picks up the new PATH.
+    assert.notEqual(await resolveUserPath({ force: true }), first)
+  } finally {
+    process.env.PATH = originalPath
+    await resolveUserPath({ force: true })
+  }
 })
 
 test("tool metadata projection keeps only allowlisted artifact fields", () => {
@@ -181,17 +217,18 @@ test("question reply/reject projection forwards only ids", () => {
   }
 })
 
-test("permission.asked projection whitelists display fields", () => {
+test("permission.asked projection whitelists display fields and flattens metadata into details", () => {
   const projected = projectRuntimeEvent({
     type: "permission.asked",
     properties: {
       sessionID: "sess_one",
       requestID: "p1",
       title: "Allow edit to src/index.js?",
+      permission: "backlog_update_issue",
       type: "edit",
       pattern: "src/**",
       callID: "call_42",
-      metadata: { tool: "edit" },
+      metadata: { issueIdOrKey: "TSD-131", statusId: 2, nested: { a: 1 }, empty: null },
       secret: "drop"
     }
   })
@@ -202,10 +239,15 @@ test("permission.asked projection whitelists display fields", () => {
     requestID: "p1",
     permission: {
       title: "Allow edit to src/index.js?",
+      permission: "backlog_update_issue",
       type: "edit",
       pattern: "src/**",
       callID: "call_42",
-      metadata: { tool: "edit" }
+      details: [
+        { key: "issueIdOrKey", value: "TSD-131" },
+        { key: "statusId", value: "2" },
+        { key: "nested", value: "{\"a\":1}" }
+      ]
     }
   })
 })
@@ -241,7 +283,7 @@ test("prompt parts route an office attachment as a local path instead of a model
   assert.equal(parts.length, 1)
   assert.equal(parts[0].type, "text")
   assert.match(parts[0].text, /Hãy dịch file này sang tiếng Việt/)
-  assert.match(parts[0].text, /gateway accepts text\/images, not raw Office binaries/)
+  assert.match(parts[0].text, /gateway accepts text\/images, not raw document binaries/)
   assert.match(parts[0].text, /call the translate_document tool with the exact local inputPath/)
   assert.match(parts[0].text, /Do not claim an output path unless it is returned in translate_document metadata\.artifacts/)
   assert.match(parts[0].text, /Attached files \(local paths\):/)
@@ -249,6 +291,42 @@ test("prompt parts route an office attachment as a local path instead of a model
   assert.match(parts[0].text, /## XLSX attachment: 事業\.xlsx/)
   assert.match(parts[0].text, /Sheet: QA/)
   assert.match(parts[0].text, /確認事項/)
+})
+
+test("prompt parts route a markdown attachment as a local path instead of a model file part", () => {
+  const parts = buildPromptParts({
+    prompt: "Dịch file này sang tiếng Việt",
+    attachments: [{
+      url: "file:///tmp/template.md",
+      filename: "template.md",
+      mime: "text/markdown"
+    }]
+  })
+
+  assert.equal(parts.some((part) => part.type === "file"), false)
+  assert.equal(parts.length, 1)
+  assert.equal(parts[0].type, "text")
+  assert.match(parts[0].text, /Dịch file này sang tiếng Việt/)
+  assert.match(parts[0].text, /DOCX, Markdown, PDF, PPTX, or XLSX/)
+  assert.match(parts[0].text, /- \/tmp\/template\.md/)
+})
+
+test("prompt parts downgrade application/octet-stream attachments to local path text", () => {
+  const parts = buildPromptParts({
+    prompt: "Read this file",
+    attachments: [{
+      url: "file:///tmp/app/api/api_v1/endpoints/health_check.py",
+      filename: "health_check.py",
+      mime: "application/octet-stream"
+    }]
+  })
+
+  assert.equal(parts.some((part) => part.type === "file"), false)
+  assert.equal(parts.length, 1)
+  assert.equal(parts[0].type, "text")
+  assert.match(parts[0].text, /Read this file/)
+  assert.match(parts[0].text, /cannot be sent to the model as a binary file part/)
+  assert.match(parts[0].text, /\/tmp\/app\/api\/api_v1\/endpoints\/health_check\.py/)
 })
 
 test("prompt parts keep pdf and image attachments as model file parts", () => {
@@ -355,7 +433,9 @@ const capture = {
   projectPath: process.env.OPENWORKING_PROJECT_PATH,
   translationBaseURL: process.env.OPENWORKING_TRANSLATION_BASE_URL,
   translationApiKey: process.env.OPENWORKING_TRANSLATION_API_KEY,
-  translationModel: process.env.OPENWORKING_TRANSLATION_MODEL
+  translationModel: process.env.OPENWORKING_TRANSLATION_MODEL,
+  pathType: typeof process.env.PATH,
+  pathValue: process.env.PATH
 }
 const sessions = [
   { id: "sess_existing", title: "Existing session", directory: process.cwd() },
@@ -446,6 +526,8 @@ process.on("SIGTERM", () => process.exit(0))
     assert.equal(captured.translationBaseURL, "http://127.0.0.1:49152/api/v1")
     assert.equal(captured.translationApiKey, "gateway-key")
     assert.equal(captured.translationModel, "gpt-4o-mini")
+    assert.equal(captured.pathType, "string")
+    assert.notEqual(captured.pathValue, "[object Promise]")
     assert.equal(JSON.stringify(snapshot).includes("gateway-key"), false)
 
     assert.equal((await manager.openProject({ project })).runtime.pid, firstPid)
@@ -1047,11 +1129,11 @@ function readyManager(serverUrl) {
   return manager
 }
 
-test("answerQuestion posts to the session question reply endpoint without a /request/ segment", async () => {
+test("answerQuestion posts to the non-session question reply endpoint", async () => {
   let captured = null
   const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json")
-    if (req.method === "POST" && /^\/session\/[^/]+\/question\/[^/]+\/reply$/.test(req.url)) {
+    if (req.method === "POST" && /^\/question\/[^/]+\/reply$/.test(req.url)) {
       let raw = ""
       req.on("data", (chunk) => { raw += chunk })
       req.on("end", () => {
@@ -1067,19 +1149,19 @@ test("answerQuestion posts to the session question reply endpoint without a /req
   const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
   try {
     await manager.answerQuestion({ sessionId: "sess_new", requestID: "q1", answers: [["yes"]] })
-    assert.equal(captured.url, "/session/sess_new/question/q1/reply")
-    assert.equal(captured.url.includes("/request/"), false)
+    assert.equal(captured.url, "/question/q1/reply")
+    assert.equal(captured.url.includes("/session/"), false)
     assert.deepEqual(captured.body, { answers: [["yes"]] })
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
 })
 
-test("rejectQuestion posts to the session question reject endpoint without a /request/ segment", async () => {
+test("rejectQuestion posts to the non-session question reject endpoint", async () => {
   let captured = null
   const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json")
-    if (req.method === "POST" && /^\/session\/[^/]+\/question\/[^/]+\/reject$/.test(req.url)) {
+    if (req.method === "POST" && /^\/question\/[^/]+\/reject$/.test(req.url)) {
       captured = { url: req.url }
       return res.end("true")
     }
@@ -1090,18 +1172,113 @@ test("rejectQuestion posts to the session question reject endpoint without a /re
   const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
   try {
     await manager.rejectQuestion({ sessionId: "sess_new", requestID: "q1" })
-    assert.equal(captured.url, "/session/sess_new/question/q1/reject")
-    assert.equal(captured.url.includes("/request/"), false)
+    assert.equal(captured.url, "/question/q1/reject")
+    assert.equal(captured.url.includes("/session/"), false)
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
 })
 
-test("replyPermission posts to the session permission reply endpoint without a /request/ segment", async () => {
+test("listMcpStatus projects the runtime status map down to name + status", async () => {
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/mcp" && req.method === "GET") {
+      return res.end(JSON.stringify({
+        slack: { status: "failed", error: "server unavailable", secret: "drop" },
+        sentry: { status: "connected" }
+      }))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    // The real failure reason in `error` is preserved; unrelated fields (secret) are dropped.
+    assert.deepEqual(await manager.listMcpStatus(), [
+      { name: "slack", status: "failed", error: "server unavailable" },
+      { name: "sentry", status: "connected" }
+    ])
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("startMcpAuth posts to the auth endpoint and returns the authorization url", async () => {
   let captured = null
   const server = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json")
-    if (req.method === "POST" && /^\/session\/[^/]+\/permission\/[^/]+\/reply$/.test(req.url)) {
+    if (req.url === "/mcp/slack/auth" && req.method === "POST") {
+      captured = { url: req.url, authorization: req.headers.authorization }
+      return res.end(JSON.stringify({ authorizationUrl: "https://slack.com/oauth/authorize?x=1", oauthState: "abc" }))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    assert.deepEqual(await manager.startMcpAuth("slack"), {
+      authorizationUrl: "https://slack.com/oauth/authorize?x=1",
+      oauthState: "abc"
+    })
+    assert.deepEqual(captured, {
+      url: "/mcp/slack/auth",
+      authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`
+    })
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("authenticateMcp posts to the authenticate endpoint and resolves when the callback completes", async () => {
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/mcp/slack/auth/authenticate" && req.method === "POST") {
+      captured = { url: req.url }
+      return res.end(JSON.stringify({ status: "connected" }))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    assert.deepEqual(await manager.authenticateMcp("slack"), { status: "connected" })
+    assert.equal(captured.url, "/mcp/slack/auth/authenticate")
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("mcp status events project to a whitelisted name + status shape", () => {
+  assert.deepEqual(projectRuntimeEvent({
+    type: "mcp.status.needs_auth",
+    properties: { name: "slack", secret: "drop" }
+  }), { type: "mcp.status.needs_auth", name: "slack", status: "needs_auth" })
+
+  assert.deepEqual(projectRuntimeEvent({
+    type: "mcp.status.connected",
+    properties: { name: "slack" }
+  }), { type: "mcp.status.connected", name: "slack", status: "connected" })
+
+  assert.deepEqual(projectRuntimeEvent({
+    type: "mcp.browser.open.failed",
+    properties: { mcpName: "slack", url: "https://slack.com/oauth", secret: "drop" }
+  }), { type: "mcp.browser.open.failed", name: "slack", url: "https://slack.com/oauth" })
+
+  assert.equal(projectRuntimeEvent({ type: "mcp.status.connected", properties: {} }), null)
+})
+
+test("replyPermission posts to the non-session permission reply endpoint", async () => {
+  // OpenCode v1.17 serves the reply at /permission/{requestID}/reply. The old session-scoped
+  // path (/session/{id}/permission/{id}/reply) does not exist and is silently swallowed by the
+  // web UI fallback (HTTP 200 HTML), which left tools stuck "Processing" after approval.
+  let captured = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.method === "POST" && /^\/permission\/[^/]+\/reply$/.test(req.url)) {
       let raw = ""
       req.on("data", (chunk) => { raw += chunk })
       req.on("end", () => {
@@ -1117,8 +1294,8 @@ test("replyPermission posts to the session permission reply endpoint without a /
   const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
   try {
     await manager.replyPermission({ sessionId: "sess_new", requestID: "p1", reply: "reject", message: "no" })
-    assert.equal(captured.url, "/session/sess_new/permission/p1/reply")
-    assert.equal(captured.url.includes("/request/"), false)
+    assert.equal(captured.url, "/permission/p1/reply")
+    assert.equal(captured.url.includes("/session/"), false)
     assert.deepEqual(captured.body, { reply: "reject", message: "no" })
   } finally {
     await new Promise((resolve) => server.close(resolve))

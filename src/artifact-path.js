@@ -1,9 +1,19 @@
 const fs = require("node:fs")
 const path = require("node:path")
+const { spawnSync } = require("node:child_process")
 const { StringDecoder } = require("node:string_decoder")
+const { pathToFileURL } = require("node:url")
 
-const TRANSLATION_ARTIFACT_EXTENSIONS = new Set([".docx", ".pdf", ".pptx", ".xlsx"])
+const TRANSLATION_ARTIFACT_EXTENSIONS = new Set([".docx", ".md", ".markdown", ".pdf", ".pptx", ".xlsx"])
 const TRANSLATION_ARTIFACT_NAME = /^.+-translated-[a-z0-9]+(?:-[a-z0-9]+)*(?:-\d+)?$/
+const TRANSLATION_ARTIFACT_MIME_BY_EXTENSION = {
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".md": "text/markdown",
+  ".markdown": "text/markdown",
+  ".pdf": "application/pdf",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+}
 
 function assertTranslationArtifact(projectPath, artifactPath) {
   const requestedArtifact = path.resolve(String(artifactPath))
@@ -72,6 +82,17 @@ function isViewableProjectFile(filePath) {
   return VIEWABLE_FILE_BASENAMES.has(parsed.base) || VIEWABLE_FILE_EXTENSIONS.has(parsed.ext.toLowerCase())
 }
 
+function isHiddenProjectPath(relativePath) {
+  return String(relativePath || "")
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .some((segment) => segment.startsWith("."))
+}
+
+function normalizeProjectRelativePath(relativePath) {
+  return String(relativePath || "").replace(/\\/g, "/")
+}
+
 function assertProjectFile(projectPath, filePath) {
   const projectRoot = fs.realpathSync(path.resolve(projectPath))
   const requestedInput = String(filePath)
@@ -115,21 +136,61 @@ function assertProjectDirectory(projectPath, directoryPath = "") {
   return { projectRoot, resolved, relative }
 }
 
-function listProjectDirectory(projectPath, directoryPath = "") {
+function ignoredRelativePaths(projectRoot, relativePaths) {
+  const candidates = relativePaths.filter((relativePath) => relativePath && !isHiddenProjectPath(relativePath))
+  if (!candidates.length) return new Set()
+  const result = spawnSync("git", ["-C", projectRoot, "check-ignore", "--stdin"], {
+    input: `${candidates.join("\n")}\n`,
+    encoding: "utf8"
+  })
+  if (result.status === 0 || result.status === 1) {
+    return new Set(String(result.stdout || "").split("\n").filter(Boolean))
+  }
+  return new Set()
+}
+
+function listProjectDirectory(projectPath, directoryPath = "", options = {}) {
   const { projectRoot, resolved, relative } = assertProjectDirectory(projectPath, directoryPath)
+  const mode = options && typeof options === "object" ? options.mode : ""
+  const recursive = Boolean(options && typeof options === "object" && options.recursive)
   const entries = fs.readdirSync(resolved, { withFileTypes: true })
-  const children = []
+  const relativePaths = []
+  const rawChildren = []
   for (const entry of entries) {
     const type = entry.isDirectory() ? "directory" : entry.isFile() ? "file" : null
     if (!type) continue
     if (type === "directory" && IGNORED_PROJECT_DIRECTORIES.has(entry.name)) continue
     const absolutePath = path.join(resolved, entry.name)
-    const childRelativePath = path.relative(projectRoot, absolutePath)
+    const childRelativePath = normalizeProjectRelativePath(path.relative(projectRoot, absolutePath))
+    rawChildren.push({ entry, type, absolutePath, childRelativePath })
+    relativePaths.push(childRelativePath)
+  }
+  const ignoredPaths = mode === "visible-openable-files" ? ignoredRelativePaths(projectRoot, relativePaths) : null
+  const children = []
+  for (const child of rawChildren) {
+    if (isHiddenProjectPath(child.childRelativePath)) continue
+    if (mode === "visible-openable-files") {
+      if (ignoredPaths?.has(child.childRelativePath)) continue
+      if (child.type === "directory") {
+        if (!recursive) continue
+        const nested = listProjectDirectory(projectRoot, child.childRelativePath, options)
+        children.push(...nested.children)
+        continue
+      }
+      if (!isViewableProjectFile(child.absolutePath)) continue
+      children.push({
+        name: child.entry.name,
+        path: child.childRelativePath,
+        type: child.type,
+        openable: true
+      })
+      continue
+    }
     children.push({
-      name: entry.name,
-      path: childRelativePath,
-      type,
-      openable: type === "file" && isViewableProjectFile(absolutePath)
+      name: child.entry.name,
+      path: child.childRelativePath,
+      type: child.type,
+      openable: child.type === "file" && isViewableProjectFile(child.absolutePath)
     })
   }
   children.sort((a, b) => {
@@ -164,4 +225,43 @@ function readProjectFileContent(safePath, maxBytes) {
   }
 }
 
-module.exports = { assertTranslationArtifact, assertProjectFile, assertProjectDirectory, listProjectDirectory, readProjectFileContent }
+function artifactRelativePath(projectPath, safePath) {
+  if (!projectPath) return path.basename(safePath)
+  try {
+    const projectRoot = fs.realpathSync(path.resolve(projectPath))
+    const relative = path.relative(projectRoot, safePath)
+    if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return relative
+  } catch {
+    // Fall through to the basename for artifacts outside the active project.
+  }
+  return path.basename(safePath)
+}
+
+function previewTranslationArtifact(projectPath, artifactPath, maxBytes = 2 * 1024 * 1024) {
+  const safePath = assertTranslationArtifact(projectPath, artifactPath)
+  const extension = path.extname(safePath).toLowerCase()
+  const base = {
+    path: safePath,
+    relativePath: artifactRelativePath(projectPath, safePath),
+    name: path.basename(safePath),
+    extension,
+    mime: TRANSLATION_ARTIFACT_MIME_BY_EXTENSION[extension] || "application/octet-stream"
+  }
+  if (extension === ".md" || extension === ".markdown") {
+    const { content, truncated } = readProjectFileContent(safePath, maxBytes)
+    return { ...base, previewMode: "markdown", content, truncated }
+  }
+  if (extension === ".pdf") {
+    return { ...base, previewMode: "pdf", url: pathToFileURL(safePath).href, truncated: false }
+  }
+  return { ...base, previewMode: "external", truncated: false }
+}
+
+module.exports = {
+  assertTranslationArtifact,
+  assertProjectFile,
+  assertProjectDirectory,
+  listProjectDirectory,
+  previewTranslationArtifact,
+  readProjectFileContent
+}

@@ -19,11 +19,12 @@ const BUILT_IN_SKILLS = [
   { name: "skill-creator", description: "Create and validate reusable OpenCode-native skills." },
   { name: "xlsx", description: "Read, create, edit and validate spreadsheet workbooks." },
   { name: "docx", description: "Read, create, edit and visually validate Word documents." },
-  { name: "translate-document", description: "Translate PDF and DOCX files into new layout-preserving document artifacts." },
+  { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
   { name: "webapp-testing", description: "Test local web applications with the project's existing tools or Playwright." }
 ]
 const BUILT_IN_TOOLS = ["translate_document.js"]
+const RESERVED_PERMISSION_KEYS = new Set(["__proto__", "prototype", ...Object.getOwnPropertyNames(Object.prototype)])
 
 function defaultProfileDir(userDataPath) {
   if (process.env.OPENWORKING_OPENCODE_CONFIG_DIR) {
@@ -152,6 +153,21 @@ function parseSkillFrontmatter(markdown) {
   return data
 }
 
+// A skill may opt into human-in-the-loop gating for specific tools by listing their tool ids in
+// a flat `askToolPermissions: a, b, c` frontmatter line. MCP tools are namespaced `<server>_<tool>`
+// (e.g. `backlog_update_issue`). We accept only safe tool-id characters so a malformed line can
+// never inject arbitrary config keys. Returns a de-duplicated list.
+function parseAskToolPermissions(frontmatter) {
+  const raw = frontmatter?.askToolPermissions
+  if (!raw || typeof raw !== "string") return []
+  const tools = raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => /^[A-Za-z0-9_*-]+$/.test(part))
+    .filter((part) => !RESERVED_PERMISSION_KEYS.has(part))
+  return [...new Set(tools)]
+}
+
 function assertValidSkillName(name) {
   if (typeof name !== "string" || name.length < 1 || name.length > 64 || !SKILL_NAME_PATTERN.test(name)) {
     throw new Error("Skill name must use lowercase ASCII letters, digits, and single hyphens only.")
@@ -216,6 +232,12 @@ function installCustomSkillArchive(profile, archivePath) {
     config.permission ||= {}
     config.permission.skill ||= {}
     config.permission.skill[name] = "allow"
+    // Human-in-the-loop: gate the tools this skill declares so the runtime prompts the user
+    // (Allow / Reject) before running them. Only set keys the user has not already configured,
+    // so we never override a deliberate "allow"/"deny" the user picked earlier.
+    for (const tool of parseAskToolPermissions(frontmatter)) {
+      if (!Object.hasOwn(config.permission, tool)) config.permission[tool] = "ask"
+    }
     writeProfileConfig(profile, config)
     return { name, description, path: targetDir }
   } catch (error) {
@@ -268,13 +290,35 @@ function uninstallCustomSkill(profile, skillName) {
   }
   const targetDir = path.join(profile.profileDir, "skills", name)
   if (!fs.existsSync(targetDir)) throw new Error(`Skill "${name}" is not installed.`)
+
+  // Read the skill's declared HITL tool gates before deleting the folder, so we can clean them up.
+  let askTools = []
+  const skillPath = path.join(targetDir, "SKILL.md")
+  if (fs.existsSync(skillPath)) {
+    try {
+      askTools = parseAskToolPermissions(parseSkillFrontmatter(fs.readFileSync(skillPath, "utf8")))
+    } catch {
+      askTools = []
+    }
+  }
+
   fs.rmSync(targetDir, { force: true, recursive: true })
 
   const config = readProfileConfig(profile).config
+  let changed = false
   if (config.permission?.skill && name in config.permission.skill) {
     delete config.permission.skill[name]
-    writeProfileConfig(profile, config)
+    changed = true
   }
+  // Remove the tool gates this skill added, but only if they are still "ask" — a user who
+  // deliberately changed one to "allow"/"deny" keeps their choice.
+  for (const tool of askTools) {
+    if (config.permission && config.permission[tool] === "ask") {
+      delete config.permission[tool]
+      changed = true
+    }
+  }
+  if (changed) writeProfileConfig(profile, config)
   return { name }
 }
 
@@ -289,9 +333,29 @@ function mcpServerView(name, server) {
   if (server.type === "remote") {
     view.url = server.url || ""
     view.headers = server.headers && typeof server.headers === "object" ? { ...server.headers } : {}
-    view.oauth = server.oauth
+    // Surface the OAuth config to the renderer with the client secret redacted — the
+    // raw secret must never cross the IPC boundary into renderer state or the JSON preview.
+    if (server.oauth === false) {
+      view.oauth = false
+    } else if (server.oauth && typeof server.oauth === "object") {
+      view.oauth = {
+        clientId: server.oauth.clientId || "",
+        scope: server.oauth.scope || "",
+        callbackPort: server.oauth.callbackPort,
+        redirectUri: server.oauth.redirectUri || "",
+        hasClientSecret: !!server.oauth.clientSecret
+      }
+    } else {
+      view.oauth = undefined
+    }
   } else {
     view.command = Array.isArray(server.command) ? [...server.command] : []
+    // Surface env vars so the Edit modal can repopulate them. Values are not redacted: unlike an
+    // OAuth client secret (which has a real-time auth flow), these are plain local-process env
+    // vars living in the app-managed userData profile and must round-trip for editing to work.
+    if (server.environment && typeof server.environment === "object") {
+      view.environment = { ...server.environment }
+    }
   }
   return view
 }
@@ -314,7 +378,40 @@ function normalizeHeaders(headers) {
   return result
 }
 
-function buildMcpServer(input) {
+// Build the `oauth` value written to opencode.json from the renderer's input.
+//   - false        → disable OpenCode OAuth auto-detection.
+//   - object       → a pre-registered OAuth app (clientId/clientSecret/scope/…) for
+//                    servers that do not support dynamic client registration (e.g. Slack).
+//   - true/omitted → omit `oauth` so the runtime auto-negotiates (DCR + PKCE).
+// `existing` is the previously stored oauth object, used to preserve a secret the user
+// left blank while editing.
+function normalizeOauth(input, existing) {
+  if (input === false) return false
+  if (!input || typeof input !== "object") return undefined
+  const oauth = {}
+  const clientId = String(input.clientId || "").trim()
+  const scope = String(input.scope || "").trim()
+  const redirectUri = String(input.redirectUri || "").trim()
+  let clientSecret = String(input.clientSecret || "").trim()
+  // Preserve the stored secret when editing and the field was left blank.
+  if (!clientSecret && existing && typeof existing === "object" && existing.clientSecret) {
+    clientSecret = existing.clientSecret
+  }
+  if (clientId) oauth.clientId = clientId
+  if (clientSecret) oauth.clientSecret = clientSecret
+  if (scope) oauth.scope = scope
+  if (redirectUri) oauth.redirectUri = redirectUri
+  if (input.callbackPort !== undefined && input.callbackPort !== null && input.callbackPort !== "") {
+    const port = Number(input.callbackPort)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("OAuth callback port must be an integer between 1 and 65535.")
+    }
+    oauth.callbackPort = port
+  }
+  return Object.keys(oauth).length ? oauth : undefined
+}
+
+function buildMcpServer(input, existing) {
   const type = input?.type
   if (!MCP_SERVER_TYPES.includes(type)) throw new Error('MCP server type must be "remote" or "local".')
 
@@ -324,10 +421,8 @@ function buildMcpServer(input) {
     const server = { type: "remote", url, enabled: true }
     const headers = normalizeHeaders(input.headers)
     if (Object.keys(headers).length) server.headers = headers
-    // The OAuth checkbox is opt-in: when the user leaves it unchecked we explicitly
-    // disable OpenCode's OAuth auto-detection; when checked we omit `oauth` so the
-    // runtime negotiates OAuth on its own.
-    if (input.oauth === false) server.oauth = false
+    const oauth = normalizeOauth(input.oauth, existing && existing.type === "remote" ? existing.oauth : undefined)
+    if (oauth !== undefined) server.oauth = oauth
     return server
   }
 
@@ -337,7 +432,10 @@ function buildMcpServer(input) {
     .map((part) => String(part).trim())
     .filter(Boolean)
   if (!command.length) throw new Error("Local MCP server requires a command.")
-  return { type: "local", command, enabled: true }
+  const server = { type: "local", command, enabled: true }
+  const environment = normalizeHeaders(input.environment)
+  if (Object.keys(environment).length) server.environment = environment
+  return server
 }
 
 function addMcpServer(profile, input) {
@@ -350,6 +448,21 @@ function addMcpServer(profile, input) {
   config.mcp[name] = server
   writeProfileConfig(profile, config)
   return mcpServerView(name, server)
+}
+
+function updateMcpServer(profile, name, input) {
+  const serverName = String(name || "").trim()
+  assertValidMcpName(serverName)
+  const config = readProfileConfig(profile).config
+  const existing = config.mcp && config.mcp[serverName]
+  if (!existing) throw new Error(`MCP server "${serverName}" does not exist.`)
+  // Rebuild from the new input, preserving the enabled flag and any stored secret the
+  // user left blank while editing.
+  const server = buildMcpServer({ ...input, type: input?.type || existing.type }, existing)
+  server.enabled = existing.enabled !== false
+  config.mcp[serverName] = server
+  writeProfileConfig(profile, config)
+  return mcpServerView(serverName, server)
 }
 
 function setMcpServerEnabled(profile, name, enabled) {
@@ -479,6 +592,7 @@ module.exports = {
   readSkillMarkdown,
   uninstallCustomSkill,
   addMcpServer,
+  updateMcpServer,
   listMcpServers,
   removeMcpServer,
   setMcpServerEnabled,

@@ -1,6 +1,6 @@
 {
   "name": "openworking",
-  "version": "1.10.5",
+  "version": "1.11.1",
   "private": true,
   "description": "OpenWorking — a local-first desktop shell for OpenCode with a self-configured OpenAI-compatible API gateway.",
   "license": "MIT",
@@ -29,9 +29,10 @@
     "presmoke:electron": "npm run build:document-tools",
     "smoke:electron": "node scripts/electron-smoke.js",
     "prepack:mac": "npm run build:document-tools",
-    "pack:mac": "electron-builder --mac dir",
+    "pack:mac": "electron-builder --mac dir -c.mac.forceCodeSigning=false -c.mac.notarize=false",
     "predist:mac": "npm run build:document-tools",
     "dist:mac": "electron-builder --mac dmg",
+    "dist:mac:unsigned": "electron-builder --mac dmg -c.mac.forceCodeSigning=false -c.mac.notarize=false",
     "presmoke:packaged": "npm run build:document-tools",
     "smoke:packaged": "node scripts/packaged-smoke.js",
     "pretest:e2e": "npm run build:document-tools",
@@ -66,7 +67,7 @@
     "marked": "18.0.3",
     "mermaid": "^11.15.0",
     "mime-types": "2.1.35",
-    "opencode-ai": "1.17.7"
+    "opencode-ai": "1.17.8"
   },
   "build": {
     "appId": "ai.openworking.desktop",
@@ -86,9 +87,41 @@
       "src/**/*",
       "node_modules/**/*",
       "package.json",
+      "!**/*.{map,d.ts,ts}",
+      "!**/{test,tests,__tests__,example,examples,.github}/**",
       "!node_modules/@highlightjs/cdn-assets/**/*",
       "node_modules/@highlightjs/cdn-assets/highlight.min.js",
-      "node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css"
+      "node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css",
+      "!node_modules/mermaid/**/*",
+      "node_modules/mermaid/dist/mermaid.min.js",
+      "node_modules/mermaid/package.json",
+      "!node_modules/@mermaid-js/**/*",
+      "!node_modules/cytoscape*/**/*",
+      "!node_modules/cose-base/**/*",
+      "!node_modules/layout-base/**/*",
+      "!node_modules/dagre-d3-es/**/*",
+      "!node_modules/d3*/**/*",
+      "!node_modules/internmap/**/*",
+      "!node_modules/delaunator/**/*",
+      "!node_modules/robust-predicates/**/*",
+      "!node_modules/es-toolkit/**/*",
+      "!node_modules/lodash-es/**/*",
+      "!node_modules/katex/**/*",
+      "!node_modules/dompurify/**/*",
+      "!node_modules/roughjs/**/*",
+      "!node_modules/hachure-fill/**/*",
+      "!node_modules/points-on-curve/**/*",
+      "!node_modules/points-on-path/**/*",
+      "!node_modules/path-data-parser/**/*",
+      "!node_modules/@iconify/**/*",
+      "!node_modules/@braintree/**/*",
+      "!node_modules/@chevrotain/**/*",
+      "!node_modules/@upsetjs/**/*",
+      "!node_modules/khroma/**/*",
+      "!node_modules/stylis/**/*",
+      "!node_modules/ts-dedent/**/*",
+      "!node_modules/dayjs/**/*",
+      "!node_modules/rw/**/*"
     ],
     "extraResources": [
       {
@@ -101,7 +134,9 @@
     },
     "mac": {
       "category": "public.app-category.developer-tools",
+      "forceCodeSigning": true,
       "icon": "src/assets/thumbnail_icon.png",
+      "notarize": true,
       "artifactName": "${productName}-${version}-${arch}.${ext}",
       "target": [
         {

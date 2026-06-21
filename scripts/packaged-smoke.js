@@ -30,10 +30,18 @@ function findAppExecutable(directory) {
   return null
 }
 
-const build = spawnSync(path.join(root, "node_modules", ".bin", "electron-builder"), ["--mac", "dir", `--${targetArch}`], {
-  cwd: root,
-  stdio: "inherit"
-})
+// The smoke test only verifies the packaged bundle's structure, so it must not
+// require an Apple "Developer ID Application" identity. Disable code signing +
+// notarization here (mac.forceCodeSigning/notarize are `true` for production
+// dist:mac builds), mirroring the overrides in the pack:mac npm script.
+const build = spawnSync(
+  path.join(root, "node_modules", ".bin", "electron-builder"),
+  ["--mac", "dir", `--${targetArch}`, "-c.mac.forceCodeSigning=false", "-c.mac.notarize=false"],
+  {
+    cwd: root,
+    stdio: "inherit"
+  }
+)
 if (build.status !== 0) process.exit(build.status || 1)
 
 // electron-builder writes the .app to dist/mac/ for a single-arch build and
