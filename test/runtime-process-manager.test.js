@@ -477,6 +477,14 @@ const server = http.createServer((req, res) => {
       ]
     }]))
   }
+  if (req.url === "/session/sess_existing/message?limit=100") {
+    return res.end(JSON.stringify([{
+      info: { id: "msg_existing", sessionID: "sess_existing", role: "assistant" },
+      parts: [
+        { id: "part_existing", sessionID: "sess_existing", messageID: "msg_existing", type: "text", text: "Existing session message" }
+      ]
+    }]))
+  }
   if (req.url === "/session/sess_new/prompt_async" && req.method === "POST") return body(req, data => {
     capture.prompt = data
     save()
@@ -550,6 +558,9 @@ process.on("SIGTERM", () => process.exit(0))
       agent: "plan",
       model: { providerID: "gateway", modelID: "gpt-4o-mini" }
     })
+    assert.equal(manager.snapshot().activeSessionId, "sess_new")
+    await manager.listMessages({ sessionId: "sess_existing" })
+    assert.equal(manager.snapshot().activeSessionId, "sess_new")
 
     const afterPrompt = JSON.parse(fs.readFileSync(capturePath, "utf8"))
     assert.deepEqual(afterPrompt.created, { title: "New session" })

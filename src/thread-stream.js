@@ -7,6 +7,7 @@
   const OFFICE_ATTACHMENT_CONTEXT_MARKER = "Attached document files are provided as local paths plus extracted text context"
   const NO_RESPONSE_DETAIL = "The request ended without a response. Check provider/model/API key or runtime diagnostics."
   const LIVE_STREAM_STALE_MS = 60 * 1000
+  const LIVE_STREAM_GRACE_MS = LIVE_STREAM_STALE_MS
 
   function idleStatus() {
     return { type: "idle" }
@@ -19,7 +20,9 @@
       messages: [],
       pendingQuestions: [],
       pendingPermissions: [],
-      lastStreamEventAt: 0
+      lastStreamEventAt: 0,
+      lastEventAt: 0,
+      lastAssistantOutputAt: 0
     }
   }
 
@@ -30,7 +33,22 @@
     thread.pendingQuestions = []
     thread.pendingPermissions = []
     thread.lastStreamEventAt = 0
+    thread.lastEventAt = 0
+    thread.lastAssistantOutputAt = 0
     return thread
+  }
+
+  function touchThread(thread, at = Date.now()) {
+    if (!thread) return 0
+    thread.lastEventAt = at
+    return at
+  }
+
+  function markAssistantOutput(thread, at = Date.now()) {
+    if (!thread) return 0
+    thread.lastAssistantOutputAt = at
+    thread.lastEventAt = at
+    return at
   }
 
   function projectPart(part, fallbackId) {
@@ -342,6 +360,10 @@
     return false
   }
 
+  function hasPendingRequest(thread) {
+    return Boolean(thread?.pendingQuestions?.length || thread?.pendingPermissions?.length)
+  }
+
   function appendSyntheticError(thread, { title, detail }) {
     const user = lastUserMessage(thread)
     const dedupeKey = `${title}\n${detail}\n${user ? messageSignature(user) : ""}`
@@ -511,6 +533,8 @@
       }
     }
     insertRetainedSyntheticMessages(thread.messages, syntheticErrors)
+    touchThread(thread)
+    if (hasAssistantOutputAfterLastUser(thread)) markAssistantOutput(thread, thread.lastEventAt)
     return thread
   }
 
@@ -611,6 +635,7 @@
 
     if (event.type === "session.status") {
       thread.status = event.status || idleStatus()
+      touchThread(thread)
       return { changed: true, reconcile: false }
     }
     if (event.type === "session.idle") {
@@ -643,6 +668,8 @@
       const message = normalizeMessage(event.info, thread.messages.length)
       if (!message) return { changed: false, reconcile: false }
       const updated = upsertMessage(thread, message)
+      if (updated?.role === "assistant" && assistantMessageHasOutput(updated)) markAssistantOutput(thread)
+      else if (updated) touchThread(thread)
       return { changed: Boolean(updated), reconcile: false }
     }
     if (event.type === "message.part.updated") {
@@ -665,6 +692,8 @@
       upsertPart(message, normalizedPart)
       message.parts = normalizeParts(message.role, message.parts)
       if (message.role === "user") removeMatchingOptimistic(thread, message)
+      if (message.role === "assistant" && assistantMessageHasOutput(message)) markAssistantOutput(thread)
+      else touchThread(thread)
       return { changed: true, reconcile: false }
     }
     // OpenCode streams both answer text and reasoning through `message.part.delta`
@@ -687,26 +716,32 @@
       // A delta can complete a stray tool-call-marker part (Gemma emits the marker
       // as text). Re-normalize so it never even flickers into the rendered thread.
       message.parts = normalizeParts(message.role, message.parts)
+      if (message.role === "assistant" && assistantMessageHasOutput(message)) markAssistantOutput(thread)
+      else touchThread(thread)
       return { changed: true, reconcile: false }
     }
     if (event.type === "question.asked" && event.requestID) {
       if (!Array.isArray(thread.pendingQuestions)) thread.pendingQuestions = []
       upsertPendingRequest(thread.pendingQuestions, { requestID: event.requestID, ...(event.question || {}) })
+      touchThread(thread)
       return { changed: true, reconcile: false }
     }
     if ((event.type === "question.replied" || event.type === "question.rejected") && event.requestID) {
       if (!Array.isArray(thread.pendingQuestions)) thread.pendingQuestions = []
       const changed = removePendingRequest(thread.pendingQuestions, event.requestID)
+      if (changed) touchThread(thread)
       return { changed, reconcile: false }
     }
     if (event.type === "permission.asked" && event.requestID) {
       if (!Array.isArray(thread.pendingPermissions)) thread.pendingPermissions = []
       upsertPendingRequest(thread.pendingPermissions, { requestID: event.requestID, ...(event.permission || {}) })
+      touchThread(thread)
       return { changed: true, reconcile: false }
     }
     if (event.type === "permission.replied" && event.requestID) {
       if (!Array.isArray(thread.pendingPermissions)) thread.pendingPermissions = []
       const changed = removePendingRequest(thread.pendingPermissions, event.requestID)
+      if (changed) touchThread(thread)
       return { changed, reconcile: false }
     }
     return { changed: false, reconcile: false }
@@ -717,11 +752,19 @@
     return type === "busy" || type === "retry"
   }
 
-  function needsThreadRehydration(thread, serverStatus) {
+  function needsThreadRehydration(thread, serverStatus, now = Date.now()) {
     if (!thread || !threadIsBusy(thread)) return true
     if (serverStatus?.type === "idle") return true
-    if (!hasAssistantOutputAfterLastUser(thread)) return true
-    return Date.now() - (thread.lastStreamEventAt || 0) > LIVE_STREAM_STALE_MS
+    // Keep the live busy state for sessions that have not emitted assistant output yet.
+    if (!hasAssistantOutputAfterLastUser(thread)) return false
+    if (hasRunningTool(thread) || hasPendingRequest(thread)) return false
+    const lastActivityAt = Math.max(
+      thread.lastAssistantOutputAt || 0,
+      thread.lastStreamEventAt || 0,
+      thread.lastEventAt || 0
+    )
+    if (!lastActivityAt) return true
+    return now - lastActivityAt > LIVE_STREAM_STALE_MS
   }
 
   function hasRunningTool(thread) {
@@ -760,6 +803,7 @@
     messageText,
     removeOptimisticUser,
     resetThread,
-    threadIsBusy
+    threadIsBusy,
+    LIVE_STREAM_GRACE_MS
   }
 })

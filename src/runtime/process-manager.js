@@ -1007,7 +1007,6 @@ class RuntimeProcessManager {
   async listMessages({ sessionId, limit = 100 }) {
     this.assertReady()
     if (!sessionId) return []
-    this.state.activeSessionId = sessionId
     const messages = await requestJson({
       url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/message?limit=${limit}`,
       auth: this.auth()
@@ -1348,7 +1347,7 @@ class RuntimeProcessManager {
       const toolError = properties.part.state?.error
       if (toolStatus === "running") {
         this.log("info", `[Tool] Agent started calling tool: ${toolName}`)
-      } else if (toolStatus === "completed") {
+      } else if (toolStatus === "complete" || toolStatus === "completed") {
         this.log("info", `[Tool] Tool ${toolName} completed successfully.`)
       } else if (toolStatus === "error") {
         this.log("warn", `[Tool] Tool ${toolName} failed: ${toolError || "Unknown error"}`)
