@@ -1,5 +1,65 @@
 # Changelog
 
+## [v1.12.1] - 2026-06-22
+
+### Nguồn so sánh
+
+- Base: `v1.12.0` (`3229ff1`, bump version 1.12.0, 2026-06-21).
+- Target: `v1.12.1` (`7a9430b`, merge `develop`, 2026-06-22) — trùng với `master`/HEAD hiện tại.
+
+### Added
+
+- Thêm xác nhận xóa chat session bằng modal riêng (thay cho `confirm()` cũ):
+  - Mỗi session row có nút kebab mở menu hành động.
+  - Modal hiển thị trạng thái đang xóa, thông báo lỗi và chặn thao tác khi đang chạy.
+- Thêm hover hint cạnh con trỏ khi rê qua các divider resize (ví dụ "Click to collapse ⌘B" / "Drag to resize").
+
+### Changed
+
+- Bump package version lên `1.12.1`.
+- Cách spawn MCP Backlog đáng tin cậy hơn:
+  - Thêm `src/mcp-install.js` cài `backlog-mcp-server` (pin `0.12.0`) on-demand vào thư mục trung lập trong app profile.
+  - Chạy server bằng `node <entry>` thay vì `npx`, để package manager/`devEngines` của project (ví dụ pnpm gây `EBADDEVENGINES`) không làm hỏng kết nối ("MCP error -32000: Connection closed").
+  - Tự migrate command `npx backlog-mcp-server` cũ sang launcher node khi add/enable/connect.
+- Đồng bộ `opencode.json` sang `XDG_CONFIG_HOME` riêng của runtime (`<profile>/xdg-config/...`) và truyền `XDG_CONFIG_HOME` khi spawn, để runtime đọc config nhất quán.
+- Thông báo lỗi runtime rõ hơn: đính kèm output gần nhất (`recentRuntimeOutput`) vào lỗi launch/exit để dễ chẩn đoán trong Diagnostics.
+
+### Fixed
+
+- Sửa lỗi panel/document preview bị co sai khi resize:
+  - Thêm clamp `maxDocumentViewerWidth()` đo layout thực (sidebar, right-file sidebar, gutter, chat min-width) để preview không ép chat dưới mức tối thiểu.
+  - Re-clamp document preview khi cửa sổ thu nhỏ.
+  - Guard mọi giá trị non-finite để tránh sinh track `NaNpx` làm sập grid side-by-side về một cột.
+  - Truyền `clientX/clientY` vào các handler mousedown của divider để seed gốc kéo (tránh `NaN`).
+- Tắt transition khi đang kéo divider để panel bám con trỏ 1:1 thay vì trễ theo easing.
+- Thêm fallback resolve runtime binary từ `node_modules/opencode-<platform>-<arch>` cạnh app source.
+- Tránh race khi mở project: `openProject` đợi vòng lifecycle đang chạy và trả snapshot nếu project đã sẵn sàng, thay vì spawn chồng.
+- Sửa hiển thị session list theo project:
+  - Dedupe session theo `id`.
+  - Lọc session theo `directory` đúng project và dọn session bị lẫn sang accordion khác.
+- Cứng cáp hơn cho local MCP PATH:
+  - Tăng timeout query login-shell PATH và vớt lại PATH nếu shell đã in ra dù bị timeout.
+  - Chỉ cache PATH khi thật sự chứa `npx` để một lần miss tạm thời (login shell chậm) còn retry được ở lần sau.
+- Tinh chỉnh hiển thị UI:
+  - Artifact chip dạng link gọn hơn (bỏ nền/viền, gạch chân khi hover).
+  - Sidebar resizer ẩn mượt bằng opacity/pointer-events khi collapse; tinh chỉnh vị trí và transition cột sidebar.
+
+### Tests
+
+- Thêm test mới: `mcp-install`.
+- Mở rộng test hiện có:
+  - `renderer` (delete-session modal, dedupe/session-by-directory, resize clamp).
+  - `runtime-process-manager` (openProject race, PATH resolve/cache, launch error output, xdg config).
+  - `opencode-profile` và `opencode-skill-integration` (xdg config sync).
+
+### Commit tham chiếu
+
+- `fe480b2` Improve build and fix delete session chat.
+- `5aac981` Fix issue sometime not work with mcp backlog.
+- `be7e198` Fix panels resize issue.
+- `0c919df` Fix resize issue.
+- `8530f86` Fix ui display.
+
 ## [v1.12.0] - 2026-06-21
 
 ### Nguồn so sánh

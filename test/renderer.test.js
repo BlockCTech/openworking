@@ -169,6 +169,160 @@ test("loadStoredExpanded returns an empty set for missing or malformed storage",
   }
 })
 
+function manualTimerPacer(applyEvent) {
+  const timers = []
+  const pacer = __test.createStreamPacer({
+    applyEvent,
+    setTimer(callback, delay) {
+      const timer = { callback, delay, cleared: false }
+      timers.push(timer)
+      return timer
+    },
+    clearTimer(timer) {
+      timer.cleared = true
+    }
+  })
+  return { pacer, timers }
+}
+
+function runNextTimer(timers) {
+  const timer = timers.shift()
+  assert.ok(timer, "expected a scheduled pacing timer")
+  assert.equal(timer.delay, 40)
+  assert.equal(timer.cleared, false)
+  timer.callback()
+}
+
+test("stream pacer spaces burst deltas across pacing ticks", () => {
+  const applied = []
+  const { pacer, timers } = manualTimerPacer((event) => applied.push(event))
+  const base = {
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text"
+  }
+
+  for (const delta of ["Xin ", "chao, ", "day ", "la ", "stream."]) {
+    assert.equal(pacer.enqueue({ ...base, delta }), true)
+  }
+
+  assert.equal(applied.length, 0)
+  assert.equal(timers.length, 1)
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.delta), ["Xin "])
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.delta), ["Xin ", "chao, "])
+  while (timers.length) runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.delta), ["Xin ", "chao, ", "day ", "la ", "stream."])
+})
+
+test("stream pacer defers final part update until queued deltas drain", () => {
+  const applied = []
+  const { pacer, timers } = manualTimerPacer((event) => applied.push(event))
+  const base = {
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text"
+  }
+  pacer.enqueue({ ...base, delta: "partial " })
+  pacer.enqueue({ ...base, delta: "answer" })
+  assert.equal(pacer.defer({
+    type: "message.part.updated",
+    sessionID: "sess_one",
+    part: { id: "part_text", messageID: "msg_a", type: "text", text: "partial answer" }
+  }), true)
+
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.type), ["message.part.delta"])
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.type), [
+    "message.part.delta",
+    "message.part.delta",
+    "message.part.updated"
+  ])
+  assert.equal(applied.at(-1).part.text, "partial answer")
+})
+
+test("stream pacer defers idle lifecycle until queued output is visible", () => {
+  const applied = []
+  const { pacer, timers } = manualTimerPacer((event) => applied.push(event))
+  pacer.enqueue({
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text",
+    delta: "done"
+  })
+  pacer.defer({ type: "session.idle", sessionID: "sess_one" })
+
+  assert.equal(applied.length, 0)
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.type), ["message.part.delta", "session.idle"])
+})
+
+test("stream pacer flushes queued output synchronously for session switches", () => {
+  const applied = []
+  const { pacer, timers } = manualTimerPacer((event) => applied.push(event))
+  pacer.enqueue({
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text",
+    delta: "queued"
+  })
+
+  assert.equal(applied.length, 0)
+  assert.equal(pacer.flushSession("sess_one"), true)
+  assert.deepEqual(applied.map((event) => event.delta), ["queued"])
+  assert.equal(timers[0].cleared, true)
+})
+
+test("pacing gate only consumes active session text deltas", () => {
+  const calls = []
+  const fakePacer = {
+    enqueue(event) { calls.push(["enqueue", event.sessionID]); return true },
+    defer(event) { calls.push(["defer", event.type]); return true },
+    flushSession(sessionID) { calls.push(["flush", sessionID]); return true },
+    hasPendingPart() { return true },
+    hasPendingSession() { return true }
+  }
+  const delta = {
+    type: "message.part.delta",
+    sessionID: "background",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text",
+    delta: "background"
+  }
+
+  assert.equal(__test.maybeConsumePacedRuntimeEvent(delta, "active", fakePacer), false)
+  assert.deepEqual(calls, [])
+  assert.equal(__test.maybeConsumePacedRuntimeEvent({ ...delta, sessionID: "active" }, "active", fakePacer), true)
+  assert.deepEqual(calls, [["enqueue", "active"]])
+})
+
+test("stream delta splitter chunks long Unicode tokens without dropping characters", () => {
+  const input = "đây_là_một_token_rất_dài_không_có_space"
+  const segments = __test.splitStreamDeltaSegments(input, { targetChars: 8, maxChars: 10 })
+  assert.ok(segments.length > 1)
+  assert.equal(segments.join(""), input)
+  assert.ok(segments.every((segment) => Array.from(segment).length <= 10))
+})
+
+test("stream delta splitter packs normal prose into small readable segments", () => {
+  const input = "Xin chao, day la mot doan stream."
+  const segments = __test.splitStreamDeltaSegments(input)
+  assert.ok(segments.length > 2)
+  assert.equal(segments.join(""), input)
+  assert.ok(segments.every((segment) => Array.from(segment).length <= 12))
+})
+
 test("sessionsForProjectPath keeps only directory-matching sessions (trailing slash tolerant)", () => {
   const sessions = [
     { id: "s1", directory: "/Users/me/a" },

@@ -766,6 +766,223 @@ function handleRuntimeUpdate(runtime) {
 }
 
 const SESSION_LIFECYCLE_EVENTS = new Set(["session.status", "session.idle", "session.aborted", "session.error"])
+const STREAM_PACE_DELAY_MS = 40
+const STREAM_SEGMENT_TARGET_CHARS = 8
+const STREAM_SEGMENT_MAX_CHARS = 12
+const STREAM_BACKLOG_SEGMENT_THRESHOLD = 160
+const STREAM_BACKLOG_BATCH_SIZE = 2
+const STREAM_TERMINAL_EVENTS = new Set(["session.idle", "session.error", "session.aborted"])
+
+function charCount(value) {
+  return Array.from(String(value || "")).length
+}
+
+function splitLongToken(token, maxChars = STREAM_SEGMENT_MAX_CHARS) {
+  const chars = Array.from(token)
+  const chunks = []
+  for (let index = 0; index < chars.length; index += maxChars) {
+    chunks.push(chars.slice(index, index + maxChars).join(""))
+  }
+  return chunks
+}
+
+function splitStreamDeltaSegments(delta, {
+  targetChars = STREAM_SEGMENT_TARGET_CHARS,
+  maxChars = STREAM_SEGMENT_MAX_CHARS
+} = {}) {
+  const text = String(delta || "")
+  if (!text) return []
+  const tokens = text.match(/\s+|[^\s]+/gu) || []
+  const segments = []
+  let current = ""
+  const flush = () => {
+    if (!current) return
+    segments.push(current)
+    current = ""
+  }
+
+  for (const token of tokens) {
+    const tokenLength = charCount(token)
+    if (tokenLength > maxChars) {
+      flush()
+      segments.push(...splitLongToken(token, maxChars))
+      continue
+    }
+    const nextLength = charCount(current) + tokenLength
+    if (current && nextLength > maxChars && charCount(current) >= Math.min(targetChars, maxChars)) {
+      flush()
+    }
+    current += token
+    if (charCount(current) >= targetChars && /[\s.,!?;:)\]}]$/u.test(current)) flush()
+  }
+  flush()
+  return segments
+}
+
+function pacedPartKey(messageID, partID) {
+  return `${messageID || ""}\u0000${partID || ""}`
+}
+
+function createStreamPacer({
+  applyEvent,
+  delayMs = STREAM_PACE_DELAY_MS,
+  splitDelta = splitStreamDeltaSegments,
+  setTimer = (callback, delay) => setTimeout(callback, delay),
+  clearTimer = (timer) => clearTimeout(timer)
+} = {}) {
+  const sessions = new Map()
+  const ensureSession = (sessionID) => {
+    let entry = sessions.get(sessionID)
+    if (!entry) {
+      entry = { sessionID, queue: [], deferred: [], partCounts: new Map(), timer: null }
+      sessions.set(sessionID, entry)
+    }
+    return entry
+  }
+  const incrementPart = (entry, key) => {
+    entry.partCounts.set(key, (entry.partCounts.get(key) || 0) + 1)
+  }
+  const decrementPart = (entry, key) => {
+    const next = (entry.partCounts.get(key) || 0) - 1
+    if (next > 0) entry.partCounts.set(key, next)
+    else entry.partCounts.delete(key)
+  }
+  const finishIfIdle = (entry) => {
+    if (entry.queue.length || entry.timer || entry.partCounts.size) return
+    const deferred = entry.deferred.splice(0)
+    for (const event of deferred) applyEvent(event)
+    if (!entry.queue.length && !entry.timer && !entry.deferred.length && !entry.partCounts.size) {
+      sessions.delete(entry.sessionID)
+    }
+  }
+  const schedule = (entry) => {
+    if (entry.timer || !entry.queue.length) return
+    entry.timer = setTimer(() => {
+      entry.timer = null
+      const batchSize = entry.queue.length > STREAM_BACKLOG_SEGMENT_THRESHOLD
+        ? Math.min(STREAM_BACKLOG_BATCH_SIZE, entry.queue.length)
+        : 1
+      for (let index = 0; index < batchSize; index += 1) {
+        const item = entry.queue.shift()
+        if (!item) break
+        applyEvent(item.event)
+        decrementPart(entry, item.key)
+      }
+      if (entry.queue.length) schedule(entry)
+      else finishIfIdle(entry)
+    }, delayMs)
+  }
+
+  const api = {
+    enqueue(event) {
+      if (!event?.sessionID || typeof event.delta !== "string") return false
+      const segments = splitDelta(event.delta)
+      if (!segments.length) return false
+      const entry = ensureSession(event.sessionID)
+      const key = pacedPartKey(event.messageID, event.partID)
+      for (const segment of segments) {
+        incrementPart(entry, key)
+        entry.queue.push({ key, event: { ...event, delta: segment } })
+      }
+      schedule(entry)
+      return true
+    },
+    defer(event) {
+      if (!event?.sessionID) return false
+      ensureSession(event.sessionID).deferred.push(event)
+      return true
+    },
+    flushSession(sessionID) {
+      const entry = sessions.get(sessionID)
+      if (!entry) return false
+      if (entry.timer) {
+        clearTimer(entry.timer)
+        entry.timer = null
+      }
+      while (entry.queue.length) {
+        const item = entry.queue.shift()
+        applyEvent(item.event)
+        decrementPart(entry, item.key)
+      }
+      const deferred = entry.deferred.splice(0)
+      for (const event of deferred) applyEvent(event)
+      sessions.delete(sessionID)
+      return true
+    },
+    clearSession(sessionID) {
+      const entry = sessions.get(sessionID)
+      if (!entry) return false
+      if (entry.timer) clearTimer(entry.timer)
+      sessions.delete(sessionID)
+      return true
+    },
+    flushAll() {
+      for (const sessionID of [...sessions.keys()]) api.flushSession(sessionID)
+    },
+    hasPendingSession(sessionID) {
+      const entry = sessions.get(sessionID)
+      return Boolean(entry && (entry.queue.length || entry.deferred.length || entry.partCounts.size || entry.timer))
+    },
+    hasPendingPart(sessionID, messageID, partID) {
+      return Boolean(sessions.get(sessionID)?.partCounts.has(pacedPartKey(messageID, partID)))
+    }
+  }
+  return api
+}
+
+function isPaceableDelta(event) {
+  return event?.type === "message.part.delta" && event.field === "text"
+}
+
+function isTextPartUpdate(event) {
+  return event?.type === "message.part.updated" &&
+    (event.part?.type === "text" || event.part?.type === "reasoning")
+}
+
+function maybeConsumePacedRuntimeEvent(event, activeSessionId = state.activeSessionId, pacer = streamPacer) {
+  if (!event?.sessionID || event.sessionID !== activeSessionId) return false
+  if (isPaceableDelta(event)) return pacer.enqueue(event)
+  if (isTextPartUpdate(event) && pacer.hasPendingPart(event.sessionID, event.part?.messageID, event.part?.id)) {
+    return pacer.defer(event)
+  }
+  if (STREAM_TERMINAL_EVENTS.has(event.type) && pacer.hasPendingSession(event.sessionID)) {
+    if (event.type === "session.aborted") {
+      pacer.flushSession(event.sessionID)
+      return false
+    }
+    return pacer.defer(event)
+  }
+  return false
+}
+
+function applyRuntimeStreamEvent(event) {
+  const sessionId = event?.sessionID
+  if (!sessionId) return
+  const thread = state.threads.get(sessionId)
+  if (!thread) {
+    // We are not tracking this session's thread yet, but a lifecycle change still
+    // moves its sidebar badge (busy/idle) — repaint badges without a full render.
+    if (SESSION_LIFECYCLE_EVENTS.has(event.type)) renderSessionBadges()
+    return
+  }
+  const result = applyThreadEvent(thread, event) || {}
+  const isActive = sessionId === state.activeSessionId
+  if (SESSION_LIFECYCLE_EVENTS.has(event.type)) {
+    if (isActive) updateComposerSubmitButton()
+    renderSessionBadges()
+  }
+  if (result.changed && isActive) {
+    maybeAutoOpenPlan()
+    scheduleThreadRender()
+  }
+  if (result.reconcile) scheduleRefresh()
+}
+
+const streamPacer = createStreamPacer({ applyEvent: applyRuntimeStreamEvent })
+
+function flushActiveStreamPacing() {
+  if (state.activeSessionId) streamPacer.flushSession(state.activeSessionId)
+}
 
 function handleRuntimeStream(event) {
   // Connection (re)established → reconcile every known thread from the server.
@@ -782,26 +999,11 @@ function handleRuntimeStream(event) {
     handleMcpStreamEvent(event)
     return
   }
-  const sessionId = event?.sessionID
-  if (!sessionId) return
-  const thread = state.threads.get(sessionId)
-  if (!thread) {
-    // We are not tracking this session's thread yet, but a lifecycle change still
-    // moves its sidebar badge (busy/idle) — repaint badges without a full render.
-    if (SESSION_LIFECYCLE_EVENTS.has(event.type)) renderSessionBadges()
+  if (!event?.sessionID) return
+  if (maybeConsumePacedRuntimeEvent(event)) {
     return
   }
-  const result = applyThreadEvent(thread, event)
-  const isActive = sessionId === state.activeSessionId
-  if (SESSION_LIFECYCLE_EVENTS.has(event.type)) {
-    if (isActive) updateComposerSubmitButton()
-    renderSessionBadges()
-  }
-  if (result.changed && isActive) {
-    maybeAutoOpenPlan()
-    scheduleThreadRender()
-  }
-  if (result.reconcile) scheduleRefresh()
+  applyRuntimeStreamEvent(event)
 }
 
 // Live-update MCP server connection status from runtime stream events. Only repaint
@@ -3686,6 +3888,7 @@ async function clearPendingAttachments() {
 
 async function abortSession() {
   if (!state.activeSessionId || !threadAbortable()) return
+  flushActiveStreamPacing()
   await window.openworking.runtime.abortSession({ sessionId: state.activeSessionId })
   activeThread().status = { type: "idle" }
   updateComposerSubmitButton()
@@ -3704,6 +3907,7 @@ async function openProject(projectId, { selectLatest = true } = {}) {
     return
   }
   await clearPendingAttachments()
+  flushActiveStreamPacing()
   const switchingProject = state.activeProjectId !== projectId
   state.activeProjectId = projectId
   resetFileTree(projectId)
@@ -3744,7 +3948,10 @@ async function openProject(projectId, { selectLatest = true } = {}) {
 function pruneThreads(keepSessionIds) {
   const keep = new Set([...keepSessionIds, state.activeSessionId, null])
   for (const sessionId of [...state.threads.keys()]) {
-    if (!keep.has(sessionId)) state.threads.delete(sessionId)
+    if (!keep.has(sessionId)) {
+      streamPacer.clearSession(sessionId)
+      state.threads.delete(sessionId)
+    }
   }
 }
 
@@ -3776,6 +3983,7 @@ async function newSession(projectId, { clearAttachments = true } = {}) {
   const project = state.projects.find((item) => item.id === projectId)
   if (!project) return
   if (clearAttachments) await clearPendingAttachments()
+  flushActiveStreamPacing()
   state.activeProjectId = projectId
   resetFileTree(projectId)
   state.activeSessionId = null
@@ -3830,6 +4038,7 @@ async function selectSession(projectId, sessionId) {
   if (!runtimeAlive) {
     await openProject(projectId, { selectLatest: false }).catch((error) => showToast(error.message))
   }
+  if (state.activeSessionId !== sessionId) flushActiveStreamPacing()
   state.activeProjectId = projectId
   state.activeSessionId = sessionId
   state.nav = "session"
@@ -4653,8 +4862,14 @@ if (typeof module !== "undefined" && module.exports) {
       state,
       dispatchDelegated,
       delegationShim,
+      createStreamPacer,
+      flushActiveStreamPacing,
+      handleRuntimeStream,
+      maybeConsumePacedRuntimeEvent,
       render,
       renderSidebarInto,
+      splitStreamDeltaSegments,
+      streamPacer,
       // DELEGATED_CLICK is a `const` (TDZ) at exports-eval time, so expose it via a getter.
       getDelegatedClick: () => DELEGATED_CLICK
     }
