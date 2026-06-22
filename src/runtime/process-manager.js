@@ -6,6 +6,7 @@ const net = require("node:net")
 const path = require("node:path")
 const { fileURLToPath } = require("node:url")
 const { defaultConfigPath, readOpencodeConfig } = require("../opencode-config")
+const { runtimeXdgConfigHome } = require("../opencode-profile")
 const { officeAttachmentContext } = require("../office-attachment-context")
 
 // Document formats the model/gateway should translate through the bundled
@@ -195,6 +196,7 @@ function resolveRuntimeBin() {
     ...resourceRoots.map((resourceRoot) => path.join(resourceRoot, "app.asar.unpacked", "node_modules", `opencode-${runtimePlatform}-${process.arch}`, "bin", platformExecutable)),
     ...packagedPlatformCandidates,
     ...resourceRoots.map((resourceRoot) => path.join(resourceRoot, "app", "node_modules", `opencode-${runtimePlatform}-${process.arch}`, "bin", platformExecutable)),
+    path.join(__dirname, "..", "..", "node_modules", `opencode-${runtimePlatform}-${process.arch}`, "bin", platformExecutable),
     ...resourceRoots.map((resourceRoot) => path.join(resourceRoot, "app", "node_modules", "opencode-ai", "bin", wrapperExecutable)),
     path.join(__dirname, "..", "..", "node_modules", "opencode-ai", "bin", wrapperExecutable)
   ].filter(Boolean)
@@ -677,6 +679,20 @@ class RuntimeProcessManager {
   // (listMessages/listSessions/…) can await it via waitUntilReady() instead of throwing
   // "Runtime is not running" during the stop→spawn→healthcheck window.
   async openProject({ project }) {
+    while (this.lifecycle) {
+      const pending = this.lifecycle
+      await pending
+      if (
+        this.child &&
+        this.state.status === "running" &&
+        this.state.project?.id === project?.id &&
+        this.state.runtime?.cwd === project?.path
+      ) {
+        return this.snapshot()
+      }
+      if (this.lifecycle !== pending) continue
+      break
+    }
     const op = this._openProject({ project })
     // A settled-but-not-superseded lifecycle clears itself; a newer openProject overwrites it first.
     const marker = op.then(() => {}, () => {})
@@ -704,6 +720,7 @@ class RuntimeProcessManager {
     const port = await findFreePort()
     const configDir = this.profile?.profileDir || path.join(this.userDataPath, "opencode-profile")
     const configPath = this.profile?.configPath || defaultConfigPath(configDir)
+    const xdgConfigHome = this.profile?.xdgConfigHome || runtimeXdgConfigHome(configDir)
     const runtimeDataDir = path.join(configDir, "data")
     const runtimeStateDir = path.join(configDir, "state")
     const runtimeCacheDir = path.join(configDir, "cache")
@@ -733,7 +750,8 @@ class RuntimeProcessManager {
         pid: null,
         serverUrl,
         configPath,
-        configDir
+        configDir,
+        xdgConfigHome
       },
       project,
       activeSessionId: null
@@ -745,7 +763,8 @@ class RuntimeProcessManager {
       args: runtimeArgs,
       cwd: project.path,
       configPath,
-      configDir
+      configDir,
+      xdgConfigHome
     })
     const userPath = await resolveUserPath()
     const env = {
@@ -755,6 +774,7 @@ class RuntimeProcessManager {
       PATH: userPath,
       OPENCODE_CONFIG: configPath,
       OPENCODE_CONFIG_DIR: configDir,
+      XDG_CONFIG_HOME: xdgConfigHome,
       XDG_DATA_HOME: runtimeDataDir,
       XDG_STATE_HOME: runtimeStateDir,
       XDG_CACHE_HOME: runtimeCacheDir,
@@ -803,7 +823,7 @@ class RuntimeProcessManager {
       this.state.activity = "idle"
       this.state.lastError = code === 0 || wasStopping
         ? null
-        : `Runtime exited with code ${code ?? "null"} signal ${signal ?? "null"}`
+        : this.launchErrorMessage(`Runtime exited with code ${code ?? "null"} signal ${signal ?? "null"}`)
       this.timeline("runtime.exited", { code, signal })
       this.publish()
       if (this.resolveExit) this.resolveExit()
@@ -1262,9 +1282,25 @@ class RuntimeProcessManager {
         await new Promise((resolve) => setTimeout(resolve, 350))
       }
     }
-    const error = new Error(`Runtime did not become healthy: ${lastError?.message || "timeout"}`)
+    const error = new Error(this.launchErrorMessage(`Runtime did not become healthy: ${lastError?.message || "timeout"}`))
     this.failLaunch(error)
     throw error
+  }
+
+  recentRuntimeOutput() {
+    const lines = []
+    for (const entry of this.state.logs.slice(-20)) {
+      if (!["stdout", "stderr", "error"].includes(entry.level)) continue
+      for (const line of String(entry.message || "").split(/\r?\n/).filter(Boolean)) {
+        lines.push(`${entry.level}: ${line}`)
+      }
+    }
+    const output = lines.slice(-8).join("\n").slice(-2000)
+    return output ? `\nRecent runtime output:\n${output}` : ""
+  }
+
+  launchErrorMessage(message) {
+    return `${message}${this.recentRuntimeOutput()}`
   }
 
   startEventStream(serverUrl, auth) {

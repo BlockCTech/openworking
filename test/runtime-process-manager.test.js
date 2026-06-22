@@ -370,10 +370,11 @@ test("runtime binary resolves to bundled opencode dependency by default", () => 
   delete process.env.OPENCODE_BIN
 
   try {
-    assert.equal(
-      resolveRuntimeBin(),
-      path.join(__dirname, "..", "node_modules", "opencode-ai", "bin", "opencode.exe")
-    )
+    const runtimePlatform = process.platform === "win32" ? "windows" : process.platform
+    const executable = process.platform === "win32" ? "opencode.exe" : "opencode"
+    const platformRuntime = path.join(__dirname, "..", "node_modules", `opencode-${runtimePlatform}-${process.arch}`, "bin", executable)
+    const wrapperRuntime = path.join(__dirname, "..", "node_modules", "opencode-ai", "bin", "opencode.exe")
+    assert.equal(resolveRuntimeBin(), fs.existsSync(platformRuntime) ? platformRuntime : wrapperRuntime)
   } finally {
     if (previous === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
     else process.env.OPENWORKING_RUNTIME_BIN = previous
@@ -426,6 +427,7 @@ const capture = {
   cwd: process.cwd(),
   config: process.env.OPENCODE_CONFIG,
   configDir: process.env.OPENCODE_CONFIG_DIR,
+  xdgConfigHome: process.env.XDG_CONFIG_HOME,
   dataHome: process.env.XDG_DATA_HOME,
   stateHome: process.env.XDG_STATE_HOME,
   cacheHome: process.env.XDG_CACHE_HOME,
@@ -532,6 +534,7 @@ process.on("SIGTERM", () => process.exit(0))
     assert.equal(captured.cwd, fs.realpathSync(projectPath))
     assert.equal(captured.config, configPath)
     assert.equal(captured.configDir, path.join(temp, "profile"))
+    assert.equal(captured.xdgConfigHome, path.join(temp, "profile", "xdg-config"))
     assert.equal(captured.dataHome, path.join(temp, "profile", "data"))
     assert.equal(captured.stateHome, path.join(temp, "profile", "state"))
     assert.equal(captured.cacheHome, path.join(temp, "profile", "cache"))
@@ -940,6 +943,101 @@ test("reload is a no-op when no runtime is running", async () => {
   const snapshot = await manager.reload()
   assert.equal(snapshot.status, "idle")
   assert.equal(manager.child, null)
+})
+
+test("concurrent openProject calls for the same project share the in-flight start", async () => {
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-concurrent-start",
+    emit() {}
+  })
+  const project = { id: "proj_local", name: "Local", path: "/tmp/openworking-runtime-concurrent-start/project" }
+  let calls = 0
+  let resolveStart
+  manager._openProject = async ({ project: requestedProject }) => {
+    calls += 1
+    await new Promise((resolve) => { resolveStart = resolve })
+    manager.child = {}
+    manager.state.status = "running"
+    manager.state.project = requestedProject
+    manager.state.runtime = { cwd: requestedProject.path }
+    return manager.snapshot()
+  }
+
+  const first = manager.openProject({ project })
+  const second = manager.openProject({ project })
+  resolveStart()
+  const [firstSnapshot, secondSnapshot] = await Promise.all([first, second])
+
+  assert.equal(calls, 1)
+  assert.equal(firstSnapshot.status, "running")
+  assert.equal(secondSnapshot.status, "running")
+})
+
+test("concurrent openProject calls retry serially after a failed start", async () => {
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-concurrent-retry",
+    emit() {}
+  })
+  const project = { id: "proj_local", name: "Local", path: "/tmp/openworking-runtime-concurrent-retry/project" }
+  const resolvers = []
+  let calls = 0
+  manager._openProject = async ({ project: requestedProject }) => {
+    calls += 1
+    const callNumber = calls
+    await new Promise((resolve) => { resolvers.push(resolve) })
+    if (callNumber === 1) throw new Error("first start failed")
+    manager.child = {}
+    manager.state.status = "running"
+    manager.state.project = requestedProject
+    manager.state.runtime = { cwd: requestedProject.path }
+    return manager.snapshot()
+  }
+
+  const first = manager.openProject({ project }).catch((error) => error.message)
+  const second = manager.openProject({ project })
+  const third = manager.openProject({ project })
+  resolvers[0]()
+  while (resolvers.length < 2) await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.equal(calls, 2)
+  resolvers[1]()
+  const [firstResult, secondSnapshot, thirdSnapshot] = await Promise.all([first, second, third])
+
+  assert.equal(firstResult, "first start failed")
+  assert.equal(calls, 2)
+  assert.equal(secondSnapshot.status, "running")
+  assert.equal(thirdSnapshot.status, "running")
+})
+
+test("runtime startup failures include recent child stderr", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-startup-fail-"))
+  const projectPath = path.join(temp, "project")
+  fs.mkdirSync(projectPath)
+  const fakeRuntimePath = path.join(temp, "fake-opencode.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+console.error("fatal startup detail")
+process.exit(2)
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath: path.join(temp, "profile", "opencode.json") },
+    emit() {}
+  })
+
+  try {
+    await assert.rejects(
+      manager.openProject({ project: { id: "proj_local", name: "Local", path: projectPath } }),
+      /fatal startup detail/
+    )
+    assert.match(manager.snapshot().lastError, /fatal startup detail/)
+  } finally {
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+  }
 })
 
 test("runtime manager projects stream events independently from the diagnostic timeline", () => {

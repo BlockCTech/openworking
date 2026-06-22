@@ -35,6 +35,27 @@ function defaultProfileDir(userDataPath) {
   return path.join(userDataPath, "opencode-profile")
 }
 
+function runtimeXdgConfigHome(profileDir) {
+  return path.join(profileDir, "xdg-config")
+}
+
+function runtimeXdgConfigPath(profileDir) {
+  return path.join(runtimeXdgConfigHome(profileDir), "opencode", "opencode.json")
+}
+
+function syncRuntimeXdgConfig(profile) {
+  const profileDir = profile.profileDir
+  const configPath = profile.configPath || defaultConfigPath(profileDir)
+  const xdgConfigHome = profile.xdgConfigHome || runtimeXdgConfigHome(profileDir)
+  const xdgConfigPath = path.join(xdgConfigHome, "opencode", "opencode.json")
+  fs.mkdirSync(path.dirname(xdgConfigPath), { recursive: true })
+  const source = fs.readFileSync(configPath)
+  if (!fs.existsSync(xdgConfigPath) || !fs.readFileSync(xdgConfigPath).equals(source)) {
+    fs.writeFileSync(xdgConfigPath, source)
+  }
+  return { xdgConfigHome, xdgConfigPath }
+}
+
 function bundledOpencodeDir() {
   const packaged = process.resourcesPath && path.join(process.resourcesPath, "opencode")
   if (packaged && fs.existsSync(packaged)) return packaged
@@ -543,7 +564,8 @@ function ensureOpenworkingProfile({ userDataPath }) {
   const current = ensureOpencodeConfig(configPath)
   const config = ensureDefaultAgentPrompt(ensureSkillPermissions(ensureDefaultManagedModelConfig(current.config)))
   writeOpencodeConfig(config, configPath)
-  return { profileDir, configPath, skills, tools }
+  const xdg = syncRuntimeXdgConfig({ profileDir, configPath })
+  return { profileDir, configPath, ...xdg, skills, tools }
 }
 
 function readProfileConfig(profile) {
@@ -560,7 +582,9 @@ function setActiveProjectMemory(profile, projectId) {
 }
 
 function writeProfileConfig(profile, config) {
-  return writeOpencodeConfig(ensureDefaultAgentPrompt(ensureSkillPermissions(ensureDefaultManagedModelConfig(config))), profile.configPath)
+  const written = writeOpencodeConfig(ensureDefaultAgentPrompt(ensureSkillPermissions(ensureDefaultManagedModelConfig(config))), profile.configPath)
+  syncRuntimeXdgConfig(profile)
+  return written
 }
 
 function writeEditableProfileConfig(profile, edits) {
@@ -608,9 +632,12 @@ module.exports = {
   updateMcpServer,
   listMcpServers,
   removeMcpServer,
+  runtimeXdgConfigHome,
+  runtimeXdgConfigPath,
   setMcpServerEnabled,
   readProfileConfig,
   setActiveProjectMemory,
+  syncRuntimeXdgConfig,
   syncBuiltInSkills,
   syncBuiltInTools,
   writeEditableProfileConfig,

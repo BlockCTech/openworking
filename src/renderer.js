@@ -180,8 +180,10 @@ const state = {
   commandMenu: { open: false, query: "", index: 0 },
   fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
   popover: null,
-  sessionMenu: null,          // sessionId đang mở menu, hoặc null
-  sessionDeleteTarget: null,  // { id, title } của session chờ xác nhận xóa trong modal
+  sessionMenu: null,          // row key `${projectId}:${sessionId}` đang mở menu, hoặc null
+  sessionDeleteTarget: null,  // { sessionId, projectId, title } của session chờ xác nhận xóa trong modal
+  sessionDeleting: false,
+  sessionDeleteError: null,
   sessionRenameTarget: null,  // { sessionId, projectId, title, label } của session đang đổi tên
   sessionRenameDraft: "",
   sessionRenameError: null,
@@ -408,13 +410,55 @@ function samePathish(left, right) {
   return normalize(left) === normalize(right)
 }
 
+function sessionRowKey(projectId, sessionId) {
+  return `${projectId || ""}:${sessionId || ""}`
+}
+
+function dedupeSessions(sessions) {
+  const seen = new Set()
+  const unique = []
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    if (!session?.id || seen.has(session.id)) continue
+    seen.add(session.id)
+    unique.push(session)
+  }
+  return unique
+}
+
 // Keeps only sessions whose `directory` matches the given project path. /session?directory= is
 // already directory-scoped, so this is a defensive filter against any session tagged with a
-// sibling/child directory leaking into a project's list.
+// sibling/child directory leaking into a project's list. Sessions without `directory` are only
+// accepted from the active runtime list, not from directory-scoped background fetches.
 function sessionsForProjectPath(sessions, projectPath) {
   return (Array.isArray(sessions) ? sessions : []).filter((session) =>
-    !session.directory || samePathish(session.directory, projectPath)
+    session?.directory && samePathish(session.directory, projectPath)
   )
+}
+
+function activeSessionsForProjectPath(sessions, projectPath) {
+  return (Array.isArray(sessions) ? sessions : []).filter((session) =>
+    session?.id && (!session.directory || samePathish(session.directory, projectPath))
+  )
+}
+
+function setProjectSessions(projectId, sessions, source = "directory") {
+  const project = state.projects.find((item) => item.id === projectId)
+  if (!project) return []
+  const next = dedupeSessions(
+    source === "active"
+      ? activeSessionsForProjectPath(sessions, project.path)
+      : sessionsForProjectPath(sessions, project.path)
+  )
+  const nextIds = new Set(next.map((session) => session.id))
+  if (nextIds.size) {
+    for (const [otherProjectId, otherSessions] of Object.entries(state.sessionsByProject)) {
+      if (otherProjectId === projectId || !Array.isArray(otherSessions)) continue
+      const filtered = otherSessions.filter((session) => !nextIds.has(session.id))
+      if (filtered.length !== otherSessions.length) state.sessionsByProject[otherProjectId] = filtered
+    }
+  }
+  state.sessionsByProject[projectId] = next
+  return next
 }
 
 // Populates sidebar history for EVERY project from the single running server. OpenCode's
@@ -422,8 +466,8 @@ function sessionsForProjectPath(sessions, projectPath) {
 // `directory`. Requests run SEQUENTIALLY (not a parallel burst) and only while the runtime is
 // running — if the server stops or the active project changes mid-loop we bail, so the fill never
 // fights a project switch's server restart (the source of the ECONNRESET storm). A single
-// in-flight guard coalesces the openProject + refreshSessionData triggers into one pass. Only
-// projects that return sessions are overwritten, so a transient empty never blanks an existing list.
+// in-flight guard coalesces the openProject + refreshSessionData triggers into one pass. Empty
+// directory responses still leave existing lists alone; non-empty unsafe responses clear stale rows.
 function loadAllSessions() {
   if (loadAllSessions.inFlight) return loadAllSessions.inFlight
   loadAllSessions.inFlight = (async () => {
@@ -431,11 +475,8 @@ function loadAllSessions() {
     const activeProjectId = state.activeProjectId
     for (const project of state.projects) {
       if (state.runtime?.status !== "running" || state.activeProjectId !== activeProjectId) break
-      const sessions = sessionsForProjectPath(
-        await window.openworking.runtime.listSessionsForDirectory(project.path).catch(() => []),
-        project.path
-      )
-      if (sessions.length) state.sessionsByProject[project.id] = sessions
+      const sessions = await window.openworking.runtime.listSessionsForDirectory(project.path).catch(() => null)
+      if (Array.isArray(sessions) && sessions.length) setProjectSessions(project.id, sessions, "directory")
     }
   })().finally(() => { loadAllSessions.inFlight = null })
   return loadAllSessions.inFlight
@@ -878,7 +919,7 @@ async function reconcileThread(sessionId) {
 
 async function refreshSessionData() {
   if (state.runtime?.status !== "running" || state.runtime.project?.id !== state.activeProjectId) return
-  state.sessionsByProject[state.activeProjectId] = await window.openworking.runtime.listSessions()
+  setProjectSessions(state.activeProjectId, await window.openworking.runtime.listSessions(), "active")
   // Refresh the other expanded/pinned accordions' history (per-directory; coalesced via in-flight guard).
   await loadAllSessions()
   const activeId = state.activeSessionId
@@ -1167,14 +1208,16 @@ function renderSkillUploadModal() {
 function renderDeleteSessionModal() {
   const target = state.sessionDeleteTarget
   if (!target) return ""
+  const disableActions = state.sessionDeleting ? " disabled" : ""
   return `
-    <div class="update-backdrop" data-action="cancelDeleteSession">
+    <div class="update-backdrop" ${state.sessionDeleting ? "" : 'data-action="cancelDeleteSession"'}>
       <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="deleteSessionTitle" data-stop-click>
         <div class="confirm-title" id="deleteSessionTitle">Delete session?</div>
         <p>“${escapeHtml(target.title)}” will be permanently deleted. This can’t be undone.</p>
+        <div class="field-error">${state.sessionDeleteError ? escapeHtml(state.sessionDeleteError) : ""}</div>
         <div class="confirm-actions">
-          <button class="secondary-btn" data-action="cancelDeleteSession">Cancel</button>
-          <button class="danger-btn" data-action="confirmDeleteSession">Delete</button>
+          <button class="secondary-btn${disableActions}" data-action="cancelDeleteSession">Cancel</button>
+          <button class="danger-btn${disableActions}" data-action="confirmDeleteSession">${state.sessionDeleting ? "Deleting..." : "Delete"}</button>
         </div>
       </div>
     </div>
@@ -1450,23 +1493,26 @@ function renderProjectGroup(project) {
 
 function renderSessionRow(project, session) {
   const isPinned = state.pinnedSessions.has(session.id)
+  const projectId = project?.id || ""
+  const rowKey = sessionRowKey(projectId, session.id)
+  const active = projectId === state.activeProjectId && session.id === state.activeSessionId
   return `
-    <div class="session-row-wrap ${session.id === state.activeSessionId ? "active" : ""}" data-session-row="${escapeHtml(session.id)}">
-      <button class="session-row" data-session-id="${escapeHtml(session.id)}" data-project-id="${escapeHtml(project.id)}">
+    <div class="session-row-wrap ${active ? "active" : ""}" data-session-row="${escapeHtml(session.id)}" data-session-row-key="${escapeHtml(rowKey)}">
+      <button class="session-row" data-session-id="${escapeHtml(session.id)}" data-project-id="${escapeHtml(projectId)}">
         <span class="session-busy-dot ${sessionBusy(session.id) ? "on" : ""}" title="Running"></span>
         <span class="stitle">${escapeHtml(sessionDisplayTitle(session))}</span>
         <span class="stime">${escapeHtml(relativeTime(sessionUpdatedAt(session)))}</span>
       </button>
-      <button class="session-kebab" data-session-menu="${escapeHtml(session.id)}" title="Options">${icon("dots")}</button>
-      ${state.sessionMenu === session.id ? `
+      <button class="session-kebab" data-session-menu="${escapeHtml(session.id)}" data-session-project="${escapeHtml(projectId)}" title="Options">${icon("dots")}</button>
+      ${state.sessionMenu === rowKey ? `
         <div class="pop session-pop">
-          <button class="pop-item" data-session-pin="${escapeHtml(session.id)}" data-pinned="${isPinned ? "1" : "0"}" data-pin-project="${escapeHtml(project.id || "")}" data-pin-title="${escapeHtml(sessionDisplayTitle(session))}" data-pin-updated="${escapeHtml(sessionUpdatedAt(session) || "")}">
+          <button class="pop-item" data-session-pin="${escapeHtml(session.id)}" data-pinned="${isPinned ? "1" : "0"}" data-pin-project="${escapeHtml(projectId)}" data-pin-title="${escapeHtml(sessionDisplayTitle(session))}" data-pin-updated="${escapeHtml(sessionUpdatedAt(session) || "")}">
             ${icon("pin")}<span>${isPinned ? "Unpin chat" : "Pin chat"}</span>
           </button>
-          <button class="pop-item" data-session-rename="${escapeHtml(session.id)}" data-session-project="${escapeHtml(project.id)}" data-session-title="${escapeHtml(session.title || "")}" data-session-label="${escapeHtml(sessionDisplayTitle(session))}">
+          <button class="pop-item" data-session-rename="${escapeHtml(session.id)}" data-session-project="${escapeHtml(projectId)}" data-session-title="${escapeHtml(session.title || "")}" data-session-label="${escapeHtml(sessionDisplayTitle(session))}">
             ${icon("edit")}<span>Rename</span>
           </button>
-          <button class="pop-item danger" data-session-delete="${escapeHtml(session.id)}" data-session-title="${escapeHtml(sessionDisplayTitle(session))}">
+          <button class="pop-item danger" data-session-delete="${escapeHtml(session.id)}" data-session-project="${escapeHtml(projectId)}" data-session-title="${escapeHtml(sessionDisplayTitle(session))}">
             ${icon("trash")}<span>Delete</span>
           </button>
         </div>` : ""}
@@ -3478,15 +3524,12 @@ async function handleAction(event) {
     }
     if (action === "confirmRemoveMcp") await confirmRemoveMcp()
     if (action === "cancelDeleteSession") {
+      if (state.sessionDeleting) return
       state.sessionDeleteTarget = null
+      state.sessionDeleteError = null
       render()
     }
-    if (action === "confirmDeleteSession") {
-      const target = state.sessionDeleteTarget
-      state.sessionDeleteTarget = null
-      render()
-      if (target) await deleteSession(target.id)
-    }
+    if (action === "confirmDeleteSession") await confirmDeleteSession()
     if (action === "cancelRenameSession") closeRenameSessionModal()
     if (action === "confirmRenameSession") await confirmRenameSession()
     if (action === "cancelRemoveProject") {
@@ -3609,8 +3652,7 @@ async function openProject(projectId, { selectLatest = true } = {}) {
     state.runtime = await window.openworking.runtime.openProject(project)
     state.commands = await window.openworking.runtime.listCommands().catch(() => [])
     state.commandMenu = { open: false, query: "", index: 0 }
-    const sessions = await window.openworking.runtime.listSessions()
-    state.sessionsByProject[projectId] = sessions
+    const sessions = setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
     // Opening a different project's runtime drops the old project's sessions — clear
     // their in-memory threads so background state from another workspace can't leak.
     if (switchingProject) pruneThreads(sessions.map((session) => session.id))
@@ -3654,8 +3696,7 @@ async function ensureRuntimeProject(projectId, { preserveSessionId = null } = {}
     state.runtime = await window.openworking.runtime.openProject(project)
     state.commands = await window.openworking.runtime.listCommands().catch(() => [])
     state.commandMenu = { open: false, query: "", index: 0 }
-    const sessions = await window.openworking.runtime.listSessions()
-    state.sessionsByProject[projectId] = sessions
+    const sessions = setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
     return chooseSessionAfterRuntimeReconnect(preserveSessionId, sessions)
   } finally {
     state.loading = false
@@ -3681,7 +3722,7 @@ async function newSession(projectId, { clearAttachments = true } = {}) {
     render()
     try {
       state.runtime = await window.openworking.runtime.openProject(project)
-      state.sessionsByProject[projectId] = await window.openworking.runtime.listSessions()
+      setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
     } finally {
       state.loading = false
       render()
@@ -3739,22 +3780,55 @@ async function selectSession(projectId, sessionId) {
   render({ threadScroll: "latest" })
 }
 
-async function deleteSession(sessionId) {
-  const projectId = state.activeProjectId
-  try {
-    await window.openworking.runtime.deleteSession({ sessionId })
-  } catch (error) {
-    showToast(error.message || "Could not delete session.")
-    return
+async function deleteSession(target) {
+  const sessionId = target?.sessionId
+  const projectId = target?.projectId
+  if (!sessionId || !projectId) {
+    throw new Error("Could not identify that session's project.")
   }
-  state.sessionsByProject[projectId] = await window.openworking.runtime.listSessions()
+  if (projectId !== state.activeProjectId && threadIsBusy(activeThread())) {
+    throw new Error("Finish the active session before deleting from another project.")
+  }
+  await runWithRuntimeProject(projectId, async () => {
+    if (state.runtime?.project?.id !== projectId || state.runtime?.status !== "running") {
+      throw new Error("Could not open the session workspace.")
+    }
+    await window.openworking.runtime.deleteSession({ sessionId })
+    setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
+  })
   state.threads.delete(sessionId)
-  if (state.activeSessionId === sessionId) {
+  if (state.activeProjectId === projectId && state.activeSessionId === sessionId) {
     state.activeSessionId = null
     resetActiveThread()
   }
   state.sessionMenu = null
   render()
+}
+
+async function confirmDeleteSession() {
+  const target = state.sessionDeleteTarget
+  if (!target?.sessionId || !target.projectId) {
+    state.sessionDeleteTarget = null
+    state.sessionDeleteError = null
+    state.sessionDeleting = false
+    render()
+    return
+  }
+  if (state.sessionDeleting) return
+  state.sessionDeleting = true
+  state.sessionDeleteError = null
+  render()
+  try {
+    await deleteSession(target)
+    state.sessionDeleteTarget = null
+    state.sessionDeleteError = null
+    state.sessionDeleting = false
+    render()
+  } catch (error) {
+    state.sessionDeleting = false
+    state.sessionDeleteError = error.message || "Could not delete session."
+    render()
+  }
 }
 
 async function togglePin(sessionId, pinned, meta = {}) {
@@ -3850,7 +3924,7 @@ async function confirmRenameSession() {
         throw new Error("Could not open the session workspace.")
       }
       await window.openworking.runtime.renameSession({ sessionId: target.sessionId, title: trimmedTitle })
-      state.sessionsByProject[target.projectId] = await window.openworking.runtime.listSessions()
+      setProjectSessions(target.projectId, await window.openworking.runtime.listSessions(), "active")
     })
     closeRenameSessionModal()
   } catch (error) {
@@ -3910,8 +3984,7 @@ async function sendPrompt(rawPrompt) {
       const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
       const session = await window.openworking.runtime.createSession({ title })
       state.activeSessionId = session.id
-      state.sessionsByProject[project.id] ||= []
-      state.sessionsByProject[project.id].unshift(session)
+      setProjectSessions(project.id, [session, ...projectSessions(project.id)], "active")
       // Discard the unsaved "new session" draft thread and start a clean thread under
       // the real session id, so subsequent stream events route to it by sessionID.
       state.threads.delete(null)
@@ -4463,7 +4536,11 @@ if (typeof module !== "undefined" && module.exports) {
     renderPromptOverlayHtml,
     renderTextWithFileMentions,
     resolveFileMentionsFromPrompt,
+    setProjectSessions,
+    sessionRowKey,
     __test: {
+      confirmDeleteSession,
+      deleteSession,
       refreshSessionData,
       selectSession,
       sendPrompt,
@@ -4510,7 +4587,9 @@ function delegationShim(event, element) {
 const DELEGATED_CLICK = [
   ["data-session-menu", (e) => {
     const id = e.currentTarget.dataset.sessionMenu
-    state.sessionMenu = state.sessionMenu === id ? null : id
+    const projectId = e.currentTarget.dataset.sessionProject || ""
+    const key = sessionRowKey(projectId, id)
+    state.sessionMenu = state.sessionMenu === key ? null : key
     scheduleSidebarRender()
   }],
   ["data-session-pin", (e) => {
@@ -4523,7 +4602,13 @@ const DELEGATED_CLICK = [
     togglePin(e.currentTarget.dataset.sessionPin, e.currentTarget.dataset.pinned !== "1", meta).catch((error) => showToast(error.message))
   }],
   ["data-session-delete", (e) => {
-    state.sessionDeleteTarget = { id: e.currentTarget.dataset.sessionDelete, title: e.currentTarget.dataset.sessionTitle || "Untitled session" }
+    state.sessionDeleteTarget = {
+      sessionId: e.currentTarget.dataset.sessionDelete,
+      projectId: e.currentTarget.dataset.sessionProject,
+      title: e.currentTarget.dataset.sessionTitle || "Untitled session"
+    }
+    state.sessionDeleting = false
+    state.sessionDeleteError = null
     state.sessionMenu = null
     render()
   }],

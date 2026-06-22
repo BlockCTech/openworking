@@ -43,8 +43,14 @@ test("bootstraps an isolated profile with the offline built-in skill bundle", ()
 
   assert.equal(profile.profileDir, path.join(temp, "opencode-profile"))
   assert.equal(profile.configPath, path.join(profile.profileDir, "opencode.json"))
+  assert.equal(profile.xdgConfigHome, path.join(profile.profileDir, "xdg-config"))
+  assert.equal(profile.xdgConfigPath, path.join(profile.xdgConfigHome, "opencode", "opencode.json"))
   assert.equal(profile.skills.skillsDir, path.join(profile.profileDir, "skills"))
   assert.equal(profile.tools.toolsDir, path.join(profile.profileDir, "tools"))
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(profile.xdgConfigPath, "utf8")),
+    JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  )
   assert.equal(fs.existsSync(path.join(profile.tools.toolsDir, "translate_document.js")), true)
   assert.equal(fs.existsSync(path.join(profile.tools.toolsDir, "remember.js")), true)
   assert.equal(fs.existsSync(path.join(profile.tools.runtimeDir, "runtime.cjs")), true)
@@ -95,7 +101,9 @@ test("sync is idempotent and skill permission deny is preserved", () => {
   writeProfileConfig(profile, config)
   ensureOpenworkingProfile({ userDataPath: temp })
   const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  const xdgSaved = JSON.parse(fs.readFileSync(profile.xdgConfigPath, "utf8"))
   assert.equal(saved.permission.skill["find-bugs"], "deny")
+  assert.equal(xdgSaved.permission.skill["find-bugs"], "deny")
 })
 
 test("migrates managed model defaults without replacing explicit capabilities", () => {

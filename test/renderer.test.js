@@ -49,6 +49,8 @@ const {
   renderPromptOverlayHtml,
   renderTextWithFileMentions,
   resolveFileMentionsFromPrompt,
+  setProjectSessions,
+  sessionRowKey,
   __test
 } = require("../src/renderer")
 
@@ -170,10 +172,42 @@ test("sessionsForProjectPath keeps only directory-matching sessions (trailing sl
     { id: "s1", directory: "/Users/me/a" },
     { id: "s2", directory: "/Users/me/a/" },
     { id: "s3", directory: "/Users/me/b" },
-    { id: "s4" } // no directory → kept (defensive)
+    { id: "s4" } // no directory → unsafe for directory-scoped background lists
   ]
-  assert.deepEqual(sessionsForProjectPath(sessions, "/Users/me/a").map((s) => s.id), ["s1", "s2", "s4"])
+  assert.deepEqual(sessionsForProjectPath(sessions, "/Users/me/a").map((s) => s.id), ["s1", "s2"])
   assert.deepEqual(sessionsForProjectPath([], "/Users/me/a"), [])
+})
+
+test("setProjectSessions accepts active no-directory sessions and removes that id from other projects", () => {
+  const previous = {
+    projects: __test.state.projects,
+    sessionsByProject: __test.state.sessionsByProject
+  }
+  try {
+    __test.state.projects = [
+      { id: "proj_a", path: "/Users/me/a" },
+      { id: "proj_b", path: "/Users/me/b" }
+    ]
+    __test.state.sessionsByProject = {
+      proj_b: [
+        { id: "shared", directory: "/Users/me/b" },
+        { id: "b_only", directory: "/Users/me/b" }
+      ]
+    }
+
+    const stored = setProjectSessions("proj_a", [
+      { id: "shared" },
+      { id: "a_only", directory: "/Users/me/a/" },
+      { id: "wrong_dir", directory: "/Users/me/b" }
+    ], "active")
+
+    assert.deepEqual(stored.map((session) => session.id), ["shared", "a_only"])
+    assert.deepEqual(__test.state.sessionsByProject.proj_a.map((session) => session.id), ["shared", "a_only"])
+    assert.deepEqual(__test.state.sessionsByProject.proj_b.map((session) => session.id), ["b_only"])
+  } finally {
+    __test.state.projects = previous.projects
+    __test.state.sessionsByProject = previous.sessionsByProject
+  }
 })
 
 // Saves/restores the renderer state loadAllSessions touches, sets the runtime running, and
@@ -623,13 +657,17 @@ test("selectSession during a still-starting runtime keeps the accordion open and
 // Builds a minimal event whose target.closest(selector) matches when the selector's attribute
 // is in `attrs`, returning a fake element carrying that attribute's value in dataset.
 function fakeDelegatedEvent(attrs) {
+  const dataset = {}
+  for (const [attr, value] of Object.entries(attrs)) {
+    const key = attr.replace(/^data-/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+    dataset[key] = value
+  }
   const target = {
     closest(selector) {
       // selector looks like "[data-foo]" — extract the attribute name.
       const attr = selector.slice(1, -1)
       if (!(attr in attrs)) return null
-      const datasetKey = attr.replace(/^data-/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase())
-      return { dataset: { [datasetKey]: attrs[attr] }, matches: (sel) => sel === selector }
+      return { dataset, matches: (sel) => sel === selector }
     }
   }
   return { type: "click", target, preventDefault() {}, stopPropagation() {} }
@@ -708,6 +746,212 @@ test("dispatchDelegated stops after the first matching entry (most-specific wins
   ]
   dispatchDelegated(fakeDelegatedEvent({ "data-session-menu": "ses_1", "data-session-id": "ses_1" }), table)
   assert.deepEqual(calls, ["menu"], "a kebab click must not also trigger the row's selectSession")
+})
+
+test("session menu state is scoped by project and session row", () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousSessionMenu = __test.state.sessionMenu
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  const { dispatchDelegated, getDelegatedClick } = __test
+  try {
+    __test.state.sessionMenu = null
+    dispatchDelegated(fakeDelegatedEvent({
+      "data-session-menu": "ses_1",
+      "data-session-project": "proj_a"
+    }), getDelegatedClick())
+    assert.equal(__test.state.sessionMenu, sessionRowKey("proj_a", "ses_1"))
+
+    dispatchDelegated(fakeDelegatedEvent({
+      "data-session-menu": "ses_1",
+      "data-session-project": "proj_b"
+    }), getDelegatedClick())
+    assert.equal(__test.state.sessionMenu, sessionRowKey("proj_b", "ses_1"))
+
+    dispatchDelegated(fakeDelegatedEvent({
+      "data-session-menu": "ses_1",
+      "data-session-project": "proj_b"
+    }), getDelegatedClick())
+    assert.equal(__test.state.sessionMenu, null)
+  } finally {
+    __test.state.sessionMenu = previousSessionMenu
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+  }
+})
+
+test("delete session target carries project id and refreshes the clicked project", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const state = __test.state
+  const previousState = {
+    projects: state.projects,
+    sessionsByProject: state.sessionsByProject,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    runtime: state.runtime,
+    threads: state.threads,
+    sessionDeleteTarget: state.sessionDeleteTarget,
+    sessionDeleting: state.sessionDeleting,
+    sessionDeleteError: state.sessionDeleteError,
+    sessionMenu: state.sessionMenu,
+    loading: state.loading,
+    toast: state.toast,
+    commands: state.commands,
+    commandMenu: state.commandMenu
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let currentProjectId = "proj_active"
+  const openedProjects = []
+  let deletedSessionId = null
+  global.window.openworking = {
+    runtime: {
+      async openProject(project) {
+        currentProjectId = project.id
+        openedProjects.push(project.id)
+        return { status: "running", project: { id: project.id }, sessionStatuses: {} }
+      },
+      async listCommands() { return [] },
+      async deleteSession({ sessionId }) {
+        deletedSessionId = sessionId
+        assert.equal(currentProjectId, "proj_other")
+        return true
+      },
+      async listSessions() {
+        if (currentProjectId === "proj_other") return [{ id: "other_remaining", directory: "/tmp/other" }]
+        return [{ id: "active_session", directory: "/tmp/active" }]
+      }
+    }
+  }
+
+  const { dispatchDelegated, getDelegatedClick, deleteSession } = __test
+  try {
+    Object.assign(state, {
+      projects: [
+        { id: "proj_active", name: "Active", path: "/tmp/active" },
+        { id: "proj_other", name: "Other", path: "/tmp/other" }
+      ],
+      sessionsByProject: {
+        proj_active: [{ id: "active_session", directory: "/tmp/active" }],
+        proj_other: [{ id: "delete_me", directory: "/tmp/other" }]
+      },
+      activeProjectId: "proj_active",
+      activeSessionId: "active_session",
+      runtime: { status: "running", project: { id: "proj_active" }, sessionStatuses: {} },
+      threads: new Map([["delete_me", { sessionId: "delete_me", messages: [], pendingQuestions: [], pendingPermissions: [], status: { type: "idle" } }]]),
+      sessionDeleteTarget: null,
+      sessionDeleting: false,
+      sessionDeleteError: null,
+      sessionMenu: null,
+      loading: false,
+      toast: null,
+      commands: [],
+      commandMenu: { open: false, query: "", index: 0 }
+    })
+
+    dispatchDelegated(fakeDelegatedEvent({
+      "data-session-delete": "delete_me",
+      "data-session-project": "proj_other",
+      "data-session-title": "Delete me"
+    }), getDelegatedClick())
+
+    assert.deepEqual(state.sessionDeleteTarget, {
+      sessionId: "delete_me",
+      projectId: "proj_other",
+      title: "Delete me"
+    })
+
+    await deleteSession(state.sessionDeleteTarget)
+
+    assert.equal(deletedSessionId, "delete_me")
+    assert.deepEqual(openedProjects, ["proj_other", "proj_active"])
+    assert.deepEqual(state.sessionsByProject.proj_other.map((session) => session.id), ["other_remaining"])
+    assert.deepEqual(state.sessionsByProject.proj_active.map((session) => session.id), ["active_session"])
+    assert.equal(state.activeSessionId, "active_session")
+    assert.equal(state.threads.has("delete_me"), false)
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("confirm delete session keeps the modal open with loading and inline errors", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const state = __test.state
+  const previousState = {
+    projects: state.projects,
+    sessionsByProject: state.sessionsByProject,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    runtime: state.runtime,
+    threads: state.threads,
+    sessionDeleteTarget: state.sessionDeleteTarget,
+    sessionDeleting: state.sessionDeleting,
+    sessionDeleteError: state.sessionDeleteError,
+    loading: state.loading,
+    toast: state.toast
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let rejectDelete = null
+  global.window.openworking = {
+    runtime: {
+      async deleteSession() {
+        return new Promise((_resolve, reject) => {
+          rejectDelete = reject
+        })
+      },
+      async listSessions() {
+        throw new Error("should not refresh after delete failure")
+      }
+    }
+  }
+
+  const { confirmDeleteSession } = __test
+  try {
+    Object.assign(state, {
+      projects: [{ id: "proj_active", name: "Active", path: "/tmp/active" }],
+      sessionsByProject: { proj_active: [{ id: "delete_me", directory: "/tmp/active" }] },
+      activeProjectId: "proj_active",
+      activeSessionId: "delete_me",
+      runtime: { status: "running", project: { id: "proj_active" }, sessionStatuses: {} },
+      threads: new Map(),
+      sessionDeleteTarget: { sessionId: "delete_me", projectId: "proj_active", title: "Delete me" },
+      sessionDeleting: false,
+      sessionDeleteError: null,
+      loading: false,
+      toast: null
+    })
+
+    const pending = confirmDeleteSession()
+
+    assert.equal(state.sessionDeleting, true)
+    assert.equal(state.sessionDeleteError, null)
+    assert.match(global.document.getElementById("root").innerHTML, /Deleting\.\.\./)
+
+    rejectDelete(new Error("Runtime delete failed"))
+    await pending
+
+    assert.deepEqual(state.sessionDeleteTarget, { sessionId: "delete_me", projectId: "proj_active", title: "Delete me" })
+    assert.equal(state.sessionDeleting, false)
+    assert.equal(state.sessionDeleteError, "Runtime delete failed")
+    assert.match(global.document.getElementById("root").innerHTML, /Runtime delete failed/)
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
 })
 
 test("DELEGATED_CLICK orders menu/kebab attributes before their enclosing rows", () => {
