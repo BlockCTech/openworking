@@ -1704,9 +1704,8 @@ function renderThreadMessage(message) {
   }
   const parts = message.parts.map(renderAssistantPart).join("")
   if (!parts) return ""
-  const fileRefs = renderFileRefChips(messageFileRefs(message))
   const changes = renderMessageChanges(message)
-  return `<div class="msg-ai"><div class="message-stack assistant-message"><div class="message-card ai-body">${parts}${fileRefs}${changes}</div>${actions}</div></div>`
+  return `<div class="msg-ai"><div class="message-stack assistant-message"><div class="message-card ai-body">${parts}${changes}</div>${actions}</div></div>`
 }
 
 const MUTATING_FILE_TOOLS = new Set(["edit", "write", "apply_patch"])
@@ -1790,17 +1789,16 @@ function renderDocumentViewer() {
     : escapeHtml(doc.name || "")
   const path = doc.path || doc.requestedPath || doc.name
   const hasDiff = Boolean(doc.diff)
-  // "diff" only when there is a diff to show; otherwise fall back to the file's
-  // natural render mode (markdown for .md, code for everything else).
-  const tab = hasDiff && doc.tab === "diff" ? "diff" : "code"
+  const hasRealFile = isViewableFilePath(path)
+  const tab = hasDiff && (doc.tab === "diff" || !hasRealFile) ? "diff" : "code"
   const previewTabLabel = (doc.renderMode || (isMarkdownFilePath(path) ? "markdown" : "code")) === "markdown" ? "Preview" : "Code"
   let body
   if (doc.loading) {
     body = `<div class="doc-state">Loading…</div>`
-  } else if (doc.error) {
-    body = `<div class="doc-state error">${escapeHtml(doc.error)}</div>`
   } else if (tab === "diff") {
     body = renderUnifiedDiff(doc.diff, path)
+  } else if (doc.error) {
+    body = `<div class="doc-state error">${escapeHtml(doc.error)}</div>`
   } else if (doc.previewMode === "pdf") {
     body = `${renderArtifactExternalAction(doc)}<iframe class="doc-pdf" src="${escapeHtml(doc.url || "")}" title="${escapeHtml(doc.name || "PDF preview")}"></iframe>`
   } else if (doc.previewMode === "external") {
@@ -1813,7 +1811,7 @@ function renderDocumentViewer() {
   const tabs = hasDiff
     ? `<div class="doc-tabs" role="tablist">
         <button class="doc-tab" role="tab" data-doc-tab="diff" aria-selected="${tab === "diff"}">Diff</button>
-        <button class="doc-tab" role="tab" data-doc-tab="code" aria-selected="${tab === "code"}">${previewTabLabel}</button>
+        ${hasRealFile ? `<button class="doc-tab" role="tab" data-doc-tab="code" aria-selected="${tab === "code"}">${previewTabLabel}</button>` : ""}
       </div>`
     : ""
   return `
@@ -1864,7 +1862,7 @@ function findDiffForPath(filePath) {
   let found = null
   for (const message of activeThread().messages || []) {
     for (const entry of collectMessageDiffs(message)) {
-      if (entry.filepath === filePath) found = entry.diff
+      if (entry.filepath === filePath || entry.fileKey === filePath) found = entry.diff
     }
   }
   return found
@@ -2550,11 +2548,11 @@ function renderUnifiedDiff(diff, path) {
 // Renders one file row in the inline "Changes" card. Clicking it opens the diff
 // in the document-viewer panel (Diff tab) rather than expanding inline. Rows
 // without a resolvable file path are shown read-only (no panel to open).
-function renderDiffRow(key, { filepath, label, diff, truncated }) {
+function renderDiffRow(key, { fileKey, filepath, label, diff, truncated }) {
   const displayLabel = label || (filepath ? filename(filepath) : "Changes")
   const { additions, deletions } = diffStats(diff)
-  const openable = Boolean(filepath) && isViewableFilePath(filepath)
-  const active = openable && state.document?.requestedPath === filepath && state.document?.tab === "diff"
+  const openable = Boolean(filepath && isViewableFilePath(filepath)) || Boolean(diff)
+  const active = openable && state.document?.requestedPath === (filepath || fileKey) && state.document?.tab === "diff"
   const head = `
         ${icon("doc")}
         <span class="tool-diff-name">${escapeHtml(displayLabel)}</span>
@@ -2563,7 +2561,7 @@ function renderDiffRow(key, { filepath, label, diff, truncated }) {
   return `
     <div class="tool-diff-block">
       ${openable
-        ? `<button class="tool-diff-head${active ? " active" : ""}" data-open-file="${escapeHtml(filepath)}" data-open-tab="diff" title="${escapeHtml(filepath)}">${head}</button>`
+        ? `<button class="tool-diff-head${active ? " active" : ""}" data-open-file="${escapeHtml(filepath || fileKey)}" data-open-tab="diff" title="${escapeHtml(filepath || filename(filepath || fileKey))}">${head}</button>`
         : `<div class="tool-diff-head readonly"${filepath ? ` title="${escapeHtml(filepath)}"` : ""}>${head}</div>`}
     </div>
   `
@@ -2579,6 +2577,7 @@ function collectMessageDiffs(message) {
     const diff = metadata?.diff
     if (typeof diff !== "string" || !diff) continue
     const filepath = metadata.filepath
+      || part.state?.input?.filePath
       || (Array.isArray(metadata.files) && metadata.files.length ? metadata.files.join(", ") : "")
     const fileKey = filepath || part.id
     const label = Array.isArray(metadata.files) && metadata.files.length > 1
