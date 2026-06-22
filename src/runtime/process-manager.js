@@ -258,31 +258,51 @@ function commonNodeBinDirs(env = process.env) {
 }
 
 // The login shell's PATH (set up by ~/.zshrc, ~/.zprofile, nvm, etc.). `-ilc` runs an interactive
-// login shell so version managers initialize. POSIX-only — skipped on win32. Returns [] on any failure.
+// login shell so version managers initialize. POSIX-only — skipped on win32. A heavy ~/.zshrc
+// (nvm/pyenv/etc.) can take several seconds to init, so the timeout is generous; even on a timeout
+// we salvage whatever the shell already printed if it looks like a PATH. Returns [] on any failure.
 function loginShellPathParts() {
   return new Promise((resolve) => {
     if (process.platform === "win32") return resolve([])
     const shell = process.env.SHELL || "/bin/zsh"
-    execFile(shell, ["-ilc", "echo $PATH"], { encoding: "utf8", timeout: 4000 }, (error, stdout) => {
-      if (error) return resolve([])
-      resolve(String(stdout).trim().split(path.delimiter).filter(Boolean))
+    execFile(shell, ["-ilc", "echo $PATH"], { encoding: "utf8", timeout: 10000 }, (error, stdout) => {
+      const text = String(stdout || "").trim()
+      // On a timeout, `error` is set but stdout may already hold the echoed PATH — keep it if so.
+      if (error && !text.includes(path.delimiter)) return resolve([])
+      resolve(text.split(path.delimiter).filter(Boolean))
     })
   })
+}
+
+// True when any directory on the given PATH string contains an executable `name` (e.g. "npx").
+// Used to decide whether a resolved PATH is actually usable for spawning local MCP servers.
+function pathHasExecutable(pathString, name) {
+  for (const dir of String(pathString || "").split(path.delimiter).filter(Boolean)) {
+    try {
+      if (fs.statSync(path.join(dir, name)).isFile()) return true
+    } catch {}
+  }
+  return false
 }
 
 let cachedUserPath = null
 
 // Builds a PATH that includes the user's real toolchain so spawned local MCP servers (e.g.
 // `npx backlog-mcp-server`) resolve. Without this, a packaged macOS app inherits launchd's minimal
-// PATH and opencode reports `Executable not found in $PATH: "npx"`. Cached: the login shell is
-// queried at most once per app session. Pass `force` in tests to bypass the cache.
+// PATH and opencode reports `Executable not found in $PATH: "npx"`. The login shell is queried at
+// most once per app session, but we only cache a PATH that actually contains `npx` — caching a
+// "bad" PATH (e.g. when the login-shell query timed out and the fallbacks happened to miss) would
+// lock the whole session into a broken state where toggling a connector can never recover. Pass
+// `force` in tests to bypass the cache.
 async function resolveUserPath({ force = false } = {}) {
   if (cachedUserPath && !force) return cachedUserPath
   const currentParts = (process.env.PATH || "").split(path.delimiter).filter(Boolean)
   const shellParts = await loginShellPathParts()
   const merged = [...shellParts, ...currentParts, ...commonNodeBinDirs()]
-  cachedUserPath = Array.from(new Set(merged)).join(path.delimiter)
-  return cachedUserPath
+  const userPath = Array.from(new Set(merged)).join(path.delimiter)
+  // Only memoize a usable PATH so a transient miss (slow login shell) can be retried next call.
+  if (pathHasExecutable(userPath, "npx")) cachedUserPath = userPath
+  return userPath
 }
 
 function commandModelValue(model) {
@@ -1460,5 +1480,6 @@ module.exports = {
   requestJson,
   resolveRuntimeBin,
   resolveUserPath,
+  pathHasExecutable,
   translationGatewayEnv
 }

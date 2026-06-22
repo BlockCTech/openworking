@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld("openworking", {
     setEnabled: (name, enabled) => ipcRenderer.invoke("mcp:setEnabled", { name, enabled }),
     remove: (name) => ipcRenderer.invoke("mcp:remove", name),
     status: () => ipcRenderer.invoke("mcp:status"),
+    connect: (name) => ipcRenderer.invoke("mcp:connect", name),
     authenticate: (name) => ipcRenderer.invoke("mcp:authenticate", name),
     clearAuth: (name) => ipcRenderer.invoke("mcp:clearAuth", name),
     openDocs: (url) => ipcRenderer.invoke("mcp:openDocs", url)

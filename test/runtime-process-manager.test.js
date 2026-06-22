@@ -6,7 +6,7 @@ const os = require("node:os")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
 const AdmZip = require("adm-zip")
-const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, resolveUserPath, translationGatewayEnv } = require("../src/runtime/process-manager")
+const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, resolveUserPath, pathHasExecutable, translationGatewayEnv } = require("../src/runtime/process-manager")
 
 test("translation gateway env resolves managed config without exposing extra provider fields", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-gateway-"))
@@ -60,6 +60,38 @@ test("resolveUserPath caches and returns the same value until forced", async () 
   } finally {
     process.env.PATH = originalPath
     await resolveUserPath({ force: true })
+  }
+})
+
+test("resolveUserPath includes a fallback dir holding npx even when the login shell yields nothing", async () => {
+  // The login shell can time out / error on a heavy ~/.zshrc and return []. As long as the merged
+  // PATH still contains a dir with `npx`, local stdio MCP servers (e.g. `npx backlog-mcp-server`)
+  // can be spawned. Simulate that by putting a dir that holds an executable `npx` onto the PATH.
+  const originalPath = process.env.PATH
+  const npxDir = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-npx-"))
+  fs.writeFileSync(path.join(npxDir, "npx"), "#!/bin/sh\n", { mode: 0o755 })
+  try {
+    process.env.PATH = npxDir
+    const resolved = await resolveUserPath({ force: true })
+    const parts = resolved.split(path.delimiter)
+    assert.ok(parts.includes(npxDir), "fallback dir holding npx must survive into the resolved PATH")
+  } finally {
+    process.env.PATH = originalPath
+    fs.rmSync(npxDir, { recursive: true, force: true })
+    await resolveUserPath({ force: true })
+  }
+})
+
+test("pathHasExecutable detects an executable on the PATH and reports its absence", () => {
+  const npxDir = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-hasexec-"))
+  fs.writeFileSync(path.join(npxDir, "npx"), "#!/bin/sh\n", { mode: 0o755 })
+  try {
+    const withNpx = [npxDir, "/no/such/dir"].join(path.delimiter)
+    assert.equal(pathHasExecutable(withNpx, "npx"), true)
+    assert.equal(pathHasExecutable("/no/such/dir", "npx"), false)
+    assert.equal(pathHasExecutable("", "npx"), false)
+  } finally {
+    fs.rmSync(npxDir, { recursive: true, force: true })
   }
 })
 

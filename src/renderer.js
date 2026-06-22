@@ -86,8 +86,10 @@ const MCP_PRESETS = [
   {
     id: "backlog",
     name: "Backlog",
-    // Backlog is a local stdio MCP server (run via npx), not a remote URL. It requires the
-    // BACKLOG_DOMAIN + BACKLOG_API_KEY env vars — pre-filled here with blank values for the user.
+    // Backlog is a local stdio MCP server, not a remote URL. The command shown here is the package
+    // reference; the main process installs it on-demand into the app profile and rewrites the
+    // command to `node <entry>` so it never runs through npx (which a project's devEngines can
+    // break). It requires BACKLOG_DOMAIN + BACKLOG_API_KEY — pre-filled blank for the user.
     type: "local",
     command: "npx backlog-mcp-server",
     env: [
@@ -2838,17 +2840,18 @@ function mcpServerSubtitle(server) {
 }
 
 // Resolve the connection state of a server into a status pill + whether an auth action
-// is offered. Returns { pill: html, action: "authenticate"|"reconnect"|null }.
+// is offered. Returns { pill: html, action: "authenticate"|"reconnect"|"retry"|null }.
 function mcpStatusInfo(server) {
   const oauthEligible = server.type === "remote" && server.oauth !== false
   if (state.mcpAuthenticating?.[server.name]) {
-    return { pill: `<span class="mcp-pill mcp-pill-pending">Authenticating…</span>`, action: null }
+    return { pill: `<span class="mcp-pill mcp-pill-pending">Connecting…</span>`, action: null }
   }
   const status = state.mcpStatus?.[server.name]
   if (!server.enabled) return { pill: `<span class="mcp-pill mcp-pill-muted">Disabled</span>`, action: null }
   if (status === "connected") return { pill: `<span class="mcp-pill mcp-pill-ok">Connected</span>`, action: null }
   if (status === "failed") {
-    return { pill: `<span class="mcp-pill mcp-pill-bad">Failed</span>`, action: oauthEligible ? "reconnect" : null }
+    // Remote OAuth servers re-run the auth flow; local stdio servers (e.g. a bad PATH) just retry the connect.
+    return { pill: `<span class="mcp-pill mcp-pill-bad">Failed</span>`, action: oauthEligible ? "reconnect" : "retry" }
   }
   if (status === "needs_auth") {
     return { pill: `<span class="mcp-pill mcp-pill-warn">Needs auth</span>`, action: oauthEligible ? "authenticate" : null }
@@ -2867,9 +2870,12 @@ function renderMcpServerCard(server) {
     ? state.mcpError
     : (state.mcpStatusError?.[server.name] || "")
   const error = errorText ? `<div class="mcp-card-error">${escapeHtml(errorText)}</div>` : ""
-  const authBtn = action
-    ? `<button class="secondary-btn" data-action="authenticateMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}${action === "reconnect" ? "Reconnect" : "Authenticate"}</button>`
-    : ""
+  // Local stdio servers retry the connect (no OAuth); remote servers run the auth/reconnect flow.
+  const authBtn = action === "retry"
+    ? `<button class="secondary-btn" data-action="retryMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}Retry</button>`
+    : action
+      ? `<button class="secondary-btn" data-action="authenticateMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}${action === "reconnect" ? "Reconnect" : "Authenticate"}</button>`
+      : ""
   // On a failed connect, offer a reset that clears any stale stored OAuth state before re-auth —
   // this recovers from a partial/dynamic registration left by an earlier attempt.
   const clearBtn = action === "reconnect"
@@ -3516,6 +3522,9 @@ async function handleAction(event) {
     }
     if (action === "clearMcpAuth") {
       await authenticateMcp(event.currentTarget.dataset.mcpName, { clear: true })
+    }
+    if (action === "retryMcp") {
+      await reconnectMcp(event.currentTarget.dataset.mcpName)
     }
     if (action === "cancelRemoveMcp") {
       if (state.mcpRemoving) return
@@ -4438,6 +4447,12 @@ async function submitMcpServer() {
     const result = editing
       ? await window.openworking.mcp.update(state.mcpEditTarget, payload)
       : await window.openworking.mcp.add(payload)
+    // mcp:add can fail while installing an on-demand server (e.g. Backlog offline) — keep the modal
+    // open and surface the real reason instead of pretending it was added.
+    if (result?.error) {
+      state.mcpError = result.error
+      return
+    }
     state.mcpServers = result?.servers || state.mcpServers
     state.mcpModalOpen = false
     state.mcpEditTarget = null
@@ -4474,6 +4489,35 @@ async function authenticateMcp(name, { clear = false } = {}) {
     }
   } catch (error) {
     state.mcpError = error.message
+  } finally {
+    state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: false }
+    render()
+  }
+}
+
+// Retry connecting a failed (typically local stdio) MCP server. Reloads the runtime so a freshly
+// resolved PATH is picked up, then re-connects — recovering from a bad PATH without a manual
+// disable/enable. Reuses `mcpAuthenticating` as the busy flag so the card shows "Connecting…".
+async function reconnectMcp(name) {
+  const serverName = String(name || "")
+  if (!serverName || state.mcpAuthenticating?.[serverName]) return
+  state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: true }
+  state.mcpError = null
+  state.mcpErrorTarget = null
+  render()
+  try {
+    const result = await window.openworking.mcp.connect(serverName)
+    if (result?.error) {
+      state.mcpError = result.error
+      state.mcpErrorTarget = serverName
+    } else {
+      if (result.servers) state.mcpServers = result.servers
+      applyMcpStatusList(result.status)
+      if (state.mcpStatus[serverName] === "connected") showToast(`Connected ${serverName}`)
+    }
+  } catch (error) {
+    state.mcpError = error.message
+    state.mcpErrorTarget = serverName
   } finally {
     state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: false }
     render()

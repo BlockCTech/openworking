@@ -8,6 +8,7 @@ const { SCOPES, ensureProjectMemory, readMemory, writeMemory } = require("./memo
 const { ProjectRegistry } = require("./project-registry")
 const { PinRegistry } = require("./pin-registry")
 const { RuntimeProcessManager } = require("./runtime/process-manager")
+const { BACKLOG_PACKAGE, backlogCommand, ensureBacklogServer, isLegacyBacklogNpxCommand } = require("./mcp-install")
 const { checkDesktopVersion, downloadInstaller, installDmg, versionCheckConfigured } = require("./version-check")
 
 // Walks up from the executable path to the enclosing .app bundle directory.
@@ -184,11 +185,47 @@ function registerIpc() {
     return { ...result, customSkills: listCustomSkills(opencodeProfile) }
   })
 
+  // A command (string or array) references the Backlog MCP package — covers the `npx
+  // backlog-mcp-server` preset and any user-typed variant. Used to swap in the node-based launcher.
+  function commandUsesBacklog(command) {
+    if (Array.isArray(command)) return command.some((part) => String(part).includes(BACKLOG_PACKAGE))
+    return String(command || "").includes(BACKLOG_PACKAGE)
+  }
+
+  // For a Backlog connector, install the package on-demand into the app profile and rewrite the
+  // payload's command to `node <entry>` so it never runs through npx (which a project's
+  // devEngines/packageManager can break with EBADDEVENGINES). No-op for other servers.
+  async function prepareBacklogCommand(server) {
+    if (!server || (server.name !== "backlog" && !commandUsesBacklog(server.command))) return server
+    await ensureBacklogServer(opencodeProfile.profileDir)
+    return { ...server, command: backlogCommand(opencodeProfile.profileDir) }
+  }
+
+  // Ensure an already-stored Backlog connector is installed and using the node-based command.
+  // Migrates a legacy `npx backlog-mcp-server` command in place (preserving env). No-op for others.
+  async function ensureBacklogConnectorReady(name) {
+    const stored = readProfileConfig(opencodeProfile).config.mcp?.[name]
+    if (!stored || (name !== "backlog" && !commandUsesBacklog(stored.command))) return
+    await ensureBacklogServer(opencodeProfile.profileDir)
+    if (isLegacyBacklogNpxCommand(stored.command)) {
+      updateMcpServer(opencodeProfile, name, {
+        type: "local",
+        command: backlogCommand(opencodeProfile.profileDir),
+        environment: stored.environment || {}
+      })
+    }
+  }
+
   ipcMain.handle("mcp:list", () => listMcpServers(opencodeProfile))
   ipcMain.handle("mcp:add", async (_event, server) => {
-    const added = addMcpServer(opencodeProfile, server)
-    await runtimeManager.reload()
-    return { server: added, servers: listMcpServers(opencodeProfile) }
+    try {
+      const prepared = await prepareBacklogCommand(server)
+      const added = addMcpServer(opencodeProfile, prepared)
+      await runtimeManager.reload()
+      return { server: added, servers: listMcpServers(opencodeProfile) }
+    } catch (error) {
+      return { error: error.message }
+    }
   })
   ipcMain.handle("mcp:update", async (_event, { name, server }) => {
     const updated = updateMcpServer(opencodeProfile, name, server)
@@ -196,9 +233,16 @@ function registerIpc() {
     return { server: updated, servers: listMcpServers(opencodeProfile) }
   })
   ipcMain.handle("mcp:setEnabled", async (_event, { name, enabled }) => {
-    setMcpServerEnabled(opencodeProfile, name, enabled)
-    await runtimeManager.reload()
-    return { servers: listMcpServers(opencodeProfile) }
+    try {
+      // Enabling a Backlog connector (possibly added before the node-based launcher, or never
+      // installed) ensures the package and migrates a legacy `npx` command to `node <entry>`.
+      if (enabled) await ensureBacklogConnectorReady(name)
+      setMcpServerEnabled(opencodeProfile, name, enabled)
+      await runtimeManager.reload()
+      return { servers: listMcpServers(opencodeProfile) }
+    } catch (error) {
+      return { error: error.message }
+    }
   })
   ipcMain.handle("mcp:remove", async (_event, name) => {
     removeMcpServer(opencodeProfile, name)
@@ -236,6 +280,25 @@ function registerIpc() {
   ipcMain.handle("mcp:authenticate", async (_event, name) => {
     try {
       return await runMcpAuth(String(name || ""))
+    } catch (error) {
+      return { error: error.message }
+    }
+  })
+  // Retry a (typically local) MCP server that failed to connect — e.g. a stdio server whose `npx`
+  // could not be found on a stale PATH. Reload first so opencode picks up a freshly resolved PATH,
+  // then re-connect and report the new status (with opencode's real failure reason if it still fails).
+  ipcMain.handle("mcp:connect", async (_event, name) => {
+    const serverName = String(name || "")
+    try {
+      // For Backlog, make sure the package is installed and the command is the node-based launcher
+      // before retrying — this is what recovers a connector that failed under the old npx command.
+      await ensureBacklogConnectorReady(serverName)
+      await runtimeManager.reload()
+      await runtimeManager.connectMcp(serverName)
+      return {
+        servers: listMcpServers(opencodeProfile),
+        status: await runtimeManager.listMcpStatus()
+      }
     } catch (error) {
       return { error: error.message }
     }
