@@ -269,13 +269,21 @@ function maxDocumentViewerWidth() {
   const rightSidebar = state.rightSidebarOpen ? document.querySelector(".right-file-sidebar") : null
   const rightW = rightSidebar ? rightSidebar.getBoundingClientRect().width + GRID_GUTTER : 0
   const budget = total - sidebarW - rightW - GRID_GUTTER - CHAT_MIN_WIDTH
-  return Math.max(DOCUMENT_MIN_WIDTH, Math.min(DOCUMENT_MAX_WIDTH, Math.round(budget)))
+  const cap = Math.max(DOCUMENT_MIN_WIDTH, Math.min(DOCUMENT_MAX_WIDTH, Math.round(budget)))
+  return Number.isFinite(cap) ? cap : DOCUMENT_MAX_WIDTH
 }
 
 function setDocumentViewerWidth(width) {
-  const clamped = Math.max(DOCUMENT_MIN_WIDTH, Math.min(maxDocumentViewerWidth(), Math.round(width)))
-  document.documentElement.style.setProperty("--document-w", `${clamped}px`)
-  return clamped
+  const max = maxDocumentViewerWidth()
+  // Guard every input: a non-finite width or max would otherwise produce a
+  // `NaNpx` track, which invalidates the whole grid-template-columns and
+  // collapses the side-by-side panels into one stacked column.
+  const upper = Number.isFinite(max) ? max : DOCUMENT_MAX_WIDTH
+  const requested = Number.isFinite(width) ? Math.round(width) : DOCUMENT_MIN_WIDTH
+  const clamped = Math.max(DOCUMENT_MIN_WIDTH, Math.min(upper, requested))
+  const safe = Number.isFinite(clamped) ? clamped : DOCUMENT_MIN_WIDTH
+  document.documentElement.style.setProperty("--document-w", `${safe}px`)
+  return safe
 }
 
 function applyStoredSidebarWidth() {
@@ -4653,6 +4661,12 @@ function delegationShim(event, element) {
     type: event.type,
     key: event.key,
     shiftKey: event.shiftKey,
+    // Pointer coordinates are needed by the resizer mousedown handlers
+    // (startSidebarResize / startDocumentViewerResize / startRightFileSidebarResize)
+    // to seed the drag origin — without them startX is undefined and the resize
+    // computes NaN.
+    clientX: event.clientX,
+    clientY: event.clientY,
     dataTransfer: event.dataTransfer,
     target: event.target,
     currentTarget: element,
