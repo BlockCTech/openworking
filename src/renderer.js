@@ -349,6 +349,15 @@ function icon(name) {
   return icons[name] || ""
 }
 
+// Hover-hint attributes for a resize divider. The actual tooltip is a single
+// floating element on <body> that follows the cursor (see attachResizeTip); the
+// resizer only carries the text via data-* so the hover controller can read it.
+// `main`/`sub` are the two lines; optional `key` renders a shortcut chip.
+function resizeTipAttrs(main, sub, key) {
+  const keyAttr = key ? ` data-tip-key="${escapeHtml(key)}"` : ""
+  return `data-tip-main="${escapeHtml(main)}" data-tip-sub="${escapeHtml(sub)}"${keyAttr}`
+}
+
 function selectedProject() {
   return state.projects.find((project) => project.id === state.activeProjectId) || null
 }
@@ -1401,7 +1410,7 @@ function renderSidebar() {
         </button>
       </div>
     </aside>
-    <div class="sidebar-resizer" data-resizer></div>
+    <div class="sidebar-resizer" data-resizer ${resizeTipAttrs("Click to collapse", "Drag to resize", "⌘B")}></div>
   `
 }
 
@@ -1421,7 +1430,7 @@ function renderRightFileSidebar() {
     body = `<div class="file-tree">${renderFileTreeRows("", 0)}</div>`
   }
   return `
-    <div class="right-file-resizer" data-right-file-resizer></div>
+    <div class="right-file-resizer" data-right-file-resizer ${resizeTipAttrs("Drag to resize", "Adjust panel width")}></div>
     <aside class="right-file-sidebar">
       <div class="right-file-head">
         <span class="right-file-title">Files</span>
@@ -1808,7 +1817,7 @@ function renderDocumentViewer() {
       </div>`
     : ""
   return `
-    <div class="document-resizer" data-document-resizer></div>
+    <div class="document-resizer" data-document-resizer ${resizeTipAttrs("Drag to resize", "Adjust preview width")}></div>
     <aside class="document-viewer">
       <div class="doc-head">
         <div class="doc-crumbs">${breadcrumb}</div>
@@ -2618,7 +2627,7 @@ function renderToolArtifacts(metadata) {
     <div class="tool-artifacts ${metadata?.quality === "warning" ? "warning" : ""}">
       ${artifacts.map((artifact) => `
         <button class="artifact-chip ${state.document?.requestedPath === artifact.path || state.document?.path === artifact.path ? "active" : ""}" data-open-artifact="${escapeHtml(artifact.path)}" title="${escapeHtml(artifact.path)}">
-          ${icon("doc")}<span><strong>${escapeHtml(artifact.filename)}</strong><small>${escapeHtml(artifact.path)}</small></span>
+          ${icon("doc")}<span><strong>${escapeHtml(artifact.filename)}</strong></span>
         </button>
       `).join("")}
       ${warnings.map((warning) => `<small class="artifact-warning">${escapeHtml(warning)}</small>`).join("")}
@@ -3375,75 +3384,86 @@ async function selectFileMention(filePath) {
   }
 }
 
-function startSidebarResize(event) {
+// Shared divider-drag driver. `apply(clientX)` sets the new width (clamped) and
+// returns it; the latest width is persisted under `storageKey` on release.
+// Width writes are coalesced into one rAF so we touch layout at most once per
+// frame, and `.app.resizing` suppresses every panel transition so the dragged
+// edge tracks the cursor 1:1 instead of easing toward each new value.
+// `onClick` (optional) fires when the pointer is released without moving — used
+// by the sidebar divider to double as a collapse toggle.
+function startDividerResize(event, { apply, storageKey, initialWidth, onClick }) {
   event.preventDefault()
-  const sidebar = document.querySelector(".sidebar")
-  if (!sidebar) return
-  const left = sidebar.getBoundingClientRect().left
+  const app = appElement()
+  if (app) app.classList.add("resizing")
   document.body.style.cursor = "col-resize"
   document.body.style.userSelect = "none"
 
-  let width = SIDEBAR_MIN_WIDTH
+  let width = initialWidth
+  let moved = false
+  let pendingX = null
+  let frame = null
+  const flush = () => {
+    frame = null
+    if (pendingX === null) return
+    width = apply(pendingX)
+    pendingX = null
+  }
   const onMove = (moveEvent) => {
-    width = setSidebarWidth(moveEvent.clientX - left)
+    moved = true
+    pendingX = moveEvent.clientX
+    if (frame === null) frame = requestAnimationFrame(flush)
   }
   const onUp = () => {
     document.removeEventListener("mousemove", onMove)
     document.removeEventListener("mouseup", onUp)
+    if (frame !== null) { cancelAnimationFrame(frame); flush() }
+    if (app) app.classList.remove("resizing")
     document.body.style.cursor = ""
     document.body.style.userSelect = ""
-    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width))
+    if (!moved) {
+      if (onClick) onClick()
+      return
+    }
+    localStorage.setItem(storageKey, String(width))
   }
   document.addEventListener("mousemove", onMove)
   document.addEventListener("mouseup", onUp)
 }
 
+function startSidebarResize(event) {
+  const sidebar = document.querySelector(".sidebar")
+  if (!sidebar) return
+  const left = sidebar.getBoundingClientRect().left
+  startDividerResize(event, {
+    apply: (clientX) => setSidebarWidth(clientX - left),
+    storageKey: SIDEBAR_WIDTH_KEY,
+    initialWidth: SIDEBAR_MIN_WIDTH,
+    onClick: toggleSidebar,
+  })
+}
+
 function startRightFileSidebarResize(event) {
-  event.preventDefault()
   const sidebar = document.querySelector(".right-file-sidebar")
   if (!sidebar) return
   const startX = event.clientX
   const startWidth = sidebar.getBoundingClientRect().width
-  document.body.style.cursor = "col-resize"
-  document.body.style.userSelect = "none"
-
-  let width = startWidth
-  const onMove = (moveEvent) => {
-    width = setRightFileSidebarWidth(startWidth + startX - moveEvent.clientX)
-  }
-  const onUp = () => {
-    document.removeEventListener("mousemove", onMove)
-    document.removeEventListener("mouseup", onUp)
-    document.body.style.cursor = ""
-    document.body.style.userSelect = ""
-    localStorage.setItem(RIGHT_FILE_WIDTH_KEY, String(width))
-  }
-  document.addEventListener("mousemove", onMove)
-  document.addEventListener("mouseup", onUp)
+  startDividerResize(event, {
+    apply: (clientX) => setRightFileSidebarWidth(startWidth + startX - clientX),
+    storageKey: RIGHT_FILE_WIDTH_KEY,
+    initialWidth: startWidth,
+  })
 }
 
 function startDocumentViewerResize(event) {
-  event.preventDefault()
   const viewer = document.querySelector(".document-viewer")
   if (!viewer) return
   const startX = event.clientX
   const startWidth = viewer.getBoundingClientRect().width
-  document.body.style.cursor = "col-resize"
-  document.body.style.userSelect = "none"
-
-  let width = startWidth
-  const onMove = (moveEvent) => {
-    width = setDocumentViewerWidth(startWidth + startX - moveEvent.clientX)
-  }
-  const onUp = () => {
-    document.removeEventListener("mousemove", onMove)
-    document.removeEventListener("mouseup", onUp)
-    document.body.style.cursor = ""
-    document.body.style.userSelect = ""
-    localStorage.setItem(DOCUMENT_WIDTH_KEY, String(width))
-  }
-  document.addEventListener("mousemove", onMove)
-  document.addEventListener("mouseup", onUp)
+  startDividerResize(event, {
+    apply: (clientX) => setDocumentViewerWidth(startWidth + startX - clientX),
+    storageKey: DOCUMENT_WIDTH_KEY,
+    initialWidth: startWidth,
+  })
 }
 
 async function copyMessage(messageId) {
@@ -5023,6 +5043,60 @@ function handlePromptKeydown(event, promptInput) {
   }
 }
 
+// A single floating tooltip that follows the cursor over any resize divider
+// (elements carrying data-tip-main, written by resizeTipAttrs). Delegated on
+// document so it survives re-renders without rebinding; appears after a short
+// hover delay and hides on leave or while a drag is in progress (.app.resizing).
+function attachResizeTip() {
+  const tip = document.createElement("div")
+  tip.className = "resize-tip"
+  document.body.appendChild(tip)
+
+  const OFFSET_X = 16  // keep the box clear of the cursor
+  const GAP = 8        // min distance from the viewport edge
+  let target = null    // the resizer currently hovered
+  let showTimer = null
+
+  const hide = () => {
+    tip.classList.remove("visible")
+    target = null
+    if (showTimer) { clearTimeout(showTimer); showTimer = null }
+  }
+
+  const place = (x, y) => {
+    // Measure after the content is set so width/height are accurate.
+    const w = tip.offsetWidth
+    const h = tip.offsetHeight
+    let left = x + OFFSET_X
+    if (left + w + GAP > window.innerWidth) left = x - OFFSET_X - w  // flip left near the right edge
+    let top = y - h / 2
+    top = Math.max(GAP, Math.min(top, window.innerHeight - h - GAP))
+    tip.style.left = `${Math.max(GAP, left)}px`
+    tip.style.top = `${top}px`
+  }
+
+  document.addEventListener("mousemove", (event) => {
+    // A drag is in progress — never show a hint.
+    if (document.querySelector(".app.resizing")) { hide(); return }
+    const resizer = event.target.closest?.("[data-tip-main]")
+    if (!resizer) { if (target) hide(); return }
+    if (resizer !== target) {
+      target = resizer
+      const key = resizer.dataset.tipKey
+      const keyChip = key ? `<span class="tip-key">${escapeHtml(key)}</span>` : ""
+      tip.innerHTML = `<span class="tip-main">${escapeHtml(resizer.dataset.tipMain || "")}${keyChip}</span><span class="tip-sub">${escapeHtml(resizer.dataset.tipSub || "")}</span>`
+      if (showTimer) clearTimeout(showTimer)
+      showTimer = setTimeout(() => { tip.classList.add("visible") }, 300)
+    }
+    place(event.clientX, event.clientY)
+  })
+  // Hide immediately when a drag starts (mousedown on a resizer).
+  document.addEventListener("mousedown", (event) => {
+    if (event.target.closest?.("[data-tip-main]")) hide()
+  })
+  window.addEventListener("blur", hide)
+}
+
 // Attach the delegated listeners to #root exactly once. Replaces ~45 per-render bindEvents groups.
 function installDelegatedListeners() {
   const root = document.getElementById("root")
@@ -5053,6 +5127,16 @@ function installDelegatedListeners() {
     if (renameInput) handleRenameKeydown(event, renameInput)
   })
 
+  // Cmd/Ctrl+B toggles the sidebar from anywhere (mirrors the divider tooltip
+  // hint). Listens on window so it fires regardless of focus; toggling the
+  // sidebar never steals text focus, so it is safe inside the composer.
+  window.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "b") {
+      event.preventDefault()
+      toggleSidebar()
+    }
+  })
+
   // The skill-upload dropzone is a single transient element; delegate its drag/drop off #root.
   root.addEventListener("dragover", (event) => {
     const zone = event.target.closest?.("[data-skill-drop]")
@@ -5077,6 +5161,8 @@ function installDelegatedListeners() {
     }
     uploadSkill(filePath).catch((error) => showToast(error.message))
   })
+
+  attachResizeTip()
 }
 
 if (typeof document !== "undefined") {

@@ -153,12 +153,22 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
   transition: none;
 }
 .app.right-sidebar-closing { grid-template-columns: var(--right-panel-closed-cols); }
-.app.collapsed .sidebar-resizer { display: none; }
+/* While a divider is being dragged, kill every easing so panels track the cursor
+   1:1 instead of chasing each new width through the .2s grid transition. */
+.app.resizing,
+.app.resizing .sidebar,
+.app.resizing .sidebar-resizer,
+.app.resizing .document-viewer,
+.app.resizing .document-resizer,
+.app.resizing .right-file-sidebar,
+.app.resizing .right-file-resizer { transition: none !important; }
+.app.collapsed .sidebar-resizer { opacity: 0; pointer-events: none; }
 
 .sidebar-resizer {
-  position: absolute; top: 0; bottom: 0; left: var(--sidebar-w);
+  position: absolute; top: 0; bottom: 0; left: var(--sidebar-current-col);
   width: 7px; margin-left: -3px; z-index: 5;
   cursor: col-resize;
+  transition: left .2s ease, opacity .2s ease;
 }
 .sidebar-resizer::after {
   content: ""; position: absolute; top: 0; bottom: 0; left: 3px;
@@ -176,6 +186,30 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 }
 .document-resizer:hover::after { background: var(--accent-soft-2); }
 
+/* Hover hint shown next to the cursor over a resize divider ("Click to collapse
+   ⌘B" / "Drag to resize"). A single element pinned to <body> and positioned by
+   JS to follow the pointer (see attachResizeTip in renderer.js); top/left are
+   set inline. pointer-events:none so it never swallows the drag. */
+.resize-tip {
+  position: fixed; top: 0; left: 0; z-index: 200;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 8px 11px; white-space: nowrap;
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  font-size: 12.5px; line-height: 1.25;
+  opacity: 0; pointer-events: none;
+  transition: opacity .12s ease;
+}
+.resize-tip.visible { opacity: 1; }
+.resize-tip .tip-main { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.resize-tip .tip-sub { color: var(--text-3); font-weight: 500; }
+.resize-tip .tip-key {
+  margin-left: auto; padding: 1px 6px; border-radius: 5px;
+  background: rgba(255,255,255,.08); border: 1px solid var(--border-strong);
+  color: var(--text-2); font-size: 11.5px; font-weight: 600;
+}
+
 /* ============================================================
    Sidebar
    ============================================================ */
@@ -184,11 +218,11 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
   contain: layout paint;
-  transition: opacity .18s ease, transform .18s ease, border-color .18s ease;
+  transition: opacity .2s ease, transform .2s ease, border-color .2s ease;
 }
 .app.collapsed .sidebar {
   opacity: 0;
-  transform: translateX(-12px);
+  transform: translateX(-6px);
   pointer-events: none;
   border-right-color: transparent;
 }
@@ -743,14 +777,15 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .tool-detail span { color: var(--text-4); }
 .tool-detail strong { overflow: hidden; color: var(--text-3); font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .tool-detail.error strong { color: var(--red); }
-.tool-artifacts { display: grid; gap: 5px; padding-left: 41px; }
-.artifact-chip { display: flex; min-width: 0; max-width: 100%; align-items: center; gap: 7px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--text-2); text-align: left; }
-.artifact-chip:hover { border-color: var(--accent); color: var(--text); }
-.artifact-chip.active { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.tool-artifacts { display: grid; gap: 5px; padding-left: 0; }
+.artifact-chip { display: flex; min-width: 0; max-width: 100%; align-items: center; gap: 7px; padding: 4px 6px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--accent); text-align: left; }
+.artifact-chip:hover { color: var(--accent); }
+.artifact-chip:hover strong { text-decoration: underline; }
+.artifact-chip.active { background: var(--accent-soft); }
 .artifact-chip svg { width: 16px; height: 16px; flex-shrink: 0; }
 .artifact-chip span { display: grid; min-width: 0; }
-.artifact-chip strong, .artifact-chip small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.artifact-chip small, .artifact-warning { color: var(--text-3); font-size: 11px; }
+.artifact-chip strong { overflow: hidden; color: var(--accent); font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-warning { overflow: hidden; color: var(--text-3); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .tool-artifacts.warning .artifact-warning { color: var(--amber); }
 
 /* Human-in-the-loop cards: question (multiple-choice) + permission (approve/deny). */
