@@ -2,6 +2,8 @@ const test = require("node:test")
 const assert = require("node:assert/strict")
 
 global.window = {
+  addEventListener() {},
+  removeEventListener() {},
   OpenWorkingThreadStream: {
     addOptimisticUser() {},
     applyThreadEvent() {},
@@ -597,6 +599,50 @@ test("selectSession views a cross-project chat without restarting the runtime", 
     assert.equal(state.activeSessionId, "ses_1")
     assert.equal(state.nav, "session")
   } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("selectSession dismisses a context menu left open on another row", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  global.window.openworking = {
+    runtime: {
+      async openProject() { throw new Error("should not restart on view") },
+      async listMessages() { return [] }
+    },
+    attachments: { async discard() {} }
+  }
+
+  const { selectSession, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_a", name: "A", path: "/tmp/a" }],
+    activeProjectId: "proj_a",
+    activeSessionId: "ses_1",
+    runtime: { status: "running", project: { id: "proj_a" }, sessionStatuses: {} },
+    sessionsByProject: { proj_a: [{ id: "ses_1", directory: "/tmp/a" }, { id: "ses_2", directory: "/tmp/a" }] },
+    threads: new Map(),
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    toast: null
+  })
+  // The kebab menu is open on ses_1; the user clicks ses_2's row.
+  state.sessionMenu = sessionRowKey("proj_a", "ses_1")
+
+  try {
+    await selectSession("proj_a", "ses_2")
+    assert.equal(state.sessionMenu, null, "selecting another session must close the open context menu")
+    assert.equal(state.activeSessionId, "ses_2")
+  } finally {
+    state.sessionMenu = null
     state.toast = null
     global.document = previousDocument
     global.requestAnimationFrame = previousRequestAnimationFrame

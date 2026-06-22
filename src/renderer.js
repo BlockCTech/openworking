@@ -238,6 +238,12 @@ const RIGHT_FILE_MAX_WIDTH = 420
 const DOCUMENT_WIDTH_KEY = "openworking:document-viewer-w"
 const DOCUMENT_MIN_WIDTH = 300
 const DOCUMENT_MAX_WIDTH = 900
+// Minimum the chat column must keep when the document preview shares the row, so
+// the side-by-side grid can never be squeezed into a single stacked column.
+const CHAT_MIN_WIDTH = 360
+// Resizer gutters in the grid (sidebar↔chat is absolute, so only chat↔doc and
+// doc↔right-file count here).
+const GRID_GUTTER = 7
 const EXPANDED_KEY = "openworking:expanded-projects"
 
 function setSidebarWidth(width) {
@@ -252,8 +258,22 @@ function setRightFileSidebarWidth(width) {
   return clamped
 }
 
+// Largest the document preview may be without forcing the chat column below its
+// minimum. Measures the live layout so the clamp tracks the current window size,
+// sidebar collapse state, and whether the right-file sidebar is open.
+function maxDocumentViewerWidth() {
+  const app = document.querySelector(".app")
+  const total = app ? app.getBoundingClientRect().width : window.innerWidth
+  const sidebar = state.sidebarCollapsed ? null : document.querySelector(".sidebar")
+  const sidebarW = sidebar ? sidebar.getBoundingClientRect().width : 0
+  const rightSidebar = state.rightSidebarOpen ? document.querySelector(".right-file-sidebar") : null
+  const rightW = rightSidebar ? rightSidebar.getBoundingClientRect().width + GRID_GUTTER : 0
+  const budget = total - sidebarW - rightW - GRID_GUTTER - CHAT_MIN_WIDTH
+  return Math.max(DOCUMENT_MIN_WIDTH, Math.min(DOCUMENT_MAX_WIDTH, Math.round(budget)))
+}
+
 function setDocumentViewerWidth(width) {
-  const clamped = Math.max(DOCUMENT_MIN_WIDTH, Math.min(DOCUMENT_MAX_WIDTH, Math.round(width)))
+  const clamped = Math.max(DOCUMENT_MIN_WIDTH, Math.min(maxDocumentViewerWidth(), Math.round(width)))
   document.documentElement.style.setProperty("--document-w", `${clamped}px`)
   return clamped
 }
@@ -296,6 +316,17 @@ function persistExpanded() {
 applyStoredSidebarWidth()
 applyStoredRightFileSidebarWidth()
 applyStoredDocumentViewerWidth()
+
+// Re-clamp the document preview when the window shrinks so the side-by-side grid
+// keeps fitting (instead of overflowing/collapsing). Only relevant while a
+// document is open; the persisted value is left untouched so widening the window
+// again restores the user's chosen size up to the stored bound.
+window.addEventListener("resize", () => {
+  if (!state.document) return
+  const stored = Number(localStorage.getItem(DOCUMENT_WIDTH_KEY))
+  const current = Number.isFinite(stored) && stored > 0 ? stored : DOCUMENT_MAX_WIDTH
+  setDocumentViewerWidth(current)
+})
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -3750,6 +3781,10 @@ async function selectSession(projectId, sessionId) {
     return
   }
   await clearPendingAttachments()
+  // Selecting any session dismisses an open context menu — including one left open on a different
+  // row. The document-click handler can't catch this because each row is its own .session-row-wrap,
+  // so a click on another row stays "inside" a wrap and never trips the outside-click close.
+  state.sessionMenu = null
   // Clicking a session must never collapse its accordion — keep it expanded regardless of how the
   // runtime is doing (it may still be starting up from a fresh app launch).
   state.expanded.add(projectId)

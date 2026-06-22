@@ -1343,7 +1343,27 @@ input[readonly], label textarea[readonly] { color: var(--text-2); background: va
 .diff-hunk { padding: 4px 12px; background: var(--surface); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .diff-hunk-label { color: var(--text-3); font-size: 11px; }
 
+/* Narrow window: auto-hide the left sidebar to give content room, but keep the
+   chat ↔ document (and right-file) panels side-by-side. The JS width clamp keeps
+   the document preview from squeezing the chat below its minimum, so the grid
+   never needs to collapse here. The sidebar is removed from grid flow, so the
+   templates omit its column entirely — `.main` then occupies the flexible track. */
 @media (max-width: 820px) {
+  .app,
+  .app.collapsed { grid-template-columns: minmax(0, 1fr); }
+  .app.has-doc,
+  .app.has-doc.collapsed { grid-template-columns: minmax(0, 1fr) 7px minmax(0, var(--document-w)); }
+  .app.right-open,
+  .app.right-open.collapsed { grid-template-columns: minmax(0, 1fr) 7px var(--right-sidebar-w); }
+  .app.has-doc.right-open,
+  .app.has-doc.right-open.collapsed { grid-template-columns: minmax(0, 1fr) 7px minmax(0, var(--document-w)) 7px var(--right-sidebar-w); }
+  .sidebar { display: none; }
+  .sidebar-resizer { display: none; }
+}
+
+/* Genuinely tiny window: nothing fits side-by-side, so stack to a single column
+   and hide the side panels. */
+@media (max-width: 640px) {
   .app,
   .app.collapsed,
   .app.has-doc,
@@ -1352,8 +1372,6 @@ input[readonly], label textarea[readonly] { color: var(--text-2); background: va
   .app.right-open.collapsed,
   .app.has-doc.right-open,
   .app.has-doc.right-open.collapsed { grid-template-columns: minmax(0, 1fr); }
-  .sidebar { display: none; }
-  .sidebar-resizer { display: none; }
   .document-resizer { display: none; }
   .right-file-resizer { display: none; }
   .right-file-sidebar { display: none; }
