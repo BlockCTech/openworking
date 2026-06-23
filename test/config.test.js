@@ -7,6 +7,7 @@ const {
   DEFAULT_AGENT_CONFIG,
   DEFAULT_CONFIG,
   DEFAULT_MODEL_ID,
+  LEGACY_DEFAULT_AGENT_PROMPTS,
   SUPERPOWERS_PLUGIN,
   ensureDefaultAgentPrompt,
   ensureDefaultManagedModelConfig,
@@ -67,6 +68,25 @@ test("does not overwrite a user's customized agent prompt", () => {
   assert.equal(config.agent.build.prompt, "my custom prompt")
   // The missing plan agent is still back-filled.
   assert.equal(config.agent.plan.prompt, DEFAULT_AGENT_CONFIG.plan.prompt)
+})
+
+test("upgrades a previously shipped default plan prompt to the current default", () => {
+  const legacyPlanPrompt = LEGACY_DEFAULT_AGENT_PROMPTS.plan[0]
+  assert.equal(typeof legacyPlanPrompt, "string")
+  // The legacy prompt must differ from the current one, otherwise the upgrade is a no-op.
+  assert.notEqual(legacyPlanPrompt, DEFAULT_AGENT_CONFIG.plan.prompt)
+
+  const config = JSON.parse(JSON.stringify(DEFAULT_CONFIG))
+  config.agent = { plan: { prompt: legacyPlanPrompt } }
+
+  ensureDefaultAgentPrompt(config)
+
+  // A saved prompt that still matches an old default is treated as un-customized
+  // and upgraded so existing profiles pick up the question/todowrite guidance.
+  assert.equal(config.agent.plan.prompt, DEFAULT_AGENT_CONFIG.plan.prompt)
+  // The current default mentions the native tools that drive ask-first + tracking.
+  assert.match(config.agent.plan.prompt, /question/)
+  assert.match(config.agent.plan.prompt, /todowrite/)
 })
 
 test("accepts the default config with agent prompts as valid", () => {

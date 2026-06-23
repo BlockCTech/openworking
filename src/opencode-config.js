@@ -47,13 +47,33 @@ const DEFAULT_BUILD_PROMPT = [
 const DEFAULT_PLAN_PROMPT = [
   "You are a software architect operating in plan mode. You read and analyze but do not edit files.",
   "Analyze the request and the relevant code thoroughly before proposing anything.",
-  "Present a clear, well-structured plan with explicit numbered steps, the files involved, and the trade-offs of your approach.",
+  "If the request is ambiguous or you are missing information you need to plan well, ASK the user first: use the `question` tool to present concrete multiple-choice questions instead of guessing. Prefer asking a few sharp questions over producing a plan built on assumptions.",
+  "Once you understand the task, use the `todowrite` tool to record the plan as a checklist of concrete steps — one todo per step — so progress can be tracked while the plan is later executed. Keep the todos in sync as your understanding changes.",
+  "Also present the plan in your reply: clear, well-structured, with explicit numbered steps, the files involved, and the trade-offs of your approach.",
   "Be thorough rather than terse — explain why each step matters.",
   ANSWER_IN_USER_LANGUAGE
 ].join(" ")
 const DEFAULT_AGENT_CONFIG = {
   build: { prompt: DEFAULT_BUILD_PROMPT },
   plan: { prompt: DEFAULT_PLAN_PROMPT }
+}
+// Previous shipped defaults for each agent prompt. `ensureDefaultAgentPrompt`
+// upgrades a saved prompt to the current default only when it byte-matches one
+// of these — i.e. the user never customized it. A user's own prompt (matching
+// none of these) is always preserved. Append the outgoing string here whenever
+// DEFAULT_BUILD_PROMPT / DEFAULT_PLAN_PROMPT changes.
+const LEGACY_DEFAULT_AGENT_PROMPTS = {
+  build: [],
+  plan: [
+    // v1 — before the question/todowrite plan-native guidance was added.
+    [
+      "You are a software architect operating in plan mode. You read and analyze but do not edit files.",
+      "Analyze the request and the relevant code thoroughly before proposing anything.",
+      "Present a clear, well-structured plan with explicit numbered steps, the files involved, and the trade-offs of your approach.",
+      "Be thorough rather than terse — explain why each step matters.",
+      ANSWER_IN_USER_LANGUAGE
+    ].join(" ")
+  ]
 }
 
 // The bundled provider is a generic OpenAI-compatible API gateway. Users point it
@@ -159,14 +179,18 @@ function ensureDefaultManagedModelConfig(config) {
   return config
 }
 
-// Back-fill the default system prompts for the build/plan agents into configs
-// that predate this feature. Only fills a prompt when one is missing so a user's
-// own customization is never overwritten.
+// Back-fill the default system prompts for the build/plan agents. Fills a prompt
+// when one is missing, and upgrades a prompt that still matches a previously
+// shipped default (see LEGACY_DEFAULT_AGENT_PROMPTS) to the current default — so
+// existing profiles pick up improvements. A prompt the user customized (matching
+// neither the current nor any legacy default) is never overwritten.
 function ensureDefaultAgentPrompt(config) {
   config.agent ||= {}
   for (const [name, agent] of Object.entries(DEFAULT_AGENT_CONFIG)) {
     config.agent[name] ||= {}
-    if (config.agent[name].prompt === undefined) config.agent[name].prompt = agent.prompt
+    const current = config.agent[name].prompt
+    const isLegacyDefault = (LEGACY_DEFAULT_AGENT_PROMPTS[name] || []).includes(current)
+    if (current === undefined || isLegacyDefault) config.agent[name].prompt = agent.prompt
   }
   return config
 }
@@ -206,6 +230,7 @@ module.exports = {
   DEFAULT_MODEL_LIMIT,
   DEFAULT_MODEL_MODALITIES,
   DEFAULT_MODEL_OPTIONS,
+  LEGACY_DEFAULT_AGENT_PROMPTS,
   SUPERPOWERS_PLUGIN,
   assertValidOpencodeConfig,
   defaultConfigPath,

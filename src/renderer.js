@@ -1124,10 +1124,33 @@ function openInlinePlan(text) {
   })
 }
 
+// Keep an already-open inline plan panel in sync with the assistant's latest
+// text. The plan agent streams its prose part-by-part, so the panel must follow
+// the live message instead of freezing on the first snapshot — otherwise it
+// shows a truncated, mid-stream copy of the plan. Returns true when the panel
+// content actually changed so the caller can repaint the document viewer (the
+// thread-only repaint path does not rebuild it).
+function syncInlinePlan() {
+  if (state.document?.requestedPath !== INLINE_PLAN_PATH) return false
+  const text = latestPlanText()
+  if (!text || text === state.document.content) return false
+  state.document.content = text
+  return true
+}
+
 function maybeAutoOpenPlan() {
-  if (!activePlanProposal()) return
+  if (!activePlanProposal()) {
+    state.planAutoOpened = null
+    return
+  }
   const sessionId = state.activeSessionId
-  if (!sessionId || state.planAutoOpened === sessionId) return
+  if (!sessionId) return
+  // If the panel is already showing this session's inline plan, keep its content
+  // fresh as more text streams in (re-sync runs even after the one-time auto-open).
+  // scheduleThreadRender (the stream-event repaint) skips the document viewer, so
+  // a content change needs a full coalesced render to paint.
+  if (syncInlinePlan()) scheduleRender()
+  if (state.planAutoOpened === sessionId) return
   const ref = latestPlanFileRef()
   if (ref) {
     state.planAutoOpened = sessionId
@@ -1135,9 +1158,8 @@ function maybeAutoOpenPlan() {
     return
   }
   // No plan file written (common for prose-only plan agents): fall back to the
-  // assistant's text, but only once the reply has finished streaming.
-  const status = activeThread().status?.type
-  if (status === "busy" || status === "retry") return
+  // assistant's text. Open as soon as there is enough to show; syncInlinePlan
+  // then keeps it growing with the stream.
   const text = latestPlanText()
   if (text.length < PLAN_TEXT_MIN_LENGTH) return
   state.planAutoOpened = sessionId
@@ -2471,6 +2493,51 @@ function computePromptAttachments({ command, pendingAttachments, fileMentions })
       })
 }
 
+// OpenCode's `todowrite` tool carries the plan/progress checklist in
+// `state.input.todos` ([{ content, status }], status ∈ pending|in_progress|
+// completed|cancelled). Read it defensively so minor schema differences (e.g.
+// `text` instead of `content`) still render.
+function planTodos(part) {
+  const todos = part?.state?.input?.todos
+  if (!Array.isArray(todos)) return []
+  return todos
+    .map((todo) => ({
+      text: String(todo?.content ?? todo?.text ?? todo?.title ?? "").trim(),
+      status: String(todo?.status ?? "pending")
+    }))
+    .filter((todo) => todo.text)
+}
+
+function planTodoSummary(todos) {
+  if (!Array.isArray(todos) || !todos.length) return ""
+  const done = todos.filter((todo) => String(todo?.status) === "completed").length
+  return `${done}/${todos.length} done`
+}
+
+const TODO_STATUS_LABELS = {
+  pending: "To do",
+  in_progress: "In progress",
+  completed: "Done",
+  cancelled: "Cancelled"
+}
+
+function renderPlanTodos(part) {
+  const todos = planTodos(part)
+  if (!todos.length) return ""
+  const rows = todos.map((todo) => {
+    const status = TODO_STATUS_LABELS[todo.status] ? todo.status : "pending"
+    const mark = status === "completed" ? icon("check") : status === "cancelled" ? icon("x") : ""
+    return `
+      <div class="plan-todo ${escapeHtml(status)}">
+        <span class="plan-todo-check">${mark}</span>
+        <span class="plan-todo-text">${escapeHtml(todo.text)}</span>
+        <span class="plan-todo-status">${escapeHtml(TODO_STATUS_LABELS[status])}</span>
+      </div>
+    `
+  }).join("")
+  return `<div class="plan-todos">${rows}</div>`
+}
+
 function toolInfo(part) {
   const input = part.state?.input || {}
   const files = Array.isArray(input.files) ? input.files : []
@@ -2485,7 +2552,9 @@ function toolInfo(part) {
     apply_patch: { icon: "doc", activeLabel: "Applying patch", completedLabel: "Applied patch", subtitle: files.length ? `${files.length} file${files.length === 1 ? "" : "s"}` : "" },
     skill: { icon: "sparkle", activeLabel: "Loading skill", completedLabel: "Loaded skill", subtitle: input.name },
     translate_document: { icon: "doc", activeLabel: "Translating document", completedLabel: "Translated document", subtitle: filename(input.inputPath) },
-    task: { icon: "agent", activeLabel: "Running task", completedLabel: "Completed task", subtitle: input.description }
+    task: { icon: "agent", activeLabel: "Running task", completedLabel: "Completed task", subtitle: input.description },
+    todowrite: { icon: "check", activeLabel: "Updating plan", completedLabel: "Updated plan", subtitle: planTodoSummary(input.todos) },
+    todoread: { icon: "check", activeLabel: "Reading plan", completedLabel: "Read plan", subtitle: "" }
   }
   const fallback = part.state?.title || part.tool || "Tool"
   return mapping[part.tool] || { icon: "activity", activeLabel: fallback, completedLabel: fallback, subtitle: "" }
@@ -2543,6 +2612,7 @@ function renderToolRow(part) {
         <span class="tool-chevron">${icon("chevRight")}</span>
       </button>
       ${disclosure.open ? renderToolDetails(part, info, error) : ""}
+      ${part.tool === "todowrite" ? renderPlanTodos(part) : ""}
       ${status === "completed" ? renderToolArtifacts(part.state?.metadata) : ""}
     </div>
   `

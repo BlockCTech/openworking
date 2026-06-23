@@ -788,6 +788,20 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .artifact-warning { overflow: hidden; color: var(--text-3); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .tool-artifacts.warning .artifact-warning { color: var(--amber); }
 
+/* OpenCode `todowrite` plan/progress checklist, rendered under the tool row. */
+.plan-todos { display: grid; gap: 3px; margin: 2px 0 4px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-2); }
+.plan-todo { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: start; gap: 8px; color: var(--text-3); font-size: 12.5px; line-height: 1.4; }
+.plan-todo-check { display: grid; place-items: center; width: 16px; height: 16px; margin-top: 1px; color: var(--text-4); }
+.plan-todo-check svg { width: 13px; height: 13px; }
+.plan-todo-text { min-width: 0; word-break: break-word; }
+.plan-todo-status { flex-shrink: 0; color: var(--text-4); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.plan-todo.completed .plan-todo-check { color: var(--green); }
+.plan-todo.completed .plan-todo-text { color: var(--text-4); text-decoration: line-through; }
+.plan-todo.completed .plan-todo-status { color: var(--green); }
+.plan-todo.in_progress .plan-todo-text { color: var(--text-2); }
+.plan-todo.in_progress .plan-todo-status { color: var(--accent); }
+.plan-todo.cancelled .plan-todo-text { color: var(--text-4); text-decoration: line-through; }
+
 /* Human-in-the-loop cards: question (multiple-choice) + permission (approve/deny). */
 .ask-card {
   display: grid; gap: 12px; min-width: 0; margin: 4px 0; padding: 14px 16px;
