@@ -404,7 +404,11 @@ function registerIpc() {
   })
 
   ipcMain.handle("version:check", () =>
-    checkDesktopVersion({ currentVersion: app.getVersion(), platform: process.platform })
+    checkDesktopVersion({ 
+      currentVersion: app.getVersion(), 
+      platform: process.platform, 
+      arch: process.arch 
+    })
   )
   ipcMain.handle("version:downloadAndInstall", async (_event, downloadUrl) => {
     const destDir = app.getPath("temp")
