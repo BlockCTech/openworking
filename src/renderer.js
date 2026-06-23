@@ -1801,17 +1801,15 @@ function renderMain() {
   return renderSessionScreen()
 }
 
-function renderHeader(title, subtitle) {
-  const label = runtimeLabel()
+function renderHeader(title) {
   const fileTitle = state.rightSidebarOpen ? "Close files" : "Open current folder"
   return `
     <div class="main-head">
       <button class="head-icon-btn head-sidebar-btn" data-action="toggleSidebar" title="Show sidebar" aria-label="Show sidebar">
         ${icon("sidebarToggle")}
       </button>
-      <div class="head-copy"><div class="head-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div><div class="head-path" title="${escapeHtml(subtitle || "")}">${escapeHtml(subtitle || "")}</div></div>
+      <div class="head-copy"><div class="head-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div></div>
       <div class="head-actions">
-        <button class="status-pill ${label}" data-action="toggleDiagnostics"><span class="status-dot"></span>${escapeHtml(label)}</button>
         <button class="head-icon-btn ${state.rightSidebarOpen ? "active" : ""}" data-action="toggleRightSidebar" title="${fileTitle}" aria-label="${fileTitle}">
           ${icon("sidebarRight")}
         </button>
@@ -1824,12 +1822,12 @@ function renderHeader(title, subtitle) {
 function renderSessionScreen() {
   const project = selectedProject()
   if (!project) {
-    return `<main class="main">${renderHeader("OpenWorking", state.configPath)}<div class="empty-state"><h1>Add a local project</h1><p>Choose a folder to start a local OpenCode session.</p><button class="primary-btn" data-action="addProject">${icon("plus")}Add project</button></div></main>`
+    return `<main class="main">${renderHeader("OpenWorking")}<div class="empty-state"><h1>Add a local project</h1><p>Choose a folder to start a local OpenCode session.</p><button class="primary-btn" data-action="addProject">${icon("plus")}Add project</button></div></main>`
   }
   const session = selectedSession()
   return `
     <main class="main">
-      ${renderHeader(session?.title || project.name, project.path)}
+      ${renderHeader(session?.title || project.name)}
       ${session ? renderThread(project) : renderNewSession(project)}
     </main>
   `
