@@ -503,6 +503,7 @@ function registerIpc() {
   ipcMain.handle("runtime:sendCommand", (_event, payload) => runtimeManager.sendCommand(payload))
   ipcMain.handle("runtime:abortSession", (_event, payload) => runtimeManager.abortSession(payload))
   ipcMain.handle("runtime:deleteSession", (_event, payload) => runtimeManager.deleteSession(payload))
+  ipcMain.handle("runtime:forkSession", (_event, payload) => runtimeManager.forkSession(payload))
   ipcMain.handle("runtime:answerQuestion", (_event, payload) => runtimeManager.answerQuestion(payload))
   ipcMain.handle("runtime:rejectQuestion", (_event, payload) => runtimeManager.rejectQuestion(payload))
   ipcMain.handle("runtime:replyPermission", (_event, payload) => runtimeManager.replyPermission(payload))

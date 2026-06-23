@@ -795,6 +795,73 @@ test("runtime manager deletes a session through opencode", async () => {
   }
 })
 
+test("runtime manager forks a session through opencode", async () => {
+  const captured = []
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/session/sess_parent/fork?directory=%2Ftmp%2Fother" && req.method === "POST") {
+      let raw = ""
+      req.on("data", (chunk) => {
+        raw += chunk
+      })
+      req.on("end", () => {
+        captured.push({ url: req.url, method: req.method, authorization: req.headers.authorization, raw })
+        res.end(JSON.stringify({ id: "sess_fork_mid", title: "Forked mid", directory: "/tmp/other" }))
+      })
+      return
+    }
+    if (req.url === "/session/sess_parent/fork" && req.method === "POST") {
+      let raw = ""
+      req.on("data", (chunk) => {
+        raw += chunk
+      })
+      req.on("end", () => {
+        captured.push({ url: req.url, method: req.method, authorization: req.headers.authorization, raw })
+        res.end(JSON.stringify({ id: "sess_fork_full", title: "Forked full" }))
+      })
+      return
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = server.address().port
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-fork",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activeSessionId = "sess_parent"
+  manager.state.runtime = {
+    serverUrl: `http://127.0.0.1:${port}`,
+    auth: { username: "opencode", password: "pw" }
+  }
+
+  try {
+    assert.equal((await manager.forkSession({ sessionId: "sess_parent", messageId: "msg_next", directory: "/tmp/other" })).id, "sess_fork_mid")
+    assert.equal(manager.snapshot().activeSessionId, "sess_fork_mid")
+    assert.equal((await manager.forkSession({ sessionId: "sess_parent" })).id, "sess_fork_full")
+    assert.equal(manager.snapshot().activeSessionId, "sess_fork_full")
+    assert.deepEqual(captured, [
+      {
+        url: "/session/sess_parent/fork?directory=%2Ftmp%2Fother",
+        method: "POST",
+        authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`,
+        raw: JSON.stringify({ messageID: "msg_next" })
+      },
+      {
+        url: "/session/sess_parent/fork",
+        method: "POST",
+        authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`,
+        raw: ""
+      }
+    ])
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test("runtime manager renames a session through opencode", async () => {
   let captured = null
   const server = http.createServer((req, res) => {

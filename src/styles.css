@@ -723,10 +723,15 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .msg-ai { margin-bottom: 24px; }
 .ai-body { display: grid; min-width: 0; gap: 9px; font-size: 13.5px; line-height: 1.62; color: var(--text); padding-top: 3px; }
 .message-actions { display: flex; min-height: 26px; justify-content: flex-end; opacity: 0; transition: opacity .12s; }
+.message-actions-left { justify-content: flex-start; }
 .message-stack:hover .message-actions, .message-stack:focus-within .message-actions { opacity: 1; }
 .message-action { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 8px; color: var(--text-3); }
 .message-action:hover, .message-action:focus-visible { background: var(--surface-2); color: var(--text); outline: 0; }
 .message-action svg { width: 16px; height: 16px; }
+.fork-marker { display: flex; align-items: center; gap: 14px; margin: 44px 0 34px; color: var(--accent-text); font-size: 15px; line-height: 1; }
+.fork-marker-line { height: 1px; flex: 1; background: var(--border); }
+.fork-marker-label { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.fork-marker-label svg { width: 16px; height: 16px; color: var(--text-3); }
 .assistant-text { min-width: 0; overflow-wrap: anywhere; }
 .assistant-error {
   display: grid; gap: 4px; min-width: 0; padding: 10px 12px;

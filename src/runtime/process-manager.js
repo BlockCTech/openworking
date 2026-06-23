@@ -1222,6 +1222,30 @@ class RuntimeProcessManager {
     }
   }
 
+  async forkSession({ sessionId, messageId, directory } = {}) {
+    await this.waitUntilReady()
+    if (!sessionId) throw new Error("Select a session before forking it.")
+    const dirParam = directory ? `?directory=${encodeURIComponent(directory)}` : ""
+    const body = messageId ? { messageID: messageId } : undefined
+    this.timeline("session.fork.requested", { sessionId, messageId })
+    try {
+      const session = await requestJson({
+        url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/fork${dirParam}`,
+        method: "POST",
+        auth: this.auth(),
+        body
+      })
+      this.state.activeSessionId = session?.id || null
+      this.timeline("session.fork.completed", { sessionId, forkedSessionId: this.state.activeSessionId })
+      this.publish()
+      return session
+    } catch (error) {
+      this.log("error", `Fork failed: ${error.message}`)
+      this.timeline("session.fork.error", { sessionId, error: error.message })
+      throw error
+    }
+  }
+
   // Reply to a pending question.asked request. `answers` is an array (one entry per
   // question prompt) of arrays of selected option values; an "Other" free-text answer is
   // carried as the typed string inside the inner array.

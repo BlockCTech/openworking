@@ -89,6 +89,7 @@ contextBridge.exposeInMainWorld("openworking", {
     sendCommand: (payload) => ipcRenderer.invoke("runtime:sendCommand", payload),
     abortSession: (payload) => ipcRenderer.invoke("runtime:abortSession", payload),
     deleteSession: (payload) => ipcRenderer.invoke("runtime:deleteSession", payload),
+    forkSession: (payload) => ipcRenderer.invoke("runtime:forkSession", payload),
     listMessages: (payload) => ipcRenderer.invoke("runtime:listMessages", payload),
     answerQuestion: (payload) => ipcRenderer.invoke("runtime:answerQuestion", payload),
     rejectQuestion: (payload) => ipcRenderer.invoke("runtime:rejectQuestion", payload),

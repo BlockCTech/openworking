@@ -14,7 +14,13 @@ global.window = {
     },
     hasRunningTool() { return false },
     hydrateThread() {},
-    messageCopyText() { return "" },
+    messageCopyText(message) {
+      return (message?.parts || [])
+        .filter((part) => part.type === "text" && !part.synthetic && !part.ignored)
+        .map((part) => part.text || "")
+        .join("\n")
+        .trim()
+    },
     needsThreadRehydration() { return true },
     userMessageFileRefs() { return [] },
     messageText() { return "" },
@@ -872,6 +878,190 @@ function fakeDelegatedEvent(attrs) {
   }
   return { type: "click", target, preventDefault() {}, stopPropagation() {} }
 }
+
+test("assistant message actions render copy and fork on the left while user actions stay unchanged", () => {
+  const { renderMessageActions } = __test
+  const assistantHtml = renderMessageActions({
+    id: "msg_ai",
+    role: "assistant",
+    parts: [{ type: "text", text: "Done" }]
+  })
+  const userHtml = renderMessageActions({
+    id: "msg_user",
+    role: "user",
+    parts: [{ type: "text", text: "Please do this" }]
+  })
+
+  assert.match(assistantHtml, /message-actions-left/)
+  assert.match(assistantHtml, /data-copy-message="msg_ai"/)
+  assert.match(assistantHtml, /data-fork-message="msg_ai"/)
+  assert.ok(assistantHtml.indexOf("data-copy-message") < assistantHtml.indexOf("data-fork-message"))
+  assert.doesNotMatch(userHtml, /message-actions-left/)
+  assert.match(userHtml, /data-copy-message="msg_user"/)
+  assert.doesNotMatch(userHtml, /data-fork-message/)
+})
+
+test("forkAssistantMessage passes the next message as the fork boundary", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const state = __test.state
+  const previousState = {
+    projects: state.projects,
+    sessionsByProject: state.sessionsByProject,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    runtime: state.runtime,
+    threads: state.threads,
+    forkMarkers: state.forkMarkers,
+    expanded: state.expanded,
+    nav: state.nav,
+    toast: state.toast
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let forkArgs = null
+  global.window.openworking = {
+    runtime: {
+      async forkSession(args) {
+        forkArgs = args
+        return { id: "sess_fork", title: "Forked", directory: "/tmp/project" }
+      },
+      async listSessionsForDirectory(directory) {
+        assert.equal(directory, "/tmp/project")
+        return [{ id: "sess_fork", title: "Forked", directory: "/tmp/project" }]
+      },
+      async listMessages(args) {
+        assert.deepEqual(args, { sessionId: "sess_fork", directory: "/tmp/project" })
+        return [
+          { id: "fork_user_1", role: "user", parts: [{ type: "text", text: "Do it" }] },
+          { id: "fork_ai_1", role: "assistant", parts: [{ type: "text", text: "Done" }] }
+        ]
+      }
+    }
+  }
+
+  try {
+    Object.assign(state, {
+      projects: [{ id: "proj", name: "Project", path: "/tmp/project" }],
+      sessionsByProject: { proj: [{ id: "sess_parent", title: "Parent", directory: "/tmp/project" }] },
+      activeProjectId: "proj",
+      activeSessionId: "sess_parent",
+      runtime: { status: "running", project: { id: "proj" }, sessionStatuses: {} },
+      forkMarkers: new Map(),
+      threads: new Map([["sess_parent", {
+        sessionId: "sess_parent",
+        messages: [
+          { id: "msg_user_1", role: "user", parts: [{ type: "text", text: "Do it" }] },
+          { id: "msg_ai_1", role: "assistant", parts: [{ type: "text", text: "Done" }] },
+          { id: "msg_user_2", role: "user", parts: [{ type: "text", text: "Continue" }] }
+        ],
+        pendingQuestions: [],
+        pendingPermissions: [],
+        status: { type: "idle" }
+      }]]),
+      expanded: new Set(),
+      nav: "session",
+      toast: null
+    })
+
+    await __test.forkAssistantMessage("msg_ai_1")
+
+    assert.deepEqual(forkArgs, {
+      sessionId: "sess_parent",
+      messageId: "msg_user_2",
+      directory: "/tmp/project"
+    })
+    assert.equal(state.activeSessionId, "sess_fork")
+    assert.equal(state.forkMarkers.get("sess_fork"), "fork_ai_1")
+    assert.match(__test.renderThreadMessages([{ id: "fork_ai_1", role: "user", parts: [] }]), /Forked from conversation/)
+    assert.equal(state.toast, "Chat forked")
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("forkAssistantMessage omits the boundary for the latest assistant response", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const state = __test.state
+  const previousState = {
+    projects: state.projects,
+    sessionsByProject: state.sessionsByProject,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    runtime: state.runtime,
+    threads: state.threads,
+    forkMarkers: state.forkMarkers,
+    expanded: state.expanded,
+    nav: state.nav,
+    toast: state.toast
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let forkArgs = null
+  global.window.openworking = {
+    runtime: {
+      async forkSession(args) {
+        forkArgs = args
+        return { id: "sess_fork_full", title: "Forked", directory: "/tmp/project" }
+      },
+      async listSessionsForDirectory() {
+        return [{ id: "sess_fork_full", title: "Forked", directory: "/tmp/project" }]
+      },
+      async listMessages() {
+        return [
+          { id: "fork_user_1", role: "user", parts: [{ type: "text", text: "Do it" }] },
+          { id: "fork_ai_1", role: "assistant", parts: [{ type: "text", text: "Done" }] }
+        ]
+      }
+    }
+  }
+
+  try {
+    Object.assign(state, {
+      projects: [{ id: "proj", name: "Project", path: "/tmp/project" }],
+      sessionsByProject: { proj: [{ id: "sess_parent", title: "Parent", directory: "/tmp/project" }] },
+      activeProjectId: "proj",
+      activeSessionId: "sess_parent",
+      runtime: { status: "running", project: { id: "proj" }, sessionStatuses: {} },
+      forkMarkers: new Map(),
+      threads: new Map([["sess_parent", {
+        sessionId: "sess_parent",
+        messages: [
+          { id: "msg_user_1", role: "user", parts: [{ type: "text", text: "Do it" }] },
+          { id: "msg_ai_1", role: "assistant", parts: [{ type: "text", text: "Done" }] }
+        ],
+        pendingQuestions: [],
+        pendingPermissions: [],
+        status: { type: "idle" }
+      }]]),
+      expanded: new Set(),
+      nav: "session",
+      toast: null
+    })
+
+    await __test.forkAssistantMessage("msg_ai_1")
+
+    assert.deepEqual(forkArgs, {
+      sessionId: "sess_parent",
+      directory: "/tmp/project"
+    })
+    assert.equal(state.activeSessionId, "sess_fork_full")
+    assert.equal(state.forkMarkers.get("sess_fork_full"), "fork_ai_1")
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
 
 // Builds a fake element chain [outermost ... innermost]. Each node declares its data-* attrs.
 // closest(sel) walks from the node up the chain; contains(other) is true when `other` is at or

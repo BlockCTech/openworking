@@ -1,6 +1,6 @@
 {
   "name": "openworking",
-  "version": "1.12.1",
+  "version": "1.12.2",
   "private": true,
   "description": "OpenWorking — a local-first desktop shell for OpenCode with a self-configured OpenAI-compatible API gateway.",
   "license": "MIT",

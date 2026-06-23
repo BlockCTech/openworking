@@ -42,6 +42,7 @@ const icons = {
   dots: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>',
   pin: '<svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 15v5"/></svg>',
   copy: '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M5 16H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v1"/></svg>',
+  fork: '<svg viewBox="0 0 21 21"><g transform="translate(2 3)"><path d="m12.5.5 3 3-3 3"/><path d="m15.5 3.5h-5l-4 5.086"/><path d="m12.5 9.5 3 3-3 3"/><path d="m15.5 12.5h-5l-4-4h-6"/></g></svg>',
   stop: '<svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>',
   folderPlus: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 12v4M10 14h4"/></svg>',
   collapse: '<svg viewBox="0 0 24 24"><path d="M9 4 5 8m0 0h3.5M5 8V4.5"/><path d="M15 20l4-4m0 0h-3.5M19 16v3.5"/></svg>',
@@ -133,6 +134,9 @@ const state = {
   // long task in session A is not lost when the user switches to / creates session B.
   // The `null` key holds the "new session" draft thread before the session exists.
   threads: new Map(),
+  // Fork marker per forked session. Value is the last cloned message id; null means show the
+  // marker before any continuation if OpenCode returns an empty fork.
+  forkMarkers: new Map(),
   // Pinned chat sessions, keyed by sessionId → { projectId, title, updatedAt }. Pinning
   // is an app-side preference (sessions are owned by OpenCode core), persisted via the
   // pins:* IPC with cached metadata so the flat, cross-project Pinned section renders
@@ -1863,12 +1867,28 @@ function renderThreadRows() {
   const status = thread.status || { type: "idle" }
   const awaiting = pendingPrompts()
   return `
-    ${thread.messages.map(renderThreadMessage).join("")}
+    ${renderThreadMessages(thread.messages)}
     ${status.type === "busy" && !hasRunningTool(thread) && !awaiting ? renderThinkingRow() : ""}
     ${status.type === "retry" ? renderRetryRow(status) : ""}
     ${renderPendingPermissions()}
     ${renderPendingQuestions()}
     ${renderPlanProposal()}
+  `
+}
+
+function renderThreadMessages(messages) {
+  const markerAfter = state.forkMarkers.get(state.activeSessionId)
+  if (markerAfter === null && !messages.length) return renderForkMarker()
+  return messages.map((message) => `${renderThreadMessage(message)}${message.id === markerAfter ? renderForkMarker() : ""}`).join("")
+}
+
+function renderForkMarker() {
+  return `
+    <div class="fork-marker" role="note" aria-label="Forked from conversation">
+      <span class="fork-marker-line"></span>
+      <span class="fork-marker-label">${icon("fork")}<span>Forked from conversation</span></span>
+      <span class="fork-marker-line"></span>
+    </div>
   `
 }
 
@@ -2255,7 +2275,12 @@ async function openFileTreeFile(filePath) {
 }
 
 function renderMessageActions(message) {
-  if (!messageCopyText(message)) return ""
+  const copyText = messageCopyText(message)
+  if (message.role === "assistant") {
+    const copyButton = copyText ? `<button class="message-action" data-copy-message="${escapeHtml(message.id)}" title="Copy message" aria-label="Copy message">${icon("copy")}</button>` : ""
+    return `<div class="message-actions message-actions-left">${copyButton}<button class="message-action" data-fork-message="${escapeHtml(message.id)}" title="Fork chat" aria-label="Fork chat">${icon("fork")}</button></div>`
+  }
+  if (!copyText) return ""
   return `<div class="message-actions"><button class="message-action" data-copy-message="${escapeHtml(message.id)}" title="Copy message" aria-label="Copy message">${icon("copy")}</button></div>`
 }
 
@@ -3743,6 +3768,52 @@ async function copyMessage(messageId) {
   showToast("Message copied")
 }
 
+async function forkAssistantMessage(messageId) {
+  const project = selectedProject()
+  const sessionId = state.activeSessionId
+  if (!project || !sessionId) throw new Error("Select a chat before forking it.")
+  const thread = activeThread()
+  const messages = thread.messages || []
+  const index = messages.findIndex((item) => item.id === messageId)
+  const message = index === -1 ? null : messages[index]
+  if (!message || message.role !== "assistant") throw new Error("Only assistant responses can be forked.")
+
+  const runtimeAlive = state.runtime?.status === "running" || state.runtime?.status === "starting"
+  if (!runtimeAlive) {
+    await openProject(project.id, { selectLatest: false })
+  }
+
+  const nextMessageId = messages[index + 1]?.id
+  const directory = selectedSession()?.directory || project.path
+  const forked = await window.openworking.runtime.forkSession({
+    sessionId,
+    ...(nextMessageId ? { messageId: nextMessageId } : {}),
+    directory
+  })
+  if (!forked?.id) throw new Error("OpenCode did not return a forked session.")
+
+  flushActiveStreamPacing()
+  state.activeProjectId = project.id
+  state.activeSessionId = forked.id
+  state.nav = "session"
+  state.expanded.add(project.id)
+  persistExpanded()
+
+  const sessions = typeof window.openworking.runtime.listSessionsForDirectory === "function"
+    ? await window.openworking.runtime.listSessionsForDirectory(project.path)
+    : await window.openworking.runtime.listSessions()
+  setProjectSessions(
+    project.id,
+    sessions.length ? sessions : [forked, ...projectSessions(project.id)],
+    sessions.length ? "directory" : "active"
+  )
+  const forkMessages = await window.openworking.runtime.listMessages({ sessionId: forked.id, directory: project.path })
+  state.forkMarkers.set(forked.id, forkMessages[forkMessages.length - 1]?.id || null)
+  hydrateActiveThread(forkMessages, state.runtime?.sessionStatuses?.[forked.id])
+  showToast("Chat forked")
+  render({ threadScroll: "latest" })
+}
+
 async function openArtifact(artifactPath) {
   if (!artifactPath) return
   showDocument({ requestedPath: artifactPath, path: artifactPath, name: filename(artifactPath), relativePath: "", content: "", loading: true, error: "", artifact: true, previewMode: "loading", renderMode: "markdown", tab: "code" })
@@ -4019,6 +4090,7 @@ function pruneThreads(keepSessionIds) {
     if (!keep.has(sessionId)) {
       streamPacer.clearSession(sessionId)
       state.threads.delete(sessionId)
+      state.forkMarkers.delete(sessionId)
     }
   }
 }
@@ -4145,6 +4217,7 @@ async function deleteSession(target) {
     setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
   })
   state.threads.delete(sessionId)
+  state.forkMarkers.delete(sessionId)
   if (state.activeProjectId === projectId && state.activeSessionId === sessionId) {
     state.activeSessionId = null
     resetActiveThread()
@@ -4924,7 +4997,11 @@ if (typeof module !== "undefined" && module.exports) {
     __test: {
       confirmDeleteSession,
       deleteSession,
+      forkAssistantMessage,
       refreshSessionData,
+      renderMessageActions,
+      renderThreadMessages,
+      renderThreadMessage,
       selectSession,
       sendPrompt,
       state,
@@ -5103,6 +5180,7 @@ const DELEGATED_CLICK = [
   ["data-remove-file-mention", (e) => removeFileMention(e.currentTarget.dataset.removeFileMention)],
   // Thread-row actions (these used to be wired by bindMessageActions/etc. on every renderThreadContent).
   ["data-copy-message", (e) => copyMessage(e.currentTarget.dataset.copyMessage).catch((error) => showToast(error.message))],
+  ["data-fork-message", (e) => forkAssistantMessage(e.currentTarget.dataset.forkMessage).catch((error) => showToast(error.message))],
   ["data-open-artifact", (e) => openArtifact(e.currentTarget.dataset.openArtifact).catch((error) => showToast(error.message))],
   ["data-tool-step", (e) => {
     const disclosure = state.toolDisclosure.get(e.currentTarget.dataset.toolStep)
