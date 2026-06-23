@@ -144,7 +144,6 @@ const state = {
   // pins:* IPC with cached metadata so the flat, cross-project Pinned section renders
   // even for sessions whose project runtime is not currently running.
   pinnedSessions: new Map(),
-  toolDisclosure: new Map(),
   document: null,
   expanded: new Set(),
   showAll: new Set(),
@@ -234,7 +233,7 @@ const state = {
   skillPreviewLoading: false,
   skillPreviewError: null,
   skillUninstalling: false,
-  // Per-question multi-select draft state, keyed by `${requestID}:${questionIndex}`:
+  // Per-question multi-select draft state, keyed by `${sessionId}:${requestID}:${questionIndex}`:
   // { selected: Set<value>, other: string }
   questionDrafts: new Map()
 }
@@ -969,22 +968,18 @@ function maybeConsumePacedRuntimeEvent(event, activeSessionId = state.activeSess
 function applyRuntimeStreamEvent(event) {
   const sessionId = event?.sessionID
   if (!sessionId) return
-  const thread = state.threads.get(sessionId)
-  if (!thread) {
-    // We are not tracking this session's thread yet, but a lifecycle change still
-    // moves its sidebar badge (busy/idle) — repaint badges without a full render.
-    if (SESSION_LIFECYCLE_EVENTS.has(event.type)) renderSessionBadges()
-    return
-  }
+  const thread = ensureThread(sessionId)
   const result = applyThreadEvent(thread, event) || {}
   const isActive = sessionId === state.activeSessionId
+  const affectsGlobalPermissionUi = event.type === "permission.asked" || event.type === "permission.replied"
   if (SESSION_LIFECYCLE_EVENTS.has(event.type)) {
     if (isActive) updateComposerSubmitButton()
     renderSessionBadges()
   }
-  if (result.changed && isActive) {
-    maybeAutoOpenPlan()
-    scheduleThreadRender()
+  if (result.changed && (isActive || affectsGlobalPermissionUi)) {
+    if (isActive) maybeAutoOpenPlan()
+    if (isActive) scheduleThreadRender()
+    else renderThreadContent()
   }
   if (result.reconcile) scheduleRefresh()
 }
@@ -2620,7 +2615,7 @@ function toolInfo(part) {
     apply_patch: { icon: "doc", activeLabel: "Applying patch", completedLabel: "Applied patch", subtitle: files.length ? `${files.length} file${files.length === 1 ? "" : "s"}` : "" },
     skill: { icon: "sparkle", activeLabel: "Loading skill", completedLabel: "Loaded skill", subtitle: input.name },
     translate_document: { icon: "doc", activeLabel: "Translating document", completedLabel: "Translated document", subtitle: filename(input.inputPath) },
-    task: { icon: "agent", activeLabel: "Running task", completedLabel: "Completed task", subtitle: input.description },
+    task: { icon: "agent", activeLabel: "Subagent running", completedLabel: "Subagent completed", subtitle: input.description },
     todowrite: { icon: "check", activeLabel: "Updating plan", completedLabel: "Updated plan", subtitle: planTodoSummary(input.todos) },
     todoread: { icon: "check", activeLabel: "Reading plan", completedLabel: "Read plan", subtitle: "" }
   }
@@ -2628,28 +2623,13 @@ function toolInfo(part) {
   return mapping[part.tool] || { icon: "activity", activeLabel: fallback, completedLabel: fallback, subtitle: "" }
 }
 
-function toolStepKey(part) {
-  return `${part.messageID || ""}:${part.id || ""}`
-}
-
-function defaultToolStepOpen(status) {
-  return status === "pending" || status === "running" || status === "error"
-}
-
-function toolStepDisclosure(part, status) {
-  const key = toolStepKey(part)
-  let disclosure = state.toolDisclosure.get(key)
-  if (!disclosure || disclosure.status !== status) {
-    disclosure = { status, open: defaultToolStepOpen(status) }
-    state.toolDisclosure.set(key, disclosure)
+function toolStepLabel(info, status, isSubagent = false) {
+  let label = status === "completed" ? info.completedLabel : (status === "error" ? `${info.activeLabel} failed` : info.activeLabel);
+  if (info.subtitle && status !== "error") {
+    return `${label} - ${info.subtitle}`;
   }
-  return { key, open: disclosure.open }
-}
-
-function toolStepLabel(info, status) {
-  if (status === "completed") return info.completedLabel
-  if (status === "error") return `${info.activeLabel} failed`
-  return info.activeLabel
+  if (isSubagent) return `[subagent] ${label}`
+  return label;
 }
 
 function renderToolDetails(part, info, error) {
@@ -2669,17 +2649,13 @@ function renderToolDetails(part, info, error) {
 function renderToolRow(part) {
   const info = toolInfo(part)
   const status = part.state?.status || "pending"
-  const error = status === "error" ? part.state?.error : ""
-  const disclosure = toolStepDisclosure(part, status)
   const processing = status === "pending" || status === "running"
   return `
     <div class="tool-result">
-      <button class="tool-step ${escapeHtml(status)}" data-tool-step="${escapeHtml(disclosure.key)}" aria-expanded="${disclosure.open}">
-        <span class="tool-copy"><strong>${escapeHtml(toolStepLabel(info, status))}</strong></span>
+      <div class="tool-step ${escapeHtml(status)}">
+        <span class="tool-copy"><strong>${escapeHtml(toolStepLabel(info, status, part.tool === "task"))}</strong></span>
         ${processing ? `<span class="tool-processing"><i></i><span>Processing</span></span>` : `<span class="tool-state">${escapeHtml(status)}</span>`}
-        <span class="tool-chevron">${icon("chevRight")}</span>
-      </button>
-      ${disclosure.open ? renderToolDetails(part, info, error) : ""}
+      </div>
       ${part.tool === "todowrite" ? renderPlanTodos(part) : ""}
       ${status === "completed" ? renderToolArtifacts(part.state?.metadata) : ""}
     </div>
@@ -2688,12 +2664,12 @@ function renderToolRow(part) {
 
 const OTHER_OPTION_VALUE = "__openworking_other__"
 
-function questionDraftKey(requestID, index) {
-  return `${requestID}:${index}`
+function questionDraftKey(sessionId, requestID, index) {
+  return `${sessionId || ""}:${requestID}:${index}`
 }
 
-function questionDraft(requestID, index) {
-  const key = questionDraftKey(requestID, index)
+function questionDraft(sessionId, requestID, index) {
+  const key = questionDraftKey(sessionId, requestID, index)
   let draft = state.questionDrafts.get(key)
   if (!draft) {
     draft = { selected: new Set(), other: "" }
@@ -2706,9 +2682,10 @@ function questionDraft(requestID, index) {
 // tool. Single-select questions submit on click; multi-select questions collect choices
 // and submit via a button. An "Other" option exposes a free-text field.
 function renderPendingQuestions() {
-  const pending = activeThread().pendingQuestions || []
+  const thread = state.threads.get(state.activeSessionId)
+  const pending = thread?.pendingQuestions || []
   if (!pending.length) return ""
-  return pending.map(renderQuestionCard).join("")
+  return pending.map((req) => renderQuestionCard({ ...req, sessionId: state.activeSessionId })).join("")
 }
 
 function renderQuestionCard(request) {
@@ -2728,12 +2705,12 @@ function renderQuestionCard(request) {
 function renderQuestionPrompt(request, question, index) {
   const options = Array.isArray(question.options) ? question.options : []
   const multiple = question.multiple === true
-  const draft = multiple || question.optional ? questionDraft(request.requestID, index) : null
+  const draft = multiple || question.optional ? questionDraft(request.sessionId, request.requestID, index) : null
   const rows = options.map((option, optionIndex) => {
     const value = String(option.value ?? option.label ?? "")
     const checked = draft ? draft.selected.has(value) : false
     return `
-      <button class="ask-option ${checked ? "selected" : ""}" data-question-option="${escapeHtml(request.requestID)}" data-question-index="${index}" data-question-value="${escapeHtml(value)}" data-question-multiple="${multiple ? "1" : "0"}">
+      <button class="ask-option ${checked ? "selected" : ""}" data-question-option="${escapeHtml(request.requestID)}" data-question-session="${escapeHtml(request.sessionId)}" data-question-index="${index}" data-question-value="${escapeHtml(value)}" data-question-multiple="${multiple ? "1" : "0"}">
         <span class="ask-option-index">${optionIndex + 1}</span>
         <span class="ask-option-body">
           <strong>${escapeHtml(String(option.label ?? value))}</strong>
@@ -2790,9 +2767,14 @@ function renderPermissionDetails(request) {
 
 // Renders the tool-approval card OpenCode raises when an action is gated to "ask".
 function renderPendingPermissions() {
-  const pending = activeThread().pendingPermissions || []
-  if (!pending.length) return ""
-  return pending.map(renderPermissionCard).join("")
+  const allPending = []
+  for (const [sessionId, thread] of state.threads) {
+    if (thread.pendingPermissions?.length) {
+      allPending.push(...thread.pendingPermissions.map(req => ({ ...req, sessionId })))
+    }
+  }
+  if (!allPending.length) return ""
+  return allPending.map(renderPermissionCard).join("")
 }
 
 function renderPermissionCard(request) {
@@ -2800,13 +2782,13 @@ function renderPermissionCard(request) {
   const details = renderPermissionDetails(request)
   return `
     <div class="ask-card permission-card" data-permission-card="${escapeHtml(request.requestID)}">
-      <div class="ask-card-header">${escapeHtml(permissionHeader(request))}</div>
+      <div class="ask-card-header">${escapeHtml(permissionHeader(request))} ${request.sessionId && request.sessionId !== state.activeSessionId ? `<small>(Session: ${request.sessionId})</small>` : ""}</div>
       ${summary ? `<div class="ask-permission-meta">${escapeHtml(summary)}</div>` : ""}
       ${details || (summary ? "" : `<div class="ask-permission-meta">No additional details.</div>`)}
       <div class="ask-permission-actions">
-        <button class="ask-permission-btn allow" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-decision="once">Allow once</button>
-        <button class="ask-permission-btn always" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-decision="always">Always allow</button>
-        <button class="ask-permission-btn reject" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-decision="reject">Reject</button>
+        <button class="ask-permission-btn allow" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-session="${escapeHtml(request.sessionId)}" data-permission-decision="once">Allow once</button>
+        <button class="ask-permission-btn always" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-session="${escapeHtml(request.sessionId)}" data-permission-decision="always">Always allow</button>
+        <button class="ask-permission-btn reject" data-permission-reply="${escapeHtml(request.requestID)}" data-permission-session="${escapeHtml(request.sessionId)}" data-permission-decision="reject">Reject</button>
       </div>
     </div>
   `
@@ -3685,36 +3667,42 @@ function renderToast() {
   host.innerHTML = state.toast ? `<div class="toast">${icon("check")}<span>${escapeHtml(state.toast)}</span></div>` : ""
 }
 
-function clearQuestionDrafts(requestID) {
+function clearQuestionDrafts(sessionId, requestID) {
   for (const key of [...state.questionDrafts.keys()]) {
-    if (key.startsWith(`${requestID}:`)) state.questionDrafts.delete(key)
+    if (key.startsWith(`${sessionId || ""}:${requestID}:`)) state.questionDrafts.delete(key)
   }
 }
 
-async function submitQuestion(requestID, index, answer) {
-  const request = (activeThread().pendingQuestions || []).find((item) => item.requestID === requestID)
+async function submitQuestion(requestID, index, answer, sessionId = state.activeSessionId) {
+  if (!sessionId) throw new Error("No active session for this question.")
+  const thread = state.threads.get(sessionId)
+  const request = (thread?.pendingQuestions || []).find((item) => item.requestID === requestID)
   const questionCount = Array.isArray(request?.questions) ? request.questions.length : 1
   // The runtime expects one answer entry per question prompt in the request.
   const answers = Array.from({ length: questionCount }, (_value, i) => (i === index ? answer : []))
-  if (!state.activeSessionId) throw new Error("No active session for this question.")
-  await window.openworking.runtime.answerQuestion({ sessionId: state.activeSessionId, requestID, answers })
-  clearQuestionDrafts(requestID)
-  clearPendingQuestion(activeThread(), requestID)
+  await window.openworking.runtime.answerQuestion({ sessionId, requestID, answers })
+  clearQuestionDrafts(sessionId, requestID)
+  if (thread) clearPendingQuestion(thread, requestID)
   renderThreadContent()
 }
 
-async function dismissQuestion(requestID) {
-  if (!state.activeSessionId) throw new Error("No active session for this question.")
-  await window.openworking.runtime.rejectQuestion({ sessionId: state.activeSessionId, requestID })
-  clearQuestionDrafts(requestID)
-  clearPendingQuestion(activeThread(), requestID)
+async function dismissQuestion(requestID, sessionId = state.activeSessionId) {
+  if (!sessionId) throw new Error("No active session for this question.")
+  await window.openworking.runtime.rejectQuestion({ sessionId, requestID })
+  clearQuestionDrafts(sessionId, requestID)
+  const thread = state.threads.get(sessionId)
+  if (thread) clearPendingQuestion(thread, requestID)
   renderThreadContent()
 }
 
-async function replyPermission(requestID, decision) {
-  if (!state.activeSessionId) throw new Error("No active session for this request.")
-  await window.openworking.runtime.replyPermission({ sessionId: state.activeSessionId, requestID, reply: decision })
-  clearPendingPermission(activeThread(), requestID)
+async function replyPermission(requestID, decision, sessionId = state.activeSessionId) {
+  if (!sessionId) throw new Error("No active session for this request.")
+  await window.openworking.runtime.replyPermission({ sessionId, requestID, reply: decision })
+
+  // Clear the permission from the specific thread that owns it
+  const thread = state.threads.get(sessionId)
+  if (thread) clearPendingPermission(thread, requestID)
+
   renderThreadContent()
 }
 
@@ -5381,50 +5369,50 @@ const DELEGATED_CLICK = [
   ["data-copy-message", (e) => copyMessage(e.currentTarget.dataset.copyMessage).catch((error) => showToast(error.message))],
   ["data-fork-message", (e) => forkAssistantMessage(e.currentTarget.dataset.forkMessage).catch((error) => showToast(error.message))],
   ["data-open-artifact", (e) => openArtifact(e.currentTarget.dataset.openArtifact).catch((error) => showToast(error.message))],
-  ["data-tool-step", (e) => {
-    const disclosure = state.toolDisclosure.get(e.currentTarget.dataset.toolStep)
-    if (!disclosure) return
-    disclosure.open = !disclosure.open
-    renderThreadContent()
-  }],
   ["data-open-file", (e) => openDocument(e.currentTarget.dataset.openFile, { tab: e.currentTarget.dataset.openTab || null }).catch((error) => showToast(error.message))],
   ["data-doc-tab", (e) => switchDocumentTab(e.currentTarget.dataset.docTab)],
   ["data-question-option", (e) => {
     const requestID = e.currentTarget.dataset.questionOption
+    const sessionId = state.activeSessionId
     const index = Number(e.currentTarget.dataset.questionIndex)
     const value = e.currentTarget.dataset.questionValue
     if (e.currentTarget.dataset.questionMultiple === "1") {
-      const draft = questionDraft(requestID, index)
+      const draft = questionDraft(sessionId, requestID, index)
       draft.selected.has(value) ? draft.selected.delete(value) : draft.selected.add(value)
       renderThreadContent()
     } else {
-      submitQuestion(requestID, index, [value]).catch((error) => showToast(error.message))
+      submitQuestion(requestID, index, [value], sessionId).catch((error) => showToast(error.message))
     }
   }],
   ["data-question-other-submit", (e) => {
     const requestID = e.currentTarget.dataset.questionOtherSubmit
+    const sessionId = state.activeSessionId
     const index = Number(e.currentTarget.dataset.questionIndex)
-    const other = questionDraft(requestID, index).other.trim()
+    const other = questionDraft(sessionId, requestID, index).other.trim()
     if (!other) {
       showToast("Type an answer or pick an option.")
       return
     }
-    submitQuestion(requestID, index, [other]).catch((error) => showToast(error.message))
+    submitQuestion(requestID, index, [other], sessionId).catch((error) => showToast(error.message))
   }],
   ["data-question-submit", (e) => {
     const requestID = e.currentTarget.dataset.questionSubmit
+    const sessionId = state.activeSessionId
     const index = Number(e.currentTarget.dataset.questionIndex)
-    const draft = questionDraft(requestID, index)
+    const draft = questionDraft(sessionId, requestID, index)
     const answers = [...draft.selected]
     if (draft.other.trim()) answers.push(draft.other.trim())
     if (!answers.length) {
       showToast("Select at least one option.")
       return
     }
-    submitQuestion(requestID, index, answers).catch((error) => showToast(error.message))
+    submitQuestion(requestID, index, answers, sessionId).catch((error) => showToast(error.message))
   }],
   ["data-question-dismiss", (e) => dismissQuestion(e.currentTarget.dataset.questionDismiss).catch((error) => showToast(error.message))],
-  ["data-permission-reply", (e) => replyPermission(e.currentTarget.dataset.permissionReply, e.currentTarget.dataset.permissionDecision).catch((error) => showToast(error.message))],
+  ["data-permission-reply", (e) => {
+    const sessionId = e.currentTarget.dataset.permissionSession || state.activeSessionId
+    return replyPermission(e.currentTarget.dataset.permissionReply, e.currentTarget.dataset.permissionDecision, sessionId).catch((error) => showToast(error.message))
+  }],
   // data-action is the broad fallback — checked last so specific attributes win.
   ["data-action", (e) => handleAction(e)],
 ]
@@ -5468,7 +5456,7 @@ const DELEGATED_INPUT = [
     state.mcpDraft[e.currentTarget.dataset.mcpField] = e.currentTarget.value
   }],
   ["data-question-other", (e) => {
-    const draft = questionDraft(e.currentTarget.dataset.questionOther, Number(e.currentTarget.dataset.questionIndex))
+    const draft = questionDraft(state.activeSessionId, e.currentTarget.dataset.questionOther, Number(e.currentTarget.dataset.questionIndex))
     draft.other = e.currentTarget.value
   }],
 ]

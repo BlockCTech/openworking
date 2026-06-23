@@ -7,8 +7,20 @@ global.window = {
   OpenWorkingThreadStream: {
     addOptimisticUser() {},
     applyThreadEvent() {},
-    clearPendingPermission() {},
-    clearPendingQuestion() {},
+    clearPendingPermission(thread, requestID) {
+      if (!Array.isArray(thread?.pendingPermissions)) return false
+      const index = thread.pendingPermissions.findIndex((item) => item.requestID === requestID)
+      if (index === -1) return false
+      thread.pendingPermissions.splice(index, 1)
+      return true
+    },
+    clearPendingQuestion(thread, requestID) {
+      if (!Array.isArray(thread?.pendingQuestions)) return false
+      const index = thread.pendingQuestions.findIndex((item) => item.requestID === requestID)
+      if (index === -1) return false
+      thread.pendingQuestions.splice(index, 1)
+      return true
+    },
     createThreadStream(sessionId) {
       return { sessionId, messages: [], pendingQuestions: [], pendingPermissions: [], status: { type: "idle" } }
     },
@@ -1341,6 +1353,62 @@ test("confirm delete session keeps the modal open with loading and inline errors
     global.document = previousDocument
     global.requestAnimationFrame = previousRequestAnimationFrame
     global.window.openworking = previousOpenworking
+  }
+})
+
+test("render keeps background permission cards but hides background question cards", () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const state = __test.state
+  const previousState = {
+    nav: state.nav,
+    projects: state.projects,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    sessionsByProject: state.sessionsByProject,
+    runtime: state.runtime,
+    threads: state.threads,
+    loading: state.loading,
+    commands: state.commands,
+    commandMenu: state.commandMenu
+  }
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  try {
+    Object.assign(state, {
+      nav: "session",
+      projects: [{ id: "proj_a", name: "Project A", path: "/tmp/proj-a" }],
+      activeProjectId: "proj_a",
+      activeSessionId: "active_session",
+      sessionsByProject: { proj_a: [{ id: "active_session", directory: "/tmp/proj-a" }] },
+      runtime: { status: "running", project: { id: "proj_a" }, sessionStatuses: {} },
+      threads: new Map([
+        ["active_session", { sessionId: "active_session", messages: [], pendingQuestions: [], pendingPermissions: [], status: { type: "idle" } }],
+        ["bg_session", {
+          sessionId: "bg_session",
+          messages: [],
+          pendingQuestions: [{ requestID: "q1", questions: [{ question: "Continue?", options: [{ label: "Yes", value: "yes" }] }] }],
+          pendingPermissions: [{ requestID: "p1", title: "Run bash", permission: "bash" }],
+          status: { type: "idle" }
+        }]
+      ]),
+      loading: false,
+      commands: [],
+      commandMenu: { open: false, query: "", index: 0 }
+    })
+
+    __test.render()
+
+    const html = document.getElementById("root").innerHTML
+    assert.doesNotMatch(html, /Continue\?/)
+    assert.match(html, /data-permission-session="bg_session"/)
+    assert.match(html, /Session: bg_session/)
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
   }
 })
 
