@@ -612,6 +612,82 @@ test("PPTX large raster image receives translated OCR overlay text", async () =>
   assert.match(slideXml, /<a:ext cx="280000" cy="70000"\/>/)
 })
 
+test("PPTX image OCR failure is non-fatal and still translates editable text", async () => {
+  const project = tempProject()
+  const input = path.join(project, "image-fails.pptx")
+  const image = solidPngBuffer(200, 120, 230, 240, 255)
+  const zip = new AdmZip()
+  zip.addFile("[Content_Types].xml", Buffer.from("<Types/>"))
+  zip.addFile("ppt/presentation.xml", Buffer.from("<p:presentation><p:sldSz cx=\"1000000\" cy=\"600000\"/></p:presentation>"))
+  zip.addFile("ppt/slides/slide1.xml", Buffer.from("<p:sld><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"title\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:txBody><a:p><a:r><a:t>Hello slide</a:t></a:r></a:p></p:txBody></p:sp><p:pic><p:nvPicPr><p:cNvPr id=\"3\" name=\"diagram\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId1\"/></p:blipFill><p:spPr><a:xfrm><a:off x=\"100000\" y=\"100000\"/><a:ext cx=\"700000\" cy=\"350000\"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"))
+  zip.addFile("ppt/slides/_rels/slide1.xml.rels", Buffer.from("<Relationships><Relationship Id=\"rId1\" Target=\"../media/image1.png\"/></Relationships>"))
+  zip.addFile("ppt/media/image1.png", image)
+  zip.writeZip(input)
+  let visionCalls = 0
+
+  // Editable text goes through translateSegments; the image goes through the
+  // real vision path, where the gateway always returns truncated JSON that
+  // cannot be salvaged (a single partial element).
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    {
+      gateway: { baseURL: "https://gateway.invalid", apiKey: "secret", model: "model" },
+      translateSegments: mockTranslation,
+      fetch: async () => {
+        visionCalls += 1
+        return gatewayResponse("{\"blocks\":[{\"text\":\"truncated mid str")
+      }
+    }
+  )
+
+  const translated = new AdmZip(result.metadata.artifacts[0].path)
+  const slideXml = translated.readAsText("ppt/slides/slide1.xml")
+  assert.equal(visionCalls, 3)
+  assert.match(slideXml, /VI Hello slide/)
+  assert.doesNotMatch(slideXml, /Translated image text/)
+  assert.equal(result.metadata.quality, "warning")
+  assert.match(result.metadata.warnings.join("\n"), /could not be auto-translated/)
+})
+
+test("PPTX vision retry escalates the output token cap when JSON is truncated", async () => {
+  const project = tempProject()
+  const input = path.join(project, "image-retry.pptx")
+  const image = solidPngBuffer(200, 120, 230, 240, 255)
+  const zip = new AdmZip()
+  zip.addFile("[Content_Types].xml", Buffer.from("<Types/>"))
+  zip.addFile("ppt/presentation.xml", Buffer.from("<p:presentation><p:sldSz cx=\"1000000\" cy=\"600000\"/></p:presentation>"))
+  zip.addFile("ppt/slides/slide1.xml", Buffer.from("<p:sld><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:pic><p:nvPicPr><p:cNvPr id=\"2\" name=\"diagram\"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed=\"rId1\"/></p:blipFill><p:spPr><a:xfrm><a:off x=\"100000\" y=\"100000\"/><a:ext cx=\"700000\" cy=\"350000\"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"))
+  zip.addFile("ppt/slides/_rels/slide1.xml.rels", Buffer.from("<Relationships><Relationship Id=\"rId1\" Target=\"../media/image1.png\"/></Relationships>"))
+  zip.addFile("ppt/media/image1.png", image)
+  zip.writeZip(input)
+  const maxTokensSeen = []
+  const systemPrompts = []
+
+  const result = await runtime.translateDocument(
+    { inputPath: input, targetLanguage: "Vietnamese" },
+    { directory: project },
+    {
+      gateway: { baseURL: "https://gateway.invalid", apiKey: "secret", model: "model" },
+      fetch: async (_url, request) => {
+        const body = JSON.parse(request.body)
+        maxTokensSeen.push(body.max_tokens)
+        systemPrompts.push(body.messages[0].content)
+        // First attempt truncates; the second (escalated) attempt succeeds.
+        if (maxTokensSeen.length < 2) return gatewayResponse("{\"blocks\":[{\"text\":\"truncated mid str")
+        return gatewayResponse(JSON.stringify({ blocks: [{ text: "Nội dung ảnh", x: 0.1, y: 0.2, width: 0.4, height: 0.2, kind: "shape-label" }] }))
+      }
+    }
+  )
+
+  const translated = new AdmZip(result.metadata.artifacts[0].path)
+  const slideXml = translated.readAsText("ppt/slides/slide1.xml")
+  assert.equal(maxTokensSeen.length, 2)
+  assert.ok(maxTokensSeen[1] > maxTokensSeen[0], "retry should raise the output token cap")
+  assert.match(systemPrompts[1], /at most \d+ of the most important regions/)
+  assert.match(slideXml, /<a:t>Nội dung ảnh<\/a:t>/)
+})
+
 test("PPTX small raster logos are not OCR translated", async () => {
   const project = tempProject()
   const input = path.join(project, "small-logo.pptx")
@@ -1153,6 +1229,39 @@ test("gateway JSON requests non-stream responses and parses response text", asyn
   )
 
   assert.deepEqual(result, { ok: true })
+})
+
+test("parseJsonContent salvages JSON truncated mid-string", () => {
+  const salvaged = runtime.parseJsonContent("{\"blocks\":[{\"text\":\"one\",\"x\":0},{\"text\":\"two\",\"x\":0.5},{\"text\":\"thr")
+  assert.deepEqual(salvaged, { blocks: [{ text: "one", x: 0 }, { text: "two", x: 0.5 }] })
+})
+
+test("parseJsonContent salvages segment arrays and strips code fences", () => {
+  const salvaged = runtime.parseJsonContent("```json\n{\"segments\":[{\"id\":\"1\",\"text\":\"xin chao\"},{\"id\":\"2\",\"text\":\"toi la")
+  assert.deepEqual(salvaged, { segments: [{ id: "1", text: "xin chao" }] })
+})
+
+test("parseJsonContent rethrows when nothing can be salvaged", () => {
+  assert.throws(() => runtime.parseJsonContent("{\"blocks\":[{\"text\":\"only par"), /JSON/)
+})
+
+test("gateway JSON sends a default output token cap and honors overrides", async () => {
+  const seen = []
+  const run = (options) => runtime.gatewayJson(
+    [{ role: "user", content: "Return JSON" }],
+    {
+      gateway: { baseURL: "https://gateway.invalid", apiKey: "secret", model: "model" },
+      ...options,
+      fetch: async (_url, request) => {
+        seen.push(JSON.parse(request.body).max_tokens)
+        return gatewayResponse(JSON.stringify({ ok: true }))
+      }
+    }
+  )
+  await run({})
+  await run({ maxTokens: 1234 })
+  assert.ok(Number.isFinite(seen[0]) && seen[0] > 0, "a default max_tokens should be sent")
+  assert.equal(seen[1], 1234)
 })
 
 test("gateway JSON rejects stream responses with a clear error", async () => {

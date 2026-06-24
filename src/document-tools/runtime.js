@@ -26,6 +26,10 @@ const XLSX_MAX_BATCH_CHARS = 4000
 const XLSX_MAX_BATCH_SEGMENTS = 80
 const MARKDOWN_MAX_BATCH_CHARS = 4000
 const MARKDOWN_MAX_BATCH_SEGMENTS = 80
+const GATEWAY_MAX_TOKENS = 8192
+const VISION_MAX_TOKENS = 4096
+const VISION_RETRY_MAX_TOKENS = 8192
+const VISION_RETRY_MAX_BLOCKS = 24
 const PDF_MIN_FONT_SIZE = 4
 const PDF_VISION_MIN_FONT_SIZE = 3
 const PDF_VISION_MAX_FONT_SIZE = 12
@@ -92,9 +96,55 @@ function gatewayConfig() {
   return { apiKey, baseURL, model }
 }
 
+// Repair a JSON object whose top-level array (e.g. {"blocks":[...]} or
+// {"segments":[...]}) was truncated mid-element by an output token limit. We
+// scan the text tracking string/escape/depth state, find the end of the last
+// complete array element, drop everything after it, and re-close the array and
+// object. Returns null when the text is not a salvageable truncated array.
+function salvageTruncatedJson(text) {
+  let inString = false
+  let escaped = false
+  let depth = 0
+  let arrayDepth = -1
+  let lastElementEnd = -1
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === "\\") escaped = true
+      else if (char === "\"") inString = false
+      continue
+    }
+    if (char === "\"") inString = true
+    else if (char === "{" || char === "[") {
+      if (char === "[" && arrayDepth === -1) arrayDepth = depth
+      depth += 1
+    } else if (char === "}" || char === "]") {
+      depth -= 1
+      // A closed element of the top-level array ends one level above the array.
+      if (depth === arrayDepth + 1 && char === "}") lastElementEnd = index
+    } else if (char === "," && depth === arrayDepth + 1) {
+      lastElementEnd = index - 1
+    }
+  }
+  if (arrayDepth === -1 || lastElementEnd === -1) return null
+  const repaired = `${text.slice(0, lastElementEnd + 1)}]${"}".repeat(arrayDepth)}`
+  try {
+    return JSON.parse(repaired)
+  } catch (_error) {
+    return null
+  }
+}
+
 function parseJsonContent(value) {
   const text = String(value || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")
-  return JSON.parse(text)
+  try {
+    return JSON.parse(text)
+  } catch (error) {
+    const salvaged = salvageTruncatedJson(text)
+    if (salvaged) return salvaged
+    throw error
+  }
 }
 
 function responseContentType(response) {
@@ -115,7 +165,8 @@ async function gatewayJson(messages, options = {}) {
       messages,
       temperature: 0,
       stream: false,
-      response_format: { type: "json_object" }
+      response_format: { type: "json_object" },
+      max_tokens: options.maxTokens || GATEWAY_MAX_TOKENS
     })
   })
   if (!response.ok) {
@@ -511,6 +562,33 @@ function normalizePptxVisionBlock(block, picture, index) {
   }
 }
 
+// Run a vision request with escalating retries. Unlike a plain re-send, each
+// retry actually changes the request: it raises the output token cap and asks
+// the model to return fewer, larger regions so the JSON stays complete. This
+// targets the common failure where a dense diagram overflows the output limit
+// and the JSON is truncated mid-string ("Unterminated string").
+async function requestVisionBlocks(baseMessages, options, label) {
+  let lastError
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const messages = attempt === 0 ? baseMessages : [
+      {
+        role: "system",
+        content: `${baseMessages[0].content} Return at most ${VISION_RETRY_MAX_BLOCKS} of the most important regions, merging nearby lines into one block. Keep the JSON complete and valid; never stop mid-object.`
+      },
+      ...baseMessages.slice(1)
+    ]
+    const maxTokens = attempt === 0 ? VISION_MAX_TOKENS : VISION_RETRY_MAX_TOKENS
+    try {
+      const payload = await gatewayJson(messages, { ...options, maxTokens })
+      if (!Array.isArray(payload.blocks)) throw new Error("Gateway response omitted vision blocks.")
+      return payload.blocks
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw new Error(`Translation gateway returned invalid ${label} after 3 attempts: ${lastError.message}`)
+}
+
 async function pptxVisionBlocks(image, picture, args, options) {
   if (options.pptxVisionBlocks) {
     return dedupePdfBlocks(options.pptxVisionBlocks(picture, args).map((block, index) => normalizePptxVisionBlock(block, picture, index)).filter(Boolean))
@@ -518,7 +596,7 @@ async function pptxVisionBlocks(image, picture, args, options) {
   const messages = [
     {
       role: "system",
-      content: "Identify logical visible text regions in this presentation image and translate them. Return JSON only as {\"blocks\":[{\"text\":\"translated text\",\"x\":0.0,\"y\":0.0,\"width\":0.0,\"height\":0.0,\"kind\":\"shape-label\"}]}. Coordinates are normalized 0..1 with a top-left origin relative to the image. Use kind as one of shape-label, callout, paragraph, connector-label. Ignore logos, decorative marks, and non-content branding. Do not return commentary."
+      content: "Identify logical visible text regions in this presentation image and translate them. Return JSON only as {\"blocks\":[{\"text\":\"translated text\",\"x\":0.0,\"y\":0.0,\"width\":0.0,\"height\":0.0,\"kind\":\"shape-label\"}]}. Coordinates are normalized 0..1 with a top-left origin relative to the image. Use kind as one of shape-label, callout, paragraph, connector-label. Prefer one block per logical label, callout, paragraph, or connector label rather than one block per glyph line. Omit blocks with no translatable text. Ignore logos, decorative marks, and non-content branding. Do not return commentary."
     },
     {
       role: "user",
@@ -528,19 +606,7 @@ async function pptxVisionBlocks(image, picture, args, options) {
       ]
     }
   ]
-  let blocks
-  let lastError
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const payload = await gatewayJson(messages, options)
-      if (!Array.isArray(payload.blocks)) throw new Error("Gateway response omitted vision blocks.")
-      blocks = payload.blocks
-      break
-    } catch (error) {
-      lastError = error
-    }
-  }
-  if (!blocks) throw new Error(`Translation gateway returned invalid PPTX image JSON after 3 attempts: ${lastError.message}`)
+  const blocks = await requestVisionBlocks(messages, options, "PPTX image JSON")
   return dedupePdfBlocks(blocks.map((block, index) => normalizePptxVisionBlock(block, picture, index)).filter(Boolean))
 }
 
@@ -574,6 +640,9 @@ function insertPptxOverlayShapes(slideXml, shapes) {
 async function addPptxImageOverlays(zip, args, options) {
   const slideSize = pptxSlideSize(zip)
   let overlayCount = 0
+  let pictureCount = 0
+  let failedPictures = 0
+  let lastError
   for (const entry of zip.getEntries().filter((candidate) => PPTX_SLIDE_PART.test(candidate.entryName))) {
     const slidePart = entry.entryName
     let slideXml = entry.getData().toString("utf8")
@@ -585,7 +654,19 @@ async function addPptxImageOverlays(zip, args, options) {
     for (const picture of pictures) {
       const media = zip.getEntry(picture.target)
       if (!media) continue
-      const blocks = await pptxVisionBlocks(media.getData(), picture, args, options)
+      pictureCount += 1
+      // Image OCR is best-effort: a single image that cannot be translated
+      // (e.g. the gateway truncates its JSON) must not discard the whole deck,
+      // including the editable slide text we already translated. Skip it and
+      // surface a warning instead.
+      let blocks
+      try {
+        blocks = await pptxVisionBlocks(media.getData(), picture, args, options)
+      } catch (error) {
+        failedPictures += 1
+        lastError = error
+        continue
+      }
       for (const block of blocks) {
         const shape = pptxOverlayShapeXml(block, nextId++)
         if (shape) {
@@ -597,7 +678,10 @@ async function addPptxImageOverlays(zip, args, options) {
     slideXml = insertPptxOverlayShapes(slideXml, shapes)
     entry.setData(Buffer.from(slideXml, "utf8"))
   }
-  return overlayCount
+  const warnings = failedPictures
+    ? [`${failedPictures} slide image${failedPictures === 1 ? "" : "s"} could not be auto-translated and ${failedPictures === 1 ? "was" : "were"} left as-is${lastError ? `: ${lastError.message}` : "."}`]
+    : []
+  return { overlayCount, pictureCount, warnings }
 }
 
 async function translatePptx(inputPath, outputPath, args, options) {
@@ -612,18 +696,21 @@ async function translatePptx(inputPath, outputPath, args, options) {
     })
     replaceOoxmlSegments(parts, DRAWING_TEXT_NODE, translated)
   }
-  const imageOverlayCount = await addPptxImageOverlays(zip, args, options)
-  if (!segments.length && !imageOverlayCount) throw new Error("PPTX did not contain translatable presentation text nodes.")
+  const { overlayCount: imageOverlayCount, pictureCount, warnings: imageWarnings } = await addPptxImageOverlays(zip, args, options)
+  if (!segments.length && !imageOverlayCount && !pictureCount) throw new Error("PPTX did not contain translatable presentation text nodes.")
   zip.writeZip(outputPath)
 
   const validated = new AdmZip(outputPath)
   if (!validated.getEntry("ppt/presentation.xml")) throw new Error("Generated PPTX is missing ppt/presentation.xml.")
   const names = validated.getEntries().map((entry) => entry.entryName)
-  const warnings = warningsForParts(names, [
-    ["Chart text may require manual translation review.", (name) => name.startsWith("ppt/charts/")],
-    ["SmartArt text may require manual translation review.", (name) => name.startsWith("ppt/diagrams/")],
-    ["Embedded slide objects may require manual translation review.", (name) => name.startsWith("ppt/embeddings/")]
-  ])
+  const warnings = [
+    ...imageWarnings,
+    ...warningsForParts(names, [
+      ["Chart text may require manual translation review.", (name) => name.startsWith("ppt/charts/")],
+      ["SmartArt text may require manual translation review.", (name) => name.startsWith("ppt/diagrams/")],
+      ["Embedded slide objects may require manual translation review.", (name) => name.startsWith("ppt/embeddings/")]
+    ])
+  ]
   return { warnings }
 }
 
@@ -1188,7 +1275,7 @@ async function visionBlocks(pdfium, document, page, args, options) {
   const messages = [
     {
       role: "system",
-      content: "Identify logical visible text regions in this document page image and translate them. Return JSON only as {\"blocks\":[{\"text\":\"translated text\",\"x\":0.0,\"y\":0.0,\"width\":0.0,\"height\":0.0,\"kind\":\"shape-label\"}]}. Coordinates are normalized 0..1 with a top-left origin. Use kind as one of shape-label, callout, paragraph, connector-label. Prefer one block per logical label, callout, paragraph, table cell, or connector label rather than one block per glyph line. Ignore logos, page numbers, copyright notices, decorative branding, and text already covered by existingTextRegions. Do not return commentary."
+      content: "Identify logical visible text regions in this document page image and translate them. Return JSON only as {\"blocks\":[{\"text\":\"translated text\",\"x\":0.0,\"y\":0.0,\"width\":0.0,\"height\":0.0,\"kind\":\"shape-label\"}]}. Coordinates are normalized 0..1 with a top-left origin. Use kind as one of shape-label, callout, paragraph, connector-label. Prefer one block per logical label, callout, paragraph, table cell, or connector label rather than one block per glyph line. Omit blocks with no translatable text. Ignore logos, page numbers, copyright notices, decorative branding, and text already covered by existingTextRegions. Do not return commentary."
     },
     {
       role: "user",
@@ -1198,19 +1285,7 @@ async function visionBlocks(pdfium, document, page, args, options) {
       ]
     }
   ]
-  let blocks
-  let lastError
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try {
-      const payload = await gatewayJson(messages, options)
-      if (!Array.isArray(payload.blocks)) throw new Error("Gateway response omitted vision blocks.")
-      blocks = payload.blocks
-      break
-    } catch (error) {
-      lastError = error
-    }
-  }
-  if (!blocks) throw new Error(`Translation gateway returned invalid vision JSON after 3 attempts: ${lastError.message}`)
+  const blocks = await requestVisionBlocks(messages, options, "vision JSON")
   return dedupePdfBlocks(blocks.map((block, index) => normalizeVisionBlock(block, page, index)).filter(Boolean))
 }
 
@@ -1409,7 +1484,16 @@ async function translatePdf(inputPath, outputPath, args, options) {
       const hasReliableTextLayer = sourceBlocks.map((block) => block.text).join("").trim().length >= 5
       const needsVisualOcr = !hasReliableTextLayer || pdfPageVisualContentRatio(page) >= PDF_VISUAL_OCR_MIN_RATIO
       if (!needsVisualOcr) continue
-      const visualBlocks = suppressVisionBlockOverlaps(await visionBlocks(pdfium, document, page, args, options), sourceBlocks)
+      // Vision OCR is best-effort: a page whose JSON the gateway truncates must
+      // not abort the whole document. Fall back to the text layer when present,
+      // otherwise leave the page untranslated and warn.
+      let visualBlocks
+      try {
+        visualBlocks = suppressVisionBlockOverlaps(await visionBlocks(pdfium, document, page, args, options), sourceBlocks)
+      } catch (error) {
+        warnings.push(`Page ${page.pageIndex + 1} image text could not be auto-translated and was left as-is: ${error.message}`)
+        continue
+      }
       if (hasReliableTextLayer) {
         page.blocks = [...sourceBlocks, ...visualBlocks]
       } else {
