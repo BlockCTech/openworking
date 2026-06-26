@@ -6,7 +6,12 @@ contextBridge.exposeInMainWorld("openworking", {
     add: () => ipcRenderer.invoke("projects:add"),
     remove: (projectId) => ipcRenderer.invoke("projects:remove", projectId),
     rename: (projectId, name) => ipcRenderer.invoke("projects:rename", projectId, name),
-    touch: (projectId) => ipcRenderer.invoke("projects:touch", projectId)
+    touch: (projectId) => ipcRenderer.invoke("projects:touch", projectId),
+    setPinned: (projectId, pinned) => ipcRenderer.invoke("projects:setPinned", projectId, pinned)
+  },
+  pins: {
+    list: () => ipcRenderer.invoke("pins:list"),
+    set: (sessionId, pinned, meta) => ipcRenderer.invoke("pins:set", { sessionId, pinned, meta })
   },
   config: {
     get: () => ipcRenderer.invoke("config:get"),
@@ -26,9 +31,14 @@ contextBridge.exposeInMainWorld("openworking", {
     setEnabled: (name, enabled) => ipcRenderer.invoke("mcp:setEnabled", { name, enabled }),
     remove: (name) => ipcRenderer.invoke("mcp:remove", name),
     status: () => ipcRenderer.invoke("mcp:status"),
+    connect: (name) => ipcRenderer.invoke("mcp:connect", name),
     authenticate: (name) => ipcRenderer.invoke("mcp:authenticate", name),
     clearAuth: (name) => ipcRenderer.invoke("mcp:clearAuth", name),
     openDocs: (url) => ipcRenderer.invoke("mcp:openDocs", url)
+  },
+  memory: {
+    get: () => ipcRenderer.invoke("memory:get"),
+    save: (scope, content) => ipcRenderer.invoke("memory:save", { scope, content })
   },
   attachments: {
     pick: () => ipcRenderer.invoke("attachments:pick"),
@@ -71,6 +81,7 @@ contextBridge.exposeInMainWorld("openworking", {
     start: (payload) => ipcRenderer.invoke("runtime:start", payload?.project ? payload : { project: payload }),
     stop: () => ipcRenderer.invoke("runtime:stop"),
     listSessions: () => ipcRenderer.invoke("runtime:listSessions"),
+    listSessionsForDirectory: (directory) => ipcRenderer.invoke("runtime:listSessionsForDirectory", { directory }),
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     createSession: (payload) => ipcRenderer.invoke("runtime:createSession", payload),
     renameSession: (payload) => ipcRenderer.invoke("runtime:renameSession", payload),
@@ -78,6 +89,7 @@ contextBridge.exposeInMainWorld("openworking", {
     sendCommand: (payload) => ipcRenderer.invoke("runtime:sendCommand", payload),
     abortSession: (payload) => ipcRenderer.invoke("runtime:abortSession", payload),
     deleteSession: (payload) => ipcRenderer.invoke("runtime:deleteSession", payload),
+    forkSession: (payload) => ipcRenderer.invoke("runtime:forkSession", payload),
     listMessages: (payload) => ipcRenderer.invoke("runtime:listMessages", payload),
     answerQuestion: (payload) => ipcRenderer.invoke("runtime:answerQuestion", payload),
     rejectQuestion: (payload) => ipcRenderer.invoke("runtime:rejectQuestion", payload),

@@ -9,7 +9,9 @@ const {
   fileRefsFromBacktickPaths,
   hasRunningTool,
   hydrateThread,
+  LIVE_STREAM_GRACE_MS,
   messageCopyText,
+  needsThreadRehydration,
   userMessageFileRefs,
   messageText,
   removeOptimisticUser,
@@ -930,6 +932,82 @@ test("threadIsBusy reflects busy/retry status", () => {
   thread.status = { type: "idle" }
   assert.equal(threadIsBusy(thread), false)
   assert.equal(threadIsBusy(undefined), false)
+})
+
+test("needsThreadRehydration rehydrates idle, stale, and stuck threads but preserves live streams", () => {
+  const idle = createThreadStream("sess_idle")
+  assert.equal(needsThreadRehydration(idle, { type: "busy" }), true)
+  assert.equal(needsThreadRehydration(undefined, { type: "idle" }), true)
+
+  const emptyBusy = createThreadStream("sess_empty")
+  emptyBusy.status = { type: "busy" }
+  assert.equal(needsThreadRehydration(emptyBusy, { type: "busy" }), false)
+
+  const staleBusy = createThreadStream("sess_stale")
+  addOptimisticUser(staleBusy, "Hello")
+  staleBusy.status = { type: "busy" }
+  assert.equal(needsThreadRehydration(staleBusy, { type: "idle" }), true)
+
+  const stuckBusy = createThreadStream("sess_stuck")
+  addOptimisticUser(stuckBusy, "Hello")
+  stuckBusy.status = { type: "busy" }
+  assert.equal(needsThreadRehydration(stuckBusy, { type: "busy" }), false)
+
+  const liveStream = createThreadStream("sess_live")
+  addOptimisticUser(liveStream, "Hello")
+  liveStream.status = { type: "busy" }
+  applyThreadEvent(liveStream, {
+    type: "message.part.updated",
+    sessionID: "sess_live",
+    part: { id: "part_1", messageID: "msg_a", type: "text", text: "Working on it" }
+  })
+  assert.equal(needsThreadRehydration(liveStream, { type: "busy" }, liveStream.lastEventAt + LIVE_STREAM_GRACE_MS - 1), false)
+  assert.equal(needsThreadRehydration(liveStream, { type: "busy" }, liveStream.lastEventAt + LIVE_STREAM_GRACE_MS + 1), true)
+
+  const stalePartial = createThreadStream("sess_partial")
+  addOptimisticUser(stalePartial, "Hello")
+  stalePartial.status = { type: "busy" }
+  applyThreadEvent(stalePartial, {
+    type: "message.part.updated",
+    sessionID: "sess_partial",
+    part: { id: "part_1", messageID: "msg_a", type: "text", text: "Partial answer" }
+  })
+  stalePartial.lastStreamEventAt = Date.now() - LIVE_STREAM_GRACE_MS - 1
+  stalePartial.lastAssistantOutputAt = stalePartial.lastStreamEventAt
+  stalePartial.lastEventAt = stalePartial.lastStreamEventAt
+  assert.equal(needsThreadRehydration(stalePartial, { type: "busy" }, stalePartial.lastEventAt + LIVE_STREAM_GRACE_MS + 1), true)
+
+  const liveTool = createThreadStream("sess_tool")
+  addOptimisticUser(liveTool, "Read config")
+  liveTool.status = { type: "busy" }
+  applyThreadEvent(liveTool, {
+    type: "message.part.updated",
+    sessionID: "sess_tool",
+    part: {
+      id: "part_tool",
+      messageID: "msg_tool",
+      type: "tool",
+      tool: "read",
+      state: { status: "running", input: { filePath: "src/index.js" } }
+    }
+  })
+  assert.equal(needsThreadRehydration(liveTool, { type: "busy" }, liveTool.lastEventAt + LIVE_STREAM_GRACE_MS + 1), false)
+
+  const liveQuestion = createThreadStream("sess_question")
+  addOptimisticUser(liveQuestion, "Choose one")
+  liveQuestion.status = { type: "busy" }
+  applyThreadEvent(liveQuestion, {
+    type: "message.part.updated",
+    sessionID: "sess_question",
+    part: { id: "part_q", messageID: "msg_q", type: "text", text: "Need your input" }
+  })
+  applyThreadEvent(liveQuestion, {
+    type: "question.asked",
+    sessionID: "sess_question",
+    requestID: "q1",
+    question: { title: "Pick", questions: [] }
+  })
+  assert.equal(needsThreadRehydration(liveQuestion, { type: "busy" }, liveQuestion.lastEventAt + LIVE_STREAM_GRACE_MS + 1), false)
 })
 
 // Models the renderer's per-session routing: one thread per session, kept live

@@ -6,7 +6,7 @@ const os = require("node:os")
 const path = require("node:path")
 const { pathToFileURL } = require("node:url")
 const AdmZip = require("adm-zip")
-const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, resolveUserPath, translationGatewayEnv } = require("../src/runtime/process-manager")
+const { RuntimeProcessManager, buildPromptParts, projectMessagePart, projectRuntimeEvent, projectToolMetadata, resolveRuntimeBin, resolveUserPath, pathHasExecutable, translationGatewayEnv } = require("../src/runtime/process-manager")
 
 test("translation gateway env resolves managed config without exposing extra provider fields", () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-gateway-"))
@@ -60,6 +60,38 @@ test("resolveUserPath caches and returns the same value until forced", async () 
   } finally {
     process.env.PATH = originalPath
     await resolveUserPath({ force: true })
+  }
+})
+
+test("resolveUserPath includes a fallback dir holding npx even when the login shell yields nothing", async () => {
+  // The login shell can time out / error on a heavy ~/.zshrc and return []. As long as the merged
+  // PATH still contains a dir with `npx`, local stdio MCP servers (e.g. `npx backlog-mcp-server`)
+  // can be spawned. Simulate that by putting a dir that holds an executable `npx` onto the PATH.
+  const originalPath = process.env.PATH
+  const npxDir = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-npx-"))
+  fs.writeFileSync(path.join(npxDir, "npx"), "#!/bin/sh\n", { mode: 0o755 })
+  try {
+    process.env.PATH = npxDir
+    const resolved = await resolveUserPath({ force: true })
+    const parts = resolved.split(path.delimiter)
+    assert.ok(parts.includes(npxDir), "fallback dir holding npx must survive into the resolved PATH")
+  } finally {
+    process.env.PATH = originalPath
+    fs.rmSync(npxDir, { recursive: true, force: true })
+    await resolveUserPath({ force: true })
+  }
+})
+
+test("pathHasExecutable detects an executable on the PATH and reports its absence", () => {
+  const npxDir = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-hasexec-"))
+  fs.writeFileSync(path.join(npxDir, "npx"), "#!/bin/sh\n", { mode: 0o755 })
+  try {
+    const withNpx = [npxDir, "/no/such/dir"].join(path.delimiter)
+    assert.equal(pathHasExecutable(withNpx, "npx"), true)
+    assert.equal(pathHasExecutable("/no/such/dir", "npx"), false)
+    assert.equal(pathHasExecutable("", "npx"), false)
+  } finally {
+    fs.rmSync(npxDir, { recursive: true, force: true })
   }
 })
 
@@ -370,10 +402,11 @@ test("runtime binary resolves to bundled opencode dependency by default", () => 
   delete process.env.OPENCODE_BIN
 
   try {
-    assert.equal(
-      resolveRuntimeBin(),
-      path.join(__dirname, "..", "node_modules", "opencode-ai", "bin", "opencode.exe")
-    )
+    const runtimePlatform = process.platform === "win32" ? "windows" : process.platform
+    const executable = process.platform === "win32" ? "opencode.exe" : "opencode"
+    const platformRuntime = path.join(__dirname, "..", "node_modules", `opencode-${runtimePlatform}-${process.arch}`, "bin", executable)
+    const wrapperRuntime = path.join(__dirname, "..", "node_modules", "opencode-ai", "bin", "opencode.exe")
+    assert.equal(resolveRuntimeBin(), fs.existsSync(platformRuntime) ? platformRuntime : wrapperRuntime)
   } finally {
     if (previous === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
     else process.env.OPENWORKING_RUNTIME_BIN = previous
@@ -426,6 +459,7 @@ const capture = {
   cwd: process.cwd(),
   config: process.env.OPENCODE_CONFIG,
   configDir: process.env.OPENCODE_CONFIG_DIR,
+  xdgConfigHome: process.env.XDG_CONFIG_HOME,
   dataHome: process.env.XDG_DATA_HOME,
   stateHome: process.env.XDG_STATE_HOME,
   cacheHome: process.env.XDG_CACHE_HOME,
@@ -461,6 +495,12 @@ const server = http.createServer((req, res) => {
     save()
     res.end(JSON.stringify({ ok: true }))
   })
+  if (req.url.startsWith("/session?") && req.method === "GET") {
+    // OpenCode GET /session is directory-scoped via the directory query param.
+    const dir = new URL(req.url, "http://x").searchParams.get("directory")
+    const scoped = dir ? sessions.filter((s) => s.directory === dir) : sessions
+    return res.end(JSON.stringify(scoped))
+  }
   if (req.url === "/session" && req.method === "GET") return res.end(JSON.stringify(sessions))
   if (req.url === "/session" && req.method === "POST") return body(req, data => {
     capture.created = data
@@ -468,12 +508,20 @@ const server = http.createServer((req, res) => {
     save()
     res.end(JSON.stringify(sessions[0]))
   })
-  if (req.url === "/session/sess_new/message?limit=100") {
+  if (req.url.startsWith("/session/sess_new/message?")) {
     return res.end(JSON.stringify([{
       info: { id: "msg_ready", sessionID: "sess_new", role: "assistant" },
       parts: [
         { id: "part_ready", sessionID: "sess_new", messageID: "msg_ready", type: "text", text: "Ready" },
         { id: "part_file", sessionID: "sess_new", messageID: "msg_ready", type: "file", filename: "report.pdf", mime: "application/pdf", url: "file:///private/report.pdf" }
+      ]
+    }]))
+  }
+  if (req.url === "/session/sess_existing/message?limit=100") {
+    return res.end(JSON.stringify([{
+      info: { id: "msg_existing", sessionID: "sess_existing", role: "assistant" },
+      parts: [
+        { id: "part_existing", sessionID: "sess_existing", messageID: "msg_existing", type: "text", text: "Existing session message" }
       ]
     }]))
   }
@@ -518,6 +566,7 @@ process.on("SIGTERM", () => process.exit(0))
     assert.equal(captured.cwd, fs.realpathSync(projectPath))
     assert.equal(captured.config, configPath)
     assert.equal(captured.configDir, path.join(temp, "profile"))
+    assert.equal(captured.xdgConfigHome, path.join(temp, "profile", "xdg-config"))
     assert.equal(captured.dataHome, path.join(temp, "profile", "data"))
     assert.equal(captured.stateHome, path.join(temp, "profile", "state"))
     assert.equal(captured.cacheHome, path.join(temp, "profile", "cache"))
@@ -532,6 +581,14 @@ process.on("SIGTERM", () => process.exit(0))
 
     assert.equal((await manager.openProject({ project })).runtime.pid, firstPid)
     assert.deepEqual(await manager.listSessions(), [
+      { id: "sess_existing", title: "Existing session", directory: fs.realpathSync(projectPath) }
+    ])
+    // listSessionsForDirectory passes ?directory= so the renderer can populate any project's
+    // sidebar history from this one server. Each call returns only that directory's sessions.
+    assert.deepEqual(await manager.listSessionsForDirectory("/tmp/other-project"), [
+      { id: "sess_other", title: "Other project", directory: "/tmp/other-project" }
+    ])
+    assert.deepEqual(await manager.listSessionsForDirectory(fs.realpathSync(projectPath)), [
       { id: "sess_existing", title: "Existing session", directory: fs.realpathSync(projectPath) }
     ])
 
@@ -550,6 +607,9 @@ process.on("SIGTERM", () => process.exit(0))
       agent: "plan",
       model: { providerID: "gateway", modelID: "gpt-4o-mini" }
     })
+    assert.equal(manager.snapshot().activeSessionId, "sess_new")
+    await manager.listMessages({ sessionId: "sess_existing" })
+    assert.equal(manager.snapshot().activeSessionId, "sess_new")
 
     const afterPrompt = JSON.parse(fs.readFileSync(capturePath, "utf8"))
     assert.deepEqual(afterPrompt.created, { title: "New session" })
@@ -730,6 +790,73 @@ test("runtime manager deletes a session through opencode", async () => {
     })
     assert.equal(manager.snapshot().activeSessionId, null)
     assert.equal(Object.prototype.hasOwnProperty.call(manager.sessionStatuses, "sess_new"), false)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("runtime manager forks a session through opencode", async () => {
+  const captured = []
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.url === "/session/sess_parent/fork?directory=%2Ftmp%2Fother" && req.method === "POST") {
+      let raw = ""
+      req.on("data", (chunk) => {
+        raw += chunk
+      })
+      req.on("end", () => {
+        captured.push({ url: req.url, method: req.method, authorization: req.headers.authorization, raw })
+        res.end(JSON.stringify({ id: "sess_fork_mid", title: "Forked mid", directory: "/tmp/other" }))
+      })
+      return
+    }
+    if (req.url === "/session/sess_parent/fork" && req.method === "POST") {
+      let raw = ""
+      req.on("data", (chunk) => {
+        raw += chunk
+      })
+      req.on("end", () => {
+        captured.push({ url: req.url, method: req.method, authorization: req.headers.authorization, raw })
+        res.end(JSON.stringify({ id: "sess_fork_full", title: "Forked full" }))
+      })
+      return
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const port = server.address().port
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-fork",
+    emit() {}
+  })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activeSessionId = "sess_parent"
+  manager.state.runtime = {
+    serverUrl: `http://127.0.0.1:${port}`,
+    auth: { username: "opencode", password: "pw" }
+  }
+
+  try {
+    assert.equal((await manager.forkSession({ sessionId: "sess_parent", messageId: "msg_next", directory: "/tmp/other" })).id, "sess_fork_mid")
+    assert.equal(manager.snapshot().activeSessionId, "sess_fork_mid")
+    assert.equal((await manager.forkSession({ sessionId: "sess_parent" })).id, "sess_fork_full")
+    assert.equal(manager.snapshot().activeSessionId, "sess_fork_full")
+    assert.deepEqual(captured, [
+      {
+        url: "/session/sess_parent/fork?directory=%2Ftmp%2Fother",
+        method: "POST",
+        authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`,
+        raw: JSON.stringify({ messageID: "msg_next" })
+      },
+      {
+        url: "/session/sess_parent/fork",
+        method: "POST",
+        authorization: `Basic ${Buffer.from("opencode:pw").toString("base64")}`,
+        raw: ""
+      }
+    ])
   } finally {
     await new Promise((resolve) => server.close(resolve))
   }
@@ -917,6 +1044,101 @@ test("reload is a no-op when no runtime is running", async () => {
   assert.equal(manager.child, null)
 })
 
+test("concurrent openProject calls for the same project share the in-flight start", async () => {
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-concurrent-start",
+    emit() {}
+  })
+  const project = { id: "proj_local", name: "Local", path: "/tmp/openworking-runtime-concurrent-start/project" }
+  let calls = 0
+  let resolveStart
+  manager._openProject = async ({ project: requestedProject }) => {
+    calls += 1
+    await new Promise((resolve) => { resolveStart = resolve })
+    manager.child = {}
+    manager.state.status = "running"
+    manager.state.project = requestedProject
+    manager.state.runtime = { cwd: requestedProject.path }
+    return manager.snapshot()
+  }
+
+  const first = manager.openProject({ project })
+  const second = manager.openProject({ project })
+  resolveStart()
+  const [firstSnapshot, secondSnapshot] = await Promise.all([first, second])
+
+  assert.equal(calls, 1)
+  assert.equal(firstSnapshot.status, "running")
+  assert.equal(secondSnapshot.status, "running")
+})
+
+test("concurrent openProject calls retry serially after a failed start", async () => {
+  const manager = new RuntimeProcessManager({
+    userDataPath: "/tmp/openworking-runtime-concurrent-retry",
+    emit() {}
+  })
+  const project = { id: "proj_local", name: "Local", path: "/tmp/openworking-runtime-concurrent-retry/project" }
+  const resolvers = []
+  let calls = 0
+  manager._openProject = async ({ project: requestedProject }) => {
+    calls += 1
+    const callNumber = calls
+    await new Promise((resolve) => { resolvers.push(resolve) })
+    if (callNumber === 1) throw new Error("first start failed")
+    manager.child = {}
+    manager.state.status = "running"
+    manager.state.project = requestedProject
+    manager.state.runtime = { cwd: requestedProject.path }
+    return manager.snapshot()
+  }
+
+  const first = manager.openProject({ project }).catch((error) => error.message)
+  const second = manager.openProject({ project })
+  const third = manager.openProject({ project })
+  resolvers[0]()
+  while (resolvers.length < 2) await new Promise((resolve) => setTimeout(resolve, 0))
+
+  assert.equal(calls, 2)
+  resolvers[1]()
+  const [firstResult, secondSnapshot, thirdSnapshot] = await Promise.all([first, second, third])
+
+  assert.equal(firstResult, "first start failed")
+  assert.equal(calls, 2)
+  assert.equal(secondSnapshot.status, "running")
+  assert.equal(thirdSnapshot.status, "running")
+})
+
+test("runtime startup failures include recent child stderr", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-startup-fail-"))
+  const projectPath = path.join(temp, "project")
+  fs.mkdirSync(projectPath)
+  const fakeRuntimePath = path.join(temp, "fake-opencode.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+console.error("fatal startup detail")
+process.exit(2)
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath: path.join(temp, "profile", "opencode.json") },
+    emit() {}
+  })
+
+  try {
+    await assert.rejects(
+      manager.openProject({ project: { id: "proj_local", name: "Local", path: projectPath } }),
+      /fatal startup detail/
+    )
+    assert.match(manager.snapshot().lastError, /fatal startup detail/)
+  } finally {
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+  }
+})
+
 test("runtime manager projects stream events independently from the diagnostic timeline", () => {
   const emitted = []
   const manager = new RuntimeProcessManager({
@@ -982,6 +1204,7 @@ test("runtime manager projects stream events independently from the diagnostic t
   assert.deepEqual(manager.snapshot().activeSessionStatus, { type: "busy" })
   assert.equal(manager.snapshot().activity, "running")
   assert.equal(manager.snapshot().timeline.length, 300)
+  assert.ok(manager.snapshot().logs.some((entry) => entry.message === "[Tool] Tool read completed successfully."))
   assert.deepEqual(stream[1], {
     type: "message.part.updated",
     sessionID: "sess_active",
@@ -1128,6 +1351,60 @@ function readyManager(serverUrl) {
   }
   return manager
 }
+
+test("reads wait for an in-flight restart instead of throwing 'Runtime is not running'", async () => {
+  let served = 0
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.method === "GET" && req.url.startsWith("/session/sess_x/message")) {
+      served += 1
+      return res.end(JSON.stringify([]))
+    }
+    res.writeHead(404); res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  // Simulate the stop→spawn window: not yet running, with a lifecycle op that will flip to running.
+  manager.state.status = "starting"
+  manager.child = null
+  let resolveLifecycle
+  manager.lifecycle = new Promise((resolve) => { resolveLifecycle = resolve })
+  try {
+    const pending = manager.listMessages({ sessionId: "sess_x" }) // issued mid-restart
+    // Hasn't thrown; it's waiting. Now finish the "restart".
+    manager.state.status = "running"
+    manager.child = {}
+    resolveLifecycle()
+    await pending // resolves instead of throwing
+    assert.equal(served, 1)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("listMessages forwards a directory query so a cross-project chat can be viewed without a restart", async () => {
+  let capturedUrl = null
+  const server = http.createServer((req, res) => {
+    res.setHeader("Content-Type", "application/json")
+    if (req.method === "GET" && req.url.startsWith("/session/sess_x/message")) {
+      capturedUrl = req.url
+      return res.end(JSON.stringify([]))
+    }
+    res.writeHead(404)
+    res.end(JSON.stringify({ error: "not found" }))
+  })
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const manager = readyManager(`http://127.0.0.1:${server.address().port}`)
+  try {
+    await manager.listMessages({ sessionId: "sess_x", directory: "/Users/me/other-project" })
+    assert.match(capturedUrl, /directory=%2FUsers%2Fme%2Fother-project/)
+    // Without a directory it must NOT append the param (unchanged behavior for the active project).
+    await manager.listMessages({ sessionId: "sess_x" })
+    assert.equal(capturedUrl.includes("directory="), false)
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
 
 test("answerQuestion posts to the non-session question reply endpoint", async () => {
   let captured = null

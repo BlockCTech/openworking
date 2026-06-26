@@ -2,6 +2,8 @@ const test = require("node:test")
 const assert = require("node:assert/strict")
 
 global.window = {
+  addEventListener() {},
+  removeEventListener() {},
   OpenWorkingThreadStream: {
     addOptimisticUser() {},
     applyThreadEvent() {},
@@ -12,7 +14,14 @@ global.window = {
     },
     hasRunningTool() { return false },
     hydrateThread() {},
-    messageCopyText() { return "" },
+    messageCopyText(message) {
+      return (message?.parts || [])
+        .filter((part) => part.type === "text" && !part.synthetic && !part.ignored)
+        .map((part) => part.text || "")
+        .join("\n")
+        .trim()
+    },
+    needsThreadRehydration() { return true },
     userMessageFileRefs() { return [] },
     messageText() { return "" },
     removeOptimisticUser() {},
@@ -41,9 +50,15 @@ const {
   fileMentionTokenPattern,
   filterPromptAttachments,
   livePendingFileMentions,
+  loadAllSessions,
+  sessionsForProjectPath,
+  loadStoredExpanded,
+  persistExpanded,
   renderPromptOverlayHtml,
   renderTextWithFileMentions,
   resolveFileMentionsFromPrompt,
+  setProjectSessions,
+  sessionRowKey,
   __test
 } = require("../src/renderer")
 
@@ -76,6 +91,384 @@ function fakeDocument() {
     addEventListener() {}
   }
 }
+
+function fakeSidebarScrollDocument({ resetOnRootRender = false, resetOnSidebarRender = false, scrollTop = 0 } = {}) {
+  const root = fakeElement()
+  const sidebarRoot = fakeElement()
+  const toastHost = fakeElement()
+  const sideScroll = fakeElement()
+  sideScroll.scrollTop = scrollTop
+
+  let rootHtml = root.innerHTML
+  Object.defineProperty(root, "innerHTML", {
+    get() { return rootHtml },
+    set(value) {
+      rootHtml = value
+      if (resetOnRootRender) sideScroll.scrollTop = 0
+    }
+  })
+
+  let sidebarHtml = sidebarRoot.innerHTML
+  Object.defineProperty(sidebarRoot, "innerHTML", {
+    get() { return sidebarHtml },
+    set(value) {
+      sidebarHtml = value
+      if (resetOnSidebarRender) sideScroll.scrollTop = 0
+    }
+  })
+
+  return {
+    root,
+    sidebarRoot,
+    sideScroll,
+    document: {
+      getElementById(id) {
+        if (id === "root") return root
+        if (id === "sidebarRoot") return sidebarRoot
+        if (id === "toastHost") return toastHost
+        return null
+      },
+      querySelector(selector) {
+        if (selector === ".side-scroll") return sideScroll
+        return null
+      },
+      querySelectorAll() { return [] },
+      addEventListener() {}
+    }
+  }
+}
+
+function backedLocalStorage(initial = {}) {
+  const store = new Map(Object.entries(initial))
+  return {
+    getItem(key) { return store.has(key) ? store.get(key) : null },
+    setItem(key, value) { store.set(key, String(value)) },
+    removeItem(key) { store.delete(key) }
+  }
+}
+
+test("expanded sidebar projects round-trip through localStorage", () => {
+  const previousStorage = global.localStorage
+  global.localStorage = backedLocalStorage()
+  const previousExpanded = __test.state.expanded
+  try {
+    __test.state.expanded = new Set(["proj_a", "proj_b"])
+    persistExpanded()
+    assert.deepEqual([...loadStoredExpanded()], ["proj_a", "proj_b"])
+  } finally {
+    __test.state.expanded = previousExpanded
+    global.localStorage = previousStorage
+  }
+})
+
+test("loadStoredExpanded returns an empty set for missing or malformed storage", () => {
+  const previousStorage = global.localStorage
+  try {
+    global.localStorage = backedLocalStorage()
+    assert.equal(loadStoredExpanded().size, 0)
+    global.localStorage = backedLocalStorage({ "openworking:expanded-projects": "{not json" })
+    assert.equal(loadStoredExpanded().size, 0)
+    global.localStorage = backedLocalStorage({ "openworking:expanded-projects": '{"a":1}' })
+    assert.equal(loadStoredExpanded().size, 0)
+  } finally {
+    global.localStorage = previousStorage
+  }
+})
+
+function manualTimerPacer(applyEvent) {
+  const timers = []
+  const pacer = __test.createStreamPacer({
+    applyEvent,
+    setTimer(callback, delay) {
+      const timer = { callback, delay, cleared: false }
+      timers.push(timer)
+      return timer
+    },
+    clearTimer(timer) {
+      timer.cleared = true
+    }
+  })
+  return { pacer, timers }
+}
+
+function runNextTimer(timers) {
+  const timer = timers.shift()
+  assert.ok(timer, "expected a scheduled pacing timer")
+  assert.equal(timer.delay, 40)
+  assert.equal(timer.cleared, false)
+  timer.callback()
+}
+
+test("stream pacer spaces burst deltas across pacing ticks", () => {
+  const applied = []
+  const { pacer, timers } = manualTimerPacer((event) => applied.push(event))
+  const base = {
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text"
+  }
+
+  for (const delta of ["Xin ", "chao, ", "day ", "la ", "stream."]) {
+    assert.equal(pacer.enqueue({ ...base, delta }), true)
+  }
+
+  assert.equal(applied.length, 0)
+  assert.equal(timers.length, 1)
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.delta), ["Xin "])
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.delta), ["Xin ", "chao, "])
+  while (timers.length) runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.delta), ["Xin ", "chao, ", "day ", "la ", "stream."])
+})
+
+test("stream pacer defers final part update until queued deltas drain", () => {
+  const applied = []
+  const { pacer, timers } = manualTimerPacer((event) => applied.push(event))
+  const base = {
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text"
+  }
+  pacer.enqueue({ ...base, delta: "partial " })
+  pacer.enqueue({ ...base, delta: "answer" })
+  assert.equal(pacer.defer({
+    type: "message.part.updated",
+    sessionID: "sess_one",
+    part: { id: "part_text", messageID: "msg_a", type: "text", text: "partial answer" }
+  }), true)
+
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.type), ["message.part.delta"])
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.type), [
+    "message.part.delta",
+    "message.part.delta",
+    "message.part.updated"
+  ])
+  assert.equal(applied.at(-1).part.text, "partial answer")
+})
+
+test("stream pacer defers idle lifecycle until queued output is visible", () => {
+  const applied = []
+  const { pacer, timers } = manualTimerPacer((event) => applied.push(event))
+  pacer.enqueue({
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text",
+    delta: "done"
+  })
+  pacer.defer({ type: "session.idle", sessionID: "sess_one" })
+
+  assert.equal(applied.length, 0)
+  runNextTimer(timers)
+  assert.deepEqual(applied.map((event) => event.type), ["message.part.delta", "session.idle"])
+})
+
+test("stream pacer flushes queued output synchronously for session switches", () => {
+  const applied = []
+  const { pacer, timers } = manualTimerPacer((event) => applied.push(event))
+  pacer.enqueue({
+    type: "message.part.delta",
+    sessionID: "sess_one",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text",
+    delta: "queued"
+  })
+
+  assert.equal(applied.length, 0)
+  assert.equal(pacer.flushSession("sess_one"), true)
+  assert.deepEqual(applied.map((event) => event.delta), ["queued"])
+  assert.equal(timers[0].cleared, true)
+})
+
+test("pacing gate only consumes active session text deltas", () => {
+  const calls = []
+  const fakePacer = {
+    enqueue(event) { calls.push(["enqueue", event.sessionID]); return true },
+    defer(event) { calls.push(["defer", event.type]); return true },
+    flushSession(sessionID) { calls.push(["flush", sessionID]); return true },
+    hasPendingPart() { return true },
+    hasPendingSession() { return true }
+  }
+  const delta = {
+    type: "message.part.delta",
+    sessionID: "background",
+    messageID: "msg_a",
+    partID: "part_text",
+    field: "text",
+    delta: "background"
+  }
+
+  assert.equal(__test.maybeConsumePacedRuntimeEvent(delta, "active", fakePacer), false)
+  assert.deepEqual(calls, [])
+  assert.equal(__test.maybeConsumePacedRuntimeEvent({ ...delta, sessionID: "active" }, "active", fakePacer), true)
+  assert.deepEqual(calls, [["enqueue", "active"]])
+})
+
+test("stream delta splitter chunks long Unicode tokens without dropping characters", () => {
+  const input = "đây_là_một_token_rất_dài_không_có_space"
+  const segments = __test.splitStreamDeltaSegments(input, { targetChars: 8, maxChars: 10 })
+  assert.ok(segments.length > 1)
+  assert.equal(segments.join(""), input)
+  assert.ok(segments.every((segment) => Array.from(segment).length <= 10))
+})
+
+test("stream delta splitter packs normal prose into small readable segments", () => {
+  const input = "Xin chao, day la mot doan stream."
+  const segments = __test.splitStreamDeltaSegments(input)
+  assert.ok(segments.length > 2)
+  assert.equal(segments.join(""), input)
+  assert.ok(segments.every((segment) => Array.from(segment).length <= 12))
+})
+
+test("sessionsForProjectPath keeps only directory-matching sessions (trailing slash tolerant)", () => {
+  const sessions = [
+    { id: "s1", directory: "/Users/me/a" },
+    { id: "s2", directory: "/Users/me/a/" },
+    { id: "s3", directory: "/Users/me/b" },
+    { id: "s4" } // no directory → unsafe for directory-scoped background lists
+  ]
+  assert.deepEqual(sessionsForProjectPath(sessions, "/Users/me/a").map((s) => s.id), ["s1", "s2"])
+  assert.deepEqual(sessionsForProjectPath([], "/Users/me/a"), [])
+})
+
+test("setProjectSessions accepts active no-directory sessions and removes that id from other projects", () => {
+  const previous = {
+    projects: __test.state.projects,
+    sessionsByProject: __test.state.sessionsByProject
+  }
+  try {
+    __test.state.projects = [
+      { id: "proj_a", path: "/Users/me/a" },
+      { id: "proj_b", path: "/Users/me/b" }
+    ]
+    __test.state.sessionsByProject = {
+      proj_b: [
+        { id: "shared", directory: "/Users/me/b" },
+        { id: "b_only", directory: "/Users/me/b" }
+      ]
+    }
+
+    const stored = setProjectSessions("proj_a", [
+      { id: "shared" },
+      { id: "a_only", directory: "/Users/me/a/" },
+      { id: "wrong_dir", directory: "/Users/me/b" }
+    ], "active")
+
+    assert.deepEqual(stored.map((session) => session.id), ["shared", "a_only"])
+    assert.deepEqual(__test.state.sessionsByProject.proj_a.map((session) => session.id), ["shared", "a_only"])
+    assert.deepEqual(__test.state.sessionsByProject.proj_b.map((session) => session.id), ["b_only"])
+  } finally {
+    __test.state.projects = previous.projects
+    __test.state.sessionsByProject = previous.sessionsByProject
+  }
+})
+
+// Saves/restores the renderer state loadAllSessions touches, sets the runtime running, and
+// installs a stub runtime; returns a restore() to call in finally.
+function withLoadAllSessionsEnv({ projects, sessionsByProject = {}, runtime }) {
+  const previous = {
+    window: global.window,
+    projects: __test.state.projects,
+    sessionsByProject: __test.state.sessionsByProject,
+    runtime: __test.state.runtime,
+    activeProjectId: __test.state.activeProjectId
+  }
+  __test.state.projects = projects
+  __test.state.sessionsByProject = sessionsByProject
+  __test.state.runtime = { status: "running" }
+  __test.state.activeProjectId = projects[0]?.id || null
+  global.window = { openworking: { runtime } }
+  return () => {
+    global.window = previous.window
+    __test.state.projects = previous.projects
+    __test.state.sessionsByProject = previous.sessionsByProject
+    __test.state.runtime = previous.runtime
+    __test.state.activeProjectId = previous.activeProjectId
+  }
+}
+
+test("loadAllSessions fetches each project directory and fills state for every project", async () => {
+  const byDir = {
+    "/Users/me/a": [{ id: "s1", directory: "/Users/me/a" }],
+    "/Users/me/b": [{ id: "s2", directory: "/Users/me/b" }]
+  }
+  const restore = withLoadAllSessionsEnv({
+    projects: [{ id: "proj_a", path: "/Users/me/a" }, { id: "proj_b", path: "/Users/me/b" }],
+    runtime: { listSessionsForDirectory: async (directory) => byDir[directory] || [] }
+  })
+  try {
+    await loadAllSessions()
+    assert.deepEqual(__test.state.sessionsByProject.proj_a.map((s) => s.id), ["s1"])
+    assert.deepEqual(__test.state.sessionsByProject.proj_b.map((s) => s.id), ["s2"])
+  } finally {
+    restore()
+  }
+})
+
+test("loadAllSessions keeps other projects when one directory fetch rejects", async () => {
+  const restore = withLoadAllSessionsEnv({
+    projects: [{ id: "proj_a", path: "/Users/me/a" }, { id: "proj_b", path: "/Users/me/b" }],
+    sessionsByProject: { proj_b: [{ id: "kept" }] },
+    runtime: {
+      listSessionsForDirectory: async (directory) => {
+        if (directory === "/Users/me/a") return [{ id: "s1", directory: "/Users/me/a" }]
+        throw new Error("runtime not ready")
+      }
+    }
+  })
+  try {
+    await loadAllSessions()
+    assert.deepEqual(__test.state.sessionsByProject.proj_a.map((s) => s.id), ["s1"])
+    // proj_b's fetch failed → its existing list is left untouched, not blanked.
+    assert.deepEqual(__test.state.sessionsByProject.proj_b.map((s) => s.id), ["kept"])
+  } finally {
+    restore()
+  }
+})
+
+test("loadAllSessions makes no requests when the runtime is not running", async () => {
+  let called = false
+  const restore = withLoadAllSessionsEnv({
+    projects: [{ id: "proj_a", path: "/Users/me/a" }],
+    runtime: { listSessionsForDirectory: async () => { called = true; return [] } }
+  })
+  __test.state.runtime = { status: "starting" } // override the running default
+  try {
+    await loadAllSessions()
+    assert.equal(called, false)
+  } finally {
+    restore()
+  }
+})
+
+test("loadAllSessions coalesces concurrent calls into a single pass", async () => {
+  let calls = 0
+  const restore = withLoadAllSessionsEnv({
+    projects: [{ id: "proj_a", path: "/Users/me/a" }],
+    runtime: {
+      listSessionsForDirectory: async () => {
+        calls += 1
+        await new Promise((r) => setTimeout(r, 5))
+        return [{ id: "s1", directory: "/Users/me/a" }]
+      }
+    }
+  })
+  try {
+    await Promise.all([loadAllSessions(), loadAllSessions(), loadAllSessions()])
+    assert.equal(calls, 1) // the in-flight guard collapsed 3 concurrent calls into one pass
+  } finally {
+    restore()
+  }
+})
 
 test("file mentions stay live only for exact standalone tokens", () => {
   const mentions = [{ token: "@health_check.py", path: "src/health_check.py", name: "health_check.py" }]
@@ -212,6 +605,50 @@ test("runtime reconnect falls back to new-session flow when the active session i
   )
 })
 
+test("refreshSessionData restores the active session when background rehydrate fails", async () => {
+  const previousOpenworking = global.window.openworking
+  const { refreshSessionData, state } = __test
+  const calls = []
+
+  global.window.openworking = {
+    runtime: {
+      async listSessions() {
+        return [{ id: "sess_active" }, { id: "sess_background" }]
+      },
+      async listMessages({ sessionId }) {
+        calls.push(sessionId)
+        if (sessionId === "sess_background") throw new Error("background failed")
+        return []
+      }
+    }
+  }
+
+  Object.assign(state, {
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_active",
+    sessionsByProject: {},
+    threads: new Map([
+      ["sess_active", { sessionId: "sess_active", status: { type: "busy" }, messages: [] }],
+      ["sess_background", { sessionId: "sess_background", status: { type: "busy" }, messages: [] }]
+    ]),
+    runtime: {
+      status: "running",
+      project: { id: "proj_1" },
+      sessionStatuses: {
+        sess_active: { type: "busy" },
+        sess_background: { type: "busy" }
+      }
+    }
+  })
+
+  try {
+    await assert.rejects(refreshSessionData(), /background failed/)
+    assert.deepEqual(calls, ["sess_background", "sess_active"])
+  } finally {
+    global.window.openworking = previousOpenworking
+  }
+})
+
 test("sendPrompt restores the draft and surfaces runtime startup failures", async () => {
   const previousDocument = global.document
   const previousRequestAnimationFrame = global.requestAnimationFrame
@@ -275,5 +712,725 @@ test("sendPrompt restores the draft and surfaces runtime startup failures", asyn
     global.document = previousDocument
     global.requestAnimationFrame = previousRequestAnimationFrame
     global.window.openworking = previousOpenworking
+  }
+})
+
+test("selectSession views a cross-project chat without restarting the runtime", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let openProjectCalled = false
+  let listMessagesArgs = null
+  global.window.openworking = {
+    runtime: {
+      async openProject() { openProjectCalled = true; throw new Error("should not restart on view") },
+      async listMessages(args) { listMessagesArgs = args; return [] }
+    },
+    attachments: { async discard() {} }
+  }
+
+  const { selectSession, state } = __test
+  Object.assign(state, {
+    nav: "projects",
+    projects: [
+      { id: "proj_active", name: "Active", path: "/tmp/active" },
+      { id: "proj_other", name: "Other", path: "/tmp/other" }
+    ],
+    // Runtime is running on the ACTIVE project; we click a chat in the OTHER project.
+    activeProjectId: "proj_active",
+    activeSessionId: null,
+    runtime: { status: "running", project: { id: "proj_active" }, sessionStatuses: {} },
+    sessionsByProject: { proj_other: [{ id: "ses_1", directory: "/tmp/other" }] },
+    threads: new Map(),
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    toast: null
+  })
+
+  try {
+    await selectSession("proj_other", "ses_1")
+
+    assert.equal(openProjectCalled, false, "must NOT restart the runtime just to view")
+    assert.deepEqual(listMessagesArgs, { sessionId: "ses_1", directory: "/tmp/other" })
+    assert.equal(state.activeProjectId, "proj_other")
+    assert.equal(state.activeSessionId, "ses_1")
+    assert.equal(state.nav, "session")
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("selectSession dismisses a context menu left open on another row", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  global.window.openworking = {
+    runtime: {
+      async openProject() { throw new Error("should not restart on view") },
+      async listMessages() { return [] }
+    },
+    attachments: { async discard() {} }
+  }
+
+  const { selectSession, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_a", name: "A", path: "/tmp/a" }],
+    activeProjectId: "proj_a",
+    activeSessionId: "ses_1",
+    runtime: { status: "running", project: { id: "proj_a" }, sessionStatuses: {} },
+    sessionsByProject: { proj_a: [{ id: "ses_1", directory: "/tmp/a" }, { id: "ses_2", directory: "/tmp/a" }] },
+    threads: new Map(),
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    toast: null
+  })
+  // The kebab menu is open on ses_1; the user clicks ses_2's row.
+  state.sessionMenu = sessionRowKey("proj_a", "ses_1")
+
+  try {
+    await selectSession("proj_a", "ses_2")
+    assert.equal(state.sessionMenu, null, "selecting another session must close the open context menu")
+    assert.equal(state.activeSessionId, "ses_2")
+  } finally {
+    state.sessionMenu = null
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("selectSession during a still-starting runtime keeps the accordion open and does not collapse it", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const previousExpanded = __test.state.expanded
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let openProjectCalled = false
+  global.window.openworking = {
+    runtime: {
+      // openProject's same-project branch would TOGGLE the accordion CLOSED — clicking a session
+      // must never reach it while the runtime is starting.
+      async openProject() { openProjectCalled = true; throw new Error("should not cold-start while starting") },
+      async listMessages() { return [] }
+    },
+    attachments: { async discard() {} }
+  }
+
+  const { selectSession, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_a", name: "A", path: "/tmp/a" }],
+    activeProjectId: "proj_a",
+    activeSessionId: null,
+    // Runtime is mid-startup (the user clicked before init finished) on this same project.
+    runtime: { status: "starting", project: { id: "proj_a" }, sessionStatuses: {} },
+    sessionsByProject: { proj_a: [{ id: "ses_1", directory: "/tmp/a" }] },
+    threads: new Map(),
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    toast: null
+  })
+  state.expanded = new Set(["proj_a"])
+
+  try {
+    await selectSession("proj_a", "ses_1")
+
+    assert.equal(openProjectCalled, false, "a starting runtime must not trigger openProject's toggle-collapse")
+    assert.ok(state.expanded.has("proj_a"), "the clicked project's accordion must stay expanded")
+    assert.equal(state.activeSessionId, "ses_1")
+  } finally {
+    state.toast = null
+    state.expanded = previousExpanded
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+// Builds a minimal event whose target.closest(selector) matches when the selector's attribute
+// is in `attrs`, returning a fake element carrying that attribute's value in dataset.
+function fakeDelegatedEvent(attrs) {
+  const dataset = {}
+  for (const [attr, value] of Object.entries(attrs)) {
+    const key = attr.replace(/^data-/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+    dataset[key] = value
+  }
+  const target = {
+    closest(selector) {
+      // selector looks like "[data-foo]" — extract the attribute name.
+      const attr = selector.slice(1, -1)
+      if (!(attr in attrs)) return null
+      return { dataset, matches: (sel) => sel === selector }
+    }
+  }
+  return { type: "click", target, preventDefault() {}, stopPropagation() {} }
+}
+
+test("assistant message actions render copy and fork on the left while user actions stay unchanged", () => {
+  const { renderMessageActions } = __test
+  const assistantHtml = renderMessageActions({
+    id: "msg_ai",
+    role: "assistant",
+    parts: [{ type: "text", text: "Done" }]
+  })
+  const userHtml = renderMessageActions({
+    id: "msg_user",
+    role: "user",
+    parts: [{ type: "text", text: "Please do this" }]
+  })
+
+  assert.match(assistantHtml, /message-actions-left/)
+  assert.match(assistantHtml, /data-copy-message="msg_ai"/)
+  assert.match(assistantHtml, /data-fork-message="msg_ai"/)
+  assert.ok(assistantHtml.indexOf("data-copy-message") < assistantHtml.indexOf("data-fork-message"))
+  assert.doesNotMatch(userHtml, /message-actions-left/)
+  assert.match(userHtml, /data-copy-message="msg_user"/)
+  assert.doesNotMatch(userHtml, /data-fork-message/)
+})
+
+test("forkAssistantMessage passes the next message as the fork boundary", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const state = __test.state
+  const previousState = {
+    projects: state.projects,
+    sessionsByProject: state.sessionsByProject,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    runtime: state.runtime,
+    threads: state.threads,
+    forkMarkers: state.forkMarkers,
+    expanded: state.expanded,
+    nav: state.nav,
+    toast: state.toast
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let forkArgs = null
+  global.window.openworking = {
+    runtime: {
+      async forkSession(args) {
+        forkArgs = args
+        return { id: "sess_fork", title: "Forked", directory: "/tmp/project" }
+      },
+      async listSessionsForDirectory(directory) {
+        assert.equal(directory, "/tmp/project")
+        return [{ id: "sess_fork", title: "Forked", directory: "/tmp/project" }]
+      },
+      async listMessages(args) {
+        assert.deepEqual(args, { sessionId: "sess_fork", directory: "/tmp/project" })
+        return [
+          { id: "fork_user_1", role: "user", parts: [{ type: "text", text: "Do it" }] },
+          { id: "fork_ai_1", role: "assistant", parts: [{ type: "text", text: "Done" }] }
+        ]
+      }
+    }
+  }
+
+  try {
+    Object.assign(state, {
+      projects: [{ id: "proj", name: "Project", path: "/tmp/project" }],
+      sessionsByProject: { proj: [{ id: "sess_parent", title: "Parent", directory: "/tmp/project" }] },
+      activeProjectId: "proj",
+      activeSessionId: "sess_parent",
+      runtime: { status: "running", project: { id: "proj" }, sessionStatuses: {} },
+      forkMarkers: new Map(),
+      threads: new Map([["sess_parent", {
+        sessionId: "sess_parent",
+        messages: [
+          { id: "msg_user_1", role: "user", parts: [{ type: "text", text: "Do it" }] },
+          { id: "msg_ai_1", role: "assistant", parts: [{ type: "text", text: "Done" }] },
+          { id: "msg_user_2", role: "user", parts: [{ type: "text", text: "Continue" }] }
+        ],
+        pendingQuestions: [],
+        pendingPermissions: [],
+        status: { type: "idle" }
+      }]]),
+      expanded: new Set(),
+      nav: "session",
+      toast: null
+    })
+
+    await __test.forkAssistantMessage("msg_ai_1")
+
+    assert.deepEqual(forkArgs, {
+      sessionId: "sess_parent",
+      messageId: "msg_user_2",
+      directory: "/tmp/project"
+    })
+    assert.equal(state.activeSessionId, "sess_fork")
+    assert.equal(state.forkMarkers.get("sess_fork"), "fork_ai_1")
+    assert.match(__test.renderThreadMessages([{ id: "fork_ai_1", role: "user", parts: [] }]), /Forked from conversation/)
+    assert.equal(state.toast, "Chat forked")
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("forkAssistantMessage omits the boundary for the latest assistant response", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const state = __test.state
+  const previousState = {
+    projects: state.projects,
+    sessionsByProject: state.sessionsByProject,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    runtime: state.runtime,
+    threads: state.threads,
+    forkMarkers: state.forkMarkers,
+    expanded: state.expanded,
+    nav: state.nav,
+    toast: state.toast
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let forkArgs = null
+  global.window.openworking = {
+    runtime: {
+      async forkSession(args) {
+        forkArgs = args
+        return { id: "sess_fork_full", title: "Forked", directory: "/tmp/project" }
+      },
+      async listSessionsForDirectory() {
+        return [{ id: "sess_fork_full", title: "Forked", directory: "/tmp/project" }]
+      },
+      async listMessages() {
+        return [
+          { id: "fork_user_1", role: "user", parts: [{ type: "text", text: "Do it" }] },
+          { id: "fork_ai_1", role: "assistant", parts: [{ type: "text", text: "Done" }] }
+        ]
+      }
+    }
+  }
+
+  try {
+    Object.assign(state, {
+      projects: [{ id: "proj", name: "Project", path: "/tmp/project" }],
+      sessionsByProject: { proj: [{ id: "sess_parent", title: "Parent", directory: "/tmp/project" }] },
+      activeProjectId: "proj",
+      activeSessionId: "sess_parent",
+      runtime: { status: "running", project: { id: "proj" }, sessionStatuses: {} },
+      forkMarkers: new Map(),
+      threads: new Map([["sess_parent", {
+        sessionId: "sess_parent",
+        messages: [
+          { id: "msg_user_1", role: "user", parts: [{ type: "text", text: "Do it" }] },
+          { id: "msg_ai_1", role: "assistant", parts: [{ type: "text", text: "Done" }] }
+        ],
+        pendingQuestions: [],
+        pendingPermissions: [],
+        status: { type: "idle" }
+      }]]),
+      expanded: new Set(),
+      nav: "session",
+      toast: null
+    })
+
+    await __test.forkAssistantMessage("msg_ai_1")
+
+    assert.deepEqual(forkArgs, {
+      sessionId: "sess_parent",
+      directory: "/tmp/project"
+    })
+    assert.equal(state.activeSessionId, "sess_fork_full")
+    assert.equal(state.forkMarkers.get("sess_fork_full"), "fork_ai_1")
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+// Builds a fake element chain [outermost ... innermost]. Each node declares its data-* attrs.
+// closest(sel) walks from the node up the chain; contains(other) is true when `other` is at or
+// below this node. Returns the innermost node (the event target).
+function fakeElementChain(nodes) {
+  const elements = nodes.map((attrs) => ({ attrs, parent: null }))
+  for (let i = 1; i < elements.length; i++) elements[i].parent = elements[i - 1]
+  const depthOf = (el) => elements.indexOf(el)
+  for (const el of elements) {
+    el.dataset = {}
+    for (const [attr, value] of Object.entries(el.attrs)) {
+      const key = attr.replace(/^data-/, "").replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+      el.dataset[key] = value
+    }
+    el.matches = (sel) => sel.slice(1, -1) in el.attrs
+    el.closest = (sel) => {
+      const attr = sel.slice(1, -1)
+      let cur = el
+      while (cur) {
+        if (attr in cur.attrs) return cur
+        cur = cur.parent
+      }
+      return null
+    }
+    el.contains = (other) => other && depthOf(other) >= depthOf(el)
+  }
+  return elements[elements.length - 1]
+}
+
+test("dispatchDelegated honors the data-stop-click boundary (confirm fires, backdrop cancel does not)", () => {
+  const { dispatchDelegated } = __test
+  // backdrop[data-action=cancel] > content[data-stop-click] > button[data-action=confirm]
+  const target = fakeElementChain([
+    { "data-action": "cancelModal" },
+    { "data-stop-click": "" },
+    { "data-action": "confirmModal" }
+  ])
+  const seen = []
+  const table = [["data-action", (shim) => seen.push(shim.currentTarget.dataset.action)]]
+  dispatchDelegated({ type: "click", target, preventDefault() {}, stopPropagation() {} }, table)
+  assert.deepEqual(seen, ["confirmModal"], "the confirm button inside the modal must fire, not the backdrop cancel")
+
+  // Clicking the modal content itself (inside the boundary) must NOT trigger the backdrop cancel.
+  const contentTarget = fakeElementChain([
+    { "data-action": "cancelModal" },
+    { "data-stop-click": "" }
+  ])
+  const seen2 = []
+  const table2 = [["data-action", (shim) => seen2.push(shim.currentTarget.dataset.action)]]
+  dispatchDelegated({ type: "click", target: contentTarget, preventDefault() {}, stopPropagation() {} }, table2)
+  assert.deepEqual(seen2, [], "clicking inside the modal content must not cancel via the backdrop")
+})
+
+test("dispatchDelegated runs the matching entry with a shim whose currentTarget is the matched element", () => {
+  const { dispatchDelegated } = __test
+  let received = null
+  const table = [
+    ["data-nope", () => { throw new Error("should not match") }],
+    ["data-action", (shim) => { received = shim.currentTarget.dataset.action }]
+  ]
+  dispatchDelegated(fakeDelegatedEvent({ "data-action": "saveConfig" }), table)
+  assert.equal(received, "saveConfig")
+})
+
+test("dispatchDelegated stops after the first matching entry (most-specific wins)", () => {
+  const { dispatchDelegated } = __test
+  const calls = []
+  // The element carries BOTH attributes; the table lists the specific one first, so only it runs.
+  const table = [
+    ["data-session-menu", () => calls.push("menu")],
+    ["data-session-id", () => calls.push("row")]
+  ]
+  dispatchDelegated(fakeDelegatedEvent({ "data-session-menu": "ses_1", "data-session-id": "ses_1" }), table)
+  assert.deepEqual(calls, ["menu"], "a kebab click must not also trigger the row's selectSession")
+})
+
+test("session menu state is scoped by project and session row", () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousSessionMenu = __test.state.sessionMenu
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  const { dispatchDelegated, getDelegatedClick } = __test
+  try {
+    __test.state.sessionMenu = null
+    dispatchDelegated(fakeDelegatedEvent({
+      "data-session-menu": "ses_1",
+      "data-session-project": "proj_a"
+    }), getDelegatedClick())
+    assert.equal(__test.state.sessionMenu, sessionRowKey("proj_a", "ses_1"))
+
+    dispatchDelegated(fakeDelegatedEvent({
+      "data-session-menu": "ses_1",
+      "data-session-project": "proj_b"
+    }), getDelegatedClick())
+    assert.equal(__test.state.sessionMenu, sessionRowKey("proj_b", "ses_1"))
+
+    dispatchDelegated(fakeDelegatedEvent({
+      "data-session-menu": "ses_1",
+      "data-session-project": "proj_b"
+    }), getDelegatedClick())
+    assert.equal(__test.state.sessionMenu, null)
+  } finally {
+    __test.state.sessionMenu = previousSessionMenu
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+  }
+})
+
+test("delete session target carries project id and refreshes the clicked project", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const state = __test.state
+  const previousState = {
+    projects: state.projects,
+    sessionsByProject: state.sessionsByProject,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    runtime: state.runtime,
+    threads: state.threads,
+    sessionDeleteTarget: state.sessionDeleteTarget,
+    sessionDeleting: state.sessionDeleting,
+    sessionDeleteError: state.sessionDeleteError,
+    sessionMenu: state.sessionMenu,
+    loading: state.loading,
+    toast: state.toast,
+    commands: state.commands,
+    commandMenu: state.commandMenu
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let currentProjectId = "proj_active"
+  const openedProjects = []
+  let deletedSessionId = null
+  global.window.openworking = {
+    runtime: {
+      async openProject(project) {
+        currentProjectId = project.id
+        openedProjects.push(project.id)
+        return { status: "running", project: { id: project.id }, sessionStatuses: {} }
+      },
+      async listCommands() { return [] },
+      async deleteSession({ sessionId }) {
+        deletedSessionId = sessionId
+        assert.equal(currentProjectId, "proj_other")
+        return true
+      },
+      async listSessions() {
+        if (currentProjectId === "proj_other") return [{ id: "other_remaining", directory: "/tmp/other" }]
+        return [{ id: "active_session", directory: "/tmp/active" }]
+      }
+    }
+  }
+
+  const { dispatchDelegated, getDelegatedClick, deleteSession } = __test
+  try {
+    Object.assign(state, {
+      projects: [
+        { id: "proj_active", name: "Active", path: "/tmp/active" },
+        { id: "proj_other", name: "Other", path: "/tmp/other" }
+      ],
+      sessionsByProject: {
+        proj_active: [{ id: "active_session", directory: "/tmp/active" }],
+        proj_other: [{ id: "delete_me", directory: "/tmp/other" }]
+      },
+      activeProjectId: "proj_active",
+      activeSessionId: "active_session",
+      runtime: { status: "running", project: { id: "proj_active" }, sessionStatuses: {} },
+      threads: new Map([["delete_me", { sessionId: "delete_me", messages: [], pendingQuestions: [], pendingPermissions: [], status: { type: "idle" } }]]),
+      sessionDeleteTarget: null,
+      sessionDeleting: false,
+      sessionDeleteError: null,
+      sessionMenu: null,
+      loading: false,
+      toast: null,
+      commands: [],
+      commandMenu: { open: false, query: "", index: 0 }
+    })
+
+    dispatchDelegated(fakeDelegatedEvent({
+      "data-session-delete": "delete_me",
+      "data-session-project": "proj_other",
+      "data-session-title": "Delete me"
+    }), getDelegatedClick())
+
+    assert.deepEqual(state.sessionDeleteTarget, {
+      sessionId: "delete_me",
+      projectId: "proj_other",
+      title: "Delete me"
+    })
+
+    await deleteSession(state.sessionDeleteTarget)
+
+    assert.equal(deletedSessionId, "delete_me")
+    assert.deepEqual(openedProjects, ["proj_other", "proj_active"])
+    assert.deepEqual(state.sessionsByProject.proj_other.map((session) => session.id), ["other_remaining"])
+    assert.deepEqual(state.sessionsByProject.proj_active.map((session) => session.id), ["active_session"])
+    assert.equal(state.activeSessionId, "active_session")
+    assert.equal(state.threads.has("delete_me"), false)
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("confirm delete session keeps the modal open with loading and inline errors", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const state = __test.state
+  const previousState = {
+    projects: state.projects,
+    sessionsByProject: state.sessionsByProject,
+    activeProjectId: state.activeProjectId,
+    activeSessionId: state.activeSessionId,
+    runtime: state.runtime,
+    threads: state.threads,
+    sessionDeleteTarget: state.sessionDeleteTarget,
+    sessionDeleting: state.sessionDeleting,
+    sessionDeleteError: state.sessionDeleteError,
+    loading: state.loading,
+    toast: state.toast
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let rejectDelete = null
+  global.window.openworking = {
+    runtime: {
+      async deleteSession() {
+        return new Promise((_resolve, reject) => {
+          rejectDelete = reject
+        })
+      },
+      async listSessions() {
+        throw new Error("should not refresh after delete failure")
+      }
+    }
+  }
+
+  const { confirmDeleteSession } = __test
+  try {
+    Object.assign(state, {
+      projects: [{ id: "proj_active", name: "Active", path: "/tmp/active" }],
+      sessionsByProject: { proj_active: [{ id: "delete_me", directory: "/tmp/active" }] },
+      activeProjectId: "proj_active",
+      activeSessionId: "delete_me",
+      runtime: { status: "running", project: { id: "proj_active" }, sessionStatuses: {} },
+      threads: new Map(),
+      sessionDeleteTarget: { sessionId: "delete_me", projectId: "proj_active", title: "Delete me" },
+      sessionDeleting: false,
+      sessionDeleteError: null,
+      loading: false,
+      toast: null
+    })
+
+    const pending = confirmDeleteSession()
+
+    assert.equal(state.sessionDeleting, true)
+    assert.equal(state.sessionDeleteError, null)
+    assert.match(global.document.getElementById("root").innerHTML, /Deleting\.\.\./)
+
+    rejectDelete(new Error("Runtime delete failed"))
+    await pending
+
+    assert.deepEqual(state.sessionDeleteTarget, { sessionId: "delete_me", projectId: "proj_active", title: "Delete me" })
+    assert.equal(state.sessionDeleting, false)
+    assert.equal(state.sessionDeleteError, "Runtime delete failed")
+    assert.match(global.document.getElementById("root").innerHTML, /Runtime delete failed/)
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("DELEGATED_CLICK orders menu/kebab attributes before their enclosing rows", () => {
+  const { getDelegatedClick } = __test
+  const order = getDelegatedClick().map(([attribute]) => attribute)
+  const before = (a, b) => {
+    const ia = order.indexOf(a)
+    const ib = order.indexOf(b)
+    assert.ok(ia !== -1 && ib !== -1, `${a} and ${b} must both be registered`)
+    assert.ok(ia < ib, `${a} must be checked before ${b} so stopPropagation ordering is preserved`)
+  }
+  // Session kebab/menu items resolve before the row's open handler.
+  before("data-session-menu", "data-session-id")
+  before("data-session-pin", "data-session-id")
+  before("data-session-delete", "data-session-id")
+  before("data-session-rename", "data-session-id")
+  // Project kebab/menu items resolve before opening the project accordion.
+  before("data-project-menu", "data-open-project")
+  before("data-project-pin", "data-open-project")
+  // data-action is the broad fallback and must be last.
+  assert.equal(order[order.length - 1], "data-action")
+})
+
+test("renderSidebarInto rewrites only #sidebarRoot and leaves #root untouched", () => {
+  const previousDocument = global.document
+  const { root, sidebarRoot, sideScroll, document } = fakeSidebarScrollDocument({
+    resetOnSidebarRender: true,
+    scrollTop: 240
+  })
+  root.innerHTML = "ORIGINAL_ROOT"
+  sidebarRoot.innerHTML = "OLD_SIDEBAR"
+  sideScroll.scrollTop = 240
+  global.document = document
+
+  const { renderSidebarInto } = __test
+  try {
+    renderSidebarInto()
+    assert.notEqual(sidebarRoot.innerHTML, "OLD_SIDEBAR", "sidebar should be repainted")
+    assert.ok(sidebarRoot.innerHTML.includes("sidebar"), "sidebar markup should be present")
+    assert.equal(root.innerHTML, "ORIGINAL_ROOT", "#root must not be rewritten by a sidebar-only repaint")
+    assert.equal(sideScroll.scrollTop, 240, "sidebar-only repaint must preserve sidebar scroll")
+  } finally {
+    global.document = previousDocument
+  }
+})
+
+test("full render preserves sidebar scroll while rebuilding #root", () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const { root, sideScroll, document } = fakeSidebarScrollDocument({
+    resetOnRootRender: true,
+    scrollTop: 360
+  })
+  root.innerHTML = "ORIGINAL_ROOT"
+  sideScroll.scrollTop = 360
+  global.document = document
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  const { render, state } = __test
+  const previousState = {
+    nav: state.nav,
+    projects: state.projects,
+    activeProjectId: state.activeProjectId,
+    document: state.document,
+    rightSidebarOpen: state.rightSidebarOpen,
+    diagnosticsOpen: state.diagnosticsOpen,
+    sidebarCollapsed: state.sidebarCollapsed,
+    toast: state.toast
+  }
+
+  try {
+    Object.assign(state, {
+      nav: "session",
+      projects: [],
+      activeProjectId: null,
+      document: null,
+      rightSidebarOpen: false,
+      diagnosticsOpen: false,
+      sidebarCollapsed: false,
+      toast: null
+    })
+
+    render()
+
+    assert.notEqual(root.innerHTML, "ORIGINAL_ROOT", "full render should rebuild #root")
+    assert.equal(sideScroll.scrollTop, 360, "full render must preserve sidebar scroll")
+  } finally {
+    Object.assign(state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
   }
 })

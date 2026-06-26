@@ -14,7 +14,8 @@ const BUILT_IN_SKILLS = [
   { name: "docx", description: "Read, create, edit and visually validate Word documents." },
   { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
-  { name: "webapp-testing", description: "Test local web applications with focused browser automation." }
+  { name: "webapp-testing", description: "Test local web applications with focused browser automation." },
+  { name: "cross-chat-memory", description: "Remember durable facts, preferences and decisions so they carry across separate chats." }
 ]
 
 const icons = {
@@ -39,7 +40,9 @@ const icons = {
   save: '<svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>',
   check: '<svg viewBox="0 0 24 24"><path d="m4 12 5 5L20 6"/></svg>',
   dots: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg>',
+  pin: '<svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 3 3v2H7v-2l3-3z"/><path d="M12 15v5"/></svg>',
   copy: '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M5 16H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v1"/></svg>',
+  fork: '<svg viewBox="0 0 21 21"><g transform="translate(2 3)"><path d="m12.5.5 3 3-3 3"/><path d="m15.5 3.5h-5l-4 5.086"/><path d="m12.5 9.5 3 3-3 3"/><path d="m15.5 12.5h-5l-4-4h-6"/></g></svg>',
   stop: '<svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>',
   folderPlus: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 12v4M10 14h4"/></svg>',
   collapse: '<svg viewBox="0 0 24 24"><path d="M9 4 5 8m0 0h3.5M5 8V4.5"/><path d="M15 20l4-4m0 0h-3.5M19 16v3.5"/></svg>',
@@ -49,6 +52,7 @@ const icons = {
   cloud: '<svg viewBox="0 0 24 24"><path d="M7 18a4.2 4.2 0 0 1-.4-8.38 5 5 0 0 1 9.61-1.1A3.8 3.8 0 0 1 17.5 18z"/></svg>',
   logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
   server: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>',
+  brain: '<svg viewBox="0 0 24 24"><path d="M9.5 3A2.5 2.5 0 0 0 7 5.5v.5a3 3 0 0 0-2 5.6V13a3 3 0 0 0 3 3v1.5A2.5 2.5 0 0 0 12 20m0-17a2.5 2.5 0 0 1 2.5 2.5v.5a3 3 0 0 1 2 5.6V13a3 3 0 0 1-3 3v1.5A2.5 2.5 0 0 1 12 20m0-17v17"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'
 }
 
@@ -83,8 +87,10 @@ const MCP_PRESETS = [
   {
     id: "backlog",
     name: "Backlog",
-    // Backlog is a local stdio MCP server (run via npx), not a remote URL. It requires the
-    // BACKLOG_DOMAIN + BACKLOG_API_KEY env vars — pre-filled here with blank values for the user.
+    // Backlog is a local stdio MCP server, not a remote URL. The command shown here is the package
+    // reference; the main process installs it on-demand into the app profile and rewrites the
+    // command to `node <entry>` so it never runs through npx (which a project's devEngines can
+    // break). It requires BACKLOG_DOMAIN + BACKLOG_API_KEY — pre-filled blank for the user.
     type: "local",
     command: "npx backlog-mcp-server",
     env: [
@@ -107,6 +113,7 @@ const {
   hasRunningTool,
   hydrateThread,
   messageCopyText,
+  needsThreadRehydration,
   userMessageFileRefs,
   messageText,
   removeOptimisticUser,
@@ -127,6 +134,14 @@ const state = {
   // long task in session A is not lost when the user switches to / creates session B.
   // The `null` key holds the "new session" draft thread before the session exists.
   threads: new Map(),
+  // Fork marker per forked session. Value is the last cloned message id; null means show the
+  // marker before any continuation if OpenCode returns an empty fork.
+  forkMarkers: new Map(),
+  // Pinned chat sessions, keyed by sessionId → { projectId, title, updatedAt }. Pinning
+  // is an app-side preference (sessions are owned by OpenCode core), persisted via the
+  // pins:* IPC with cached metadata so the flat, cross-project Pinned section renders
+  // even for sessions whose project runtime is not currently running.
+  pinnedSessions: new Map(),
   toolDisclosure: new Map(),
   document: null,
   expanded: new Set(),
@@ -139,7 +154,12 @@ const state = {
   mcpStatus: {},                   // name -> "connected" | "needs_auth" | "failed" | "disabled"
   mcpStatusError: {},              // name -> opencode's real failure reason (from GET /mcp), if any
   mcpAuthenticating: {},           // name -> true while an auth flow is in progress
-  skillsTab: "skills",             // skills | mcp (mcp tab is the Extensions marketplace)
+  skillsTab: "skills",             // skills | mcp | memory (mcp tab is the Extensions marketplace)
+  memory: null,                    // { global, project, projectId, hasProject } once loaded
+  memoryDraft: null,               // { global, project } edited text, mirrors `memory` while editing
+  memoryLoading: false,
+  memorySaving: null,              // "global" | "project" while a save is in flight
+  memoryError: null,
   mcpModalOpen: false,
   mcpSaving: false,
   mcpError: null,
@@ -166,8 +186,10 @@ const state = {
   commandMenu: { open: false, query: "", index: 0 },
   fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
   popover: null,
-  sessionMenu: null,          // sessionId đang mở menu, hoặc null
-  sessionDeleteTarget: null,  // { id, title } của session chờ xác nhận xóa trong modal
+  sessionMenu: null,          // row key `${projectId}:${sessionId}` đang mở menu, hoặc null
+  sessionDeleteTarget: null,  // { sessionId, projectId, title } của session chờ xác nhận xóa trong modal
+  sessionDeleting: false,
+  sessionDeleteError: null,
   sessionRenameTarget: null,  // { sessionId, projectId, title, label } của session đang đổi tên
   sessionRenameDraft: "",
   sessionRenameError: null,
@@ -220,6 +242,13 @@ const RIGHT_FILE_MAX_WIDTH = 420
 const DOCUMENT_WIDTH_KEY = "openworking:document-viewer-w"
 const DOCUMENT_MIN_WIDTH = 300
 const DOCUMENT_MAX_WIDTH = 900
+// Minimum the chat column must keep when the document preview shares the row, so
+// the side-by-side grid can never be squeezed into a single stacked column.
+const CHAT_MIN_WIDTH = 360
+// Resizer gutters in the grid (sidebar↔chat is absolute, so only chat↔doc and
+// doc↔right-file count here).
+const GRID_GUTTER = 7
+const EXPANDED_KEY = "openworking:expanded-projects"
 
 function setSidebarWidth(width) {
   const clamped = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(width)))
@@ -233,10 +262,32 @@ function setRightFileSidebarWidth(width) {
   return clamped
 }
 
+// Largest the document preview may be without forcing the chat column below its
+// minimum. Measures the live layout so the clamp tracks the current window size,
+// sidebar collapse state, and whether the right-file sidebar is open.
+function maxDocumentViewerWidth() {
+  const app = document.querySelector(".app")
+  const total = app ? app.getBoundingClientRect().width : window.innerWidth
+  const sidebar = state.sidebarCollapsed ? null : document.querySelector(".sidebar")
+  const sidebarW = sidebar ? sidebar.getBoundingClientRect().width : 0
+  const rightSidebar = state.rightSidebarOpen ? document.querySelector(".right-file-sidebar") : null
+  const rightW = rightSidebar ? rightSidebar.getBoundingClientRect().width + GRID_GUTTER : 0
+  const budget = total - sidebarW - rightW - GRID_GUTTER - CHAT_MIN_WIDTH
+  const cap = Math.max(DOCUMENT_MIN_WIDTH, Math.min(DOCUMENT_MAX_WIDTH, Math.round(budget)))
+  return Number.isFinite(cap) ? cap : DOCUMENT_MAX_WIDTH
+}
+
 function setDocumentViewerWidth(width) {
-  const clamped = Math.max(DOCUMENT_MIN_WIDTH, Math.min(DOCUMENT_MAX_WIDTH, Math.round(width)))
-  document.documentElement.style.setProperty("--document-w", `${clamped}px`)
-  return clamped
+  const max = maxDocumentViewerWidth()
+  // Guard every input: a non-finite width or max would otherwise produce a
+  // `NaNpx` track, which invalidates the whole grid-template-columns and
+  // collapses the side-by-side panels into one stacked column.
+  const upper = Number.isFinite(max) ? max : DOCUMENT_MAX_WIDTH
+  const requested = Number.isFinite(width) ? Math.round(width) : DOCUMENT_MIN_WIDTH
+  const clamped = Math.max(DOCUMENT_MIN_WIDTH, Math.min(upper, requested))
+  const safe = Number.isFinite(clamped) ? clamped : DOCUMENT_MIN_WIDTH
+  document.documentElement.style.setProperty("--document-w", `${safe}px`)
+  return safe
 }
 
 function applyStoredSidebarWidth() {
@@ -254,9 +305,40 @@ function applyStoredDocumentViewerWidth() {
   if (Number.isFinite(stored) && stored > 0) setDocumentViewerWidth(stored)
 }
 
+// Reads the persisted set of expanded sidebar project ids. Returns an empty Set on missing or
+// malformed storage so a corrupt value can never throw during startup.
+function loadStoredExpanded() {
+  try {
+    const ids = JSON.parse(localStorage.getItem(EXPANDED_KEY) || "[]")
+    return new Set(Array.isArray(ids) ? ids : [])
+  } catch (error) {
+    return new Set()
+  }
+}
+
+// Writes the current expanded set back to storage. A storage failure must not break a render.
+function persistExpanded() {
+  try {
+    localStorage.setItem(EXPANDED_KEY, JSON.stringify([...state.expanded]))
+  } catch (error) {
+    // Ignore — persistence is best-effort.
+  }
+}
+
 applyStoredSidebarWidth()
 applyStoredRightFileSidebarWidth()
 applyStoredDocumentViewerWidth()
+
+// Re-clamp the document preview when the window shrinks so the side-by-side grid
+// keeps fitting (instead of overflowing/collapsing). Only relevant while a
+// document is open; the persisted value is left untouched so widening the window
+// again restores the user's chosen size up to the stored bound.
+window.addEventListener("resize", () => {
+  if (!state.document) return
+  const stored = Number(localStorage.getItem(DOCUMENT_WIDTH_KEY))
+  const current = Number.isFinite(stored) && stored > 0 ? stored : DOCUMENT_MAX_WIDTH
+  setDocumentViewerWidth(current)
+})
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -269,6 +351,15 @@ function escapeHtml(value) {
 
 function icon(name) {
   return icons[name] || ""
+}
+
+// Hover-hint attributes for a resize divider. The actual tooltip is a single
+// floating element on <body> that follows the cursor (see attachResizeTip); the
+// resizer only carries the text via data-* so the hover controller can read it.
+// `main`/`sub` are the two lines; optional `key` renders a shortcut chip.
+function resizeTipAttrs(main, sub, key) {
+  const keyAttr = key ? ` data-tip-key="${escapeHtml(key)}"` : ""
+  return `data-tip-main="${escapeHtml(main)}" data-tip-sub="${escapeHtml(sub)}"${keyAttr}`
 }
 
 function selectedProject() {
@@ -362,6 +453,104 @@ async function ensureProjectFileCandidates() {
 
 function projectSessions(projectId) {
   return state.sessionsByProject[projectId] || []
+}
+
+// Renderer-side path compare (no realpath available here): trim a trailing separator and
+// compare. Mirrors the intent of process-manager's samePath for matching a session's
+// `directory` against a project's `path`.
+function samePathish(left, right) {
+  if (!left || !right) return false
+  const normalize = (value) => String(value).replace(/[/\\]+$/, "")
+  return normalize(left) === normalize(right)
+}
+
+function sessionRowKey(projectId, sessionId) {
+  return `${projectId || ""}:${sessionId || ""}`
+}
+
+function dedupeSessions(sessions) {
+  const seen = new Set()
+  const unique = []
+  for (const session of Array.isArray(sessions) ? sessions : []) {
+    if (!session?.id || seen.has(session.id)) continue
+    seen.add(session.id)
+    unique.push(session)
+  }
+  return unique
+}
+
+// Keeps only sessions whose `directory` matches the given project path. /session?directory= is
+// already directory-scoped, so this is a defensive filter against any session tagged with a
+// sibling/child directory leaking into a project's list. Sessions without `directory` are only
+// accepted from the active runtime list, not from directory-scoped background fetches.
+function sessionsForProjectPath(sessions, projectPath) {
+  return (Array.isArray(sessions) ? sessions : []).filter((session) =>
+    session?.directory && samePathish(session.directory, projectPath)
+  )
+}
+
+function activeSessionsForProjectPath(sessions, projectPath) {
+  return (Array.isArray(sessions) ? sessions : []).filter((session) =>
+    session?.id && (!session.directory || samePathish(session.directory, projectPath))
+  )
+}
+
+function setProjectSessions(projectId, sessions, source = "directory") {
+  const project = state.projects.find((item) => item.id === projectId)
+  if (!project) return []
+  const next = dedupeSessions(
+    source === "active"
+      ? activeSessionsForProjectPath(sessions, project.path)
+      : sessionsForProjectPath(sessions, project.path)
+  )
+  const nextIds = new Set(next.map((session) => session.id))
+  if (nextIds.size) {
+    for (const [otherProjectId, otherSessions] of Object.entries(state.sessionsByProject)) {
+      if (otherProjectId === projectId || !Array.isArray(otherSessions)) continue
+      const filtered = otherSessions.filter((session) => !nextIds.has(session.id))
+      if (filtered.length !== otherSessions.length) state.sessionsByProject[otherProjectId] = filtered
+    }
+  }
+  state.sessionsByProject[projectId] = next
+  return next
+}
+
+// Populates sidebar history for EVERY project from the single running server. OpenCode's
+// GET /session is scoped by directory, so we ask the one running server once per project
+// `directory`. Requests run SEQUENTIALLY (not a parallel burst) and only while the runtime is
+// running — if the server stops or the active project changes mid-loop we bail, so the fill never
+// fights a project switch's server restart (the source of the ECONNRESET storm). A single
+// in-flight guard coalesces the openProject + refreshSessionData triggers into one pass. Empty
+// directory responses still leave existing lists alone; non-empty unsafe responses clear stale rows.
+function loadAllSessions() {
+  if (loadAllSessions.inFlight) return loadAllSessions.inFlight
+  loadAllSessions.inFlight = (async () => {
+    if (state.runtime?.status !== "running") return
+    const activeProjectId = state.activeProjectId
+    for (const project of state.projects) {
+      if (state.runtime?.status !== "running" || state.activeProjectId !== activeProjectId) break
+      const sessions = await window.openworking.runtime.listSessionsForDirectory(project.path).catch(() => null)
+      if (Array.isArray(sessions) && sessions.length) setProjectSessions(project.id, sessions, "directory")
+    }
+  })().finally(() => { loadAllSessions.inFlight = null })
+  return loadAllSessions.inFlight
+}
+
+// Pinned projects float to the top, keeping registry order within each group.
+function sortProjectsByPin(projects) {
+  return [
+    ...projects.filter((project) => project.pinned),
+    ...projects.filter((project) => !project.pinned)
+  ]
+}
+
+// Builds the sessionId → metadata map from the pins:list IPC array.
+function pinsToMap(pins) {
+  return new Map((pins || []).map((pin) => [pin.sessionId, {
+    projectId: pin.projectId || null,
+    title: pin.title || "",
+    updatedAt: pin.updatedAt || null
+  }]))
 }
 
 function selectedSession() {
@@ -528,12 +717,14 @@ async function startUpdateDownload() {
 }
 
 async function loadInitialState() {
-  const [projects, activeConfig, runtime] = await Promise.all([
+  const [projects, activeConfig, runtime, pins] = await Promise.all([
     window.openworking.projects.list(),
     window.openworking.config.get(),
-    window.openworking.runtime.get()
+    window.openworking.runtime.get(),
+    window.openworking.pins.list()
   ])
   state.projects = projects
+  state.pinnedSessions = pinsToMap(pins)
   state.configPath = activeConfig.path
   state.config = activeConfig.config
   state.customSkills = activeConfig.customSkills || []
@@ -552,13 +743,22 @@ async function loadInitialState() {
     state.installStatus = status
     render()
   })
+  // Restore the accordions the user had open last session, pruning ids for projects that no
+  // longer exist. The active project is always opened below so the very first run still shows
+  // its sessions even with empty storage.
+  for (const id of loadStoredExpanded()) {
+    if (projects.some((project) => project.id === id)) state.expanded.add(id)
+  }
   if (projects[0]) {
     state.activeProjectId = projects[0].id
     state.expanded.add(projects[0].id)
   }
+  persistExpanded()
   render()
   checkAppVersion()
   if (projects[0]) {
+    // openProject() loads the active project's sessions AND calls loadAllSessions() to fill in
+    // history for every other expanded/pinned accordion from the same server.
     await openProject(projects[0].id, { selectLatest: false }).catch((error) => showToast(error.message))
   }
 }
@@ -570,6 +770,223 @@ function handleRuntimeUpdate(runtime) {
 }
 
 const SESSION_LIFECYCLE_EVENTS = new Set(["session.status", "session.idle", "session.aborted", "session.error"])
+const STREAM_PACE_DELAY_MS = 40
+const STREAM_SEGMENT_TARGET_CHARS = 8
+const STREAM_SEGMENT_MAX_CHARS = 12
+const STREAM_BACKLOG_SEGMENT_THRESHOLD = 160
+const STREAM_BACKLOG_BATCH_SIZE = 2
+const STREAM_TERMINAL_EVENTS = new Set(["session.idle", "session.error", "session.aborted"])
+
+function charCount(value) {
+  return Array.from(String(value || "")).length
+}
+
+function splitLongToken(token, maxChars = STREAM_SEGMENT_MAX_CHARS) {
+  const chars = Array.from(token)
+  const chunks = []
+  for (let index = 0; index < chars.length; index += maxChars) {
+    chunks.push(chars.slice(index, index + maxChars).join(""))
+  }
+  return chunks
+}
+
+function splitStreamDeltaSegments(delta, {
+  targetChars = STREAM_SEGMENT_TARGET_CHARS,
+  maxChars = STREAM_SEGMENT_MAX_CHARS
+} = {}) {
+  const text = String(delta || "")
+  if (!text) return []
+  const tokens = text.match(/\s+|[^\s]+/gu) || []
+  const segments = []
+  let current = ""
+  const flush = () => {
+    if (!current) return
+    segments.push(current)
+    current = ""
+  }
+
+  for (const token of tokens) {
+    const tokenLength = charCount(token)
+    if (tokenLength > maxChars) {
+      flush()
+      segments.push(...splitLongToken(token, maxChars))
+      continue
+    }
+    const nextLength = charCount(current) + tokenLength
+    if (current && nextLength > maxChars && charCount(current) >= Math.min(targetChars, maxChars)) {
+      flush()
+    }
+    current += token
+    if (charCount(current) >= targetChars && /[\s.,!?;:)\]}]$/u.test(current)) flush()
+  }
+  flush()
+  return segments
+}
+
+function pacedPartKey(messageID, partID) {
+  return `${messageID || ""}\u0000${partID || ""}`
+}
+
+function createStreamPacer({
+  applyEvent,
+  delayMs = STREAM_PACE_DELAY_MS,
+  splitDelta = splitStreamDeltaSegments,
+  setTimer = (callback, delay) => setTimeout(callback, delay),
+  clearTimer = (timer) => clearTimeout(timer)
+} = {}) {
+  const sessions = new Map()
+  const ensureSession = (sessionID) => {
+    let entry = sessions.get(sessionID)
+    if (!entry) {
+      entry = { sessionID, queue: [], deferred: [], partCounts: new Map(), timer: null }
+      sessions.set(sessionID, entry)
+    }
+    return entry
+  }
+  const incrementPart = (entry, key) => {
+    entry.partCounts.set(key, (entry.partCounts.get(key) || 0) + 1)
+  }
+  const decrementPart = (entry, key) => {
+    const next = (entry.partCounts.get(key) || 0) - 1
+    if (next > 0) entry.partCounts.set(key, next)
+    else entry.partCounts.delete(key)
+  }
+  const finishIfIdle = (entry) => {
+    if (entry.queue.length || entry.timer || entry.partCounts.size) return
+    const deferred = entry.deferred.splice(0)
+    for (const event of deferred) applyEvent(event)
+    if (!entry.queue.length && !entry.timer && !entry.deferred.length && !entry.partCounts.size) {
+      sessions.delete(entry.sessionID)
+    }
+  }
+  const schedule = (entry) => {
+    if (entry.timer || !entry.queue.length) return
+    entry.timer = setTimer(() => {
+      entry.timer = null
+      const batchSize = entry.queue.length > STREAM_BACKLOG_SEGMENT_THRESHOLD
+        ? Math.min(STREAM_BACKLOG_BATCH_SIZE, entry.queue.length)
+        : 1
+      for (let index = 0; index < batchSize; index += 1) {
+        const item = entry.queue.shift()
+        if (!item) break
+        applyEvent(item.event)
+        decrementPart(entry, item.key)
+      }
+      if (entry.queue.length) schedule(entry)
+      else finishIfIdle(entry)
+    }, delayMs)
+  }
+
+  const api = {
+    enqueue(event) {
+      if (!event?.sessionID || typeof event.delta !== "string") return false
+      const segments = splitDelta(event.delta)
+      if (!segments.length) return false
+      const entry = ensureSession(event.sessionID)
+      const key = pacedPartKey(event.messageID, event.partID)
+      for (const segment of segments) {
+        incrementPart(entry, key)
+        entry.queue.push({ key, event: { ...event, delta: segment } })
+      }
+      schedule(entry)
+      return true
+    },
+    defer(event) {
+      if (!event?.sessionID) return false
+      ensureSession(event.sessionID).deferred.push(event)
+      return true
+    },
+    flushSession(sessionID) {
+      const entry = sessions.get(sessionID)
+      if (!entry) return false
+      if (entry.timer) {
+        clearTimer(entry.timer)
+        entry.timer = null
+      }
+      while (entry.queue.length) {
+        const item = entry.queue.shift()
+        applyEvent(item.event)
+        decrementPart(entry, item.key)
+      }
+      const deferred = entry.deferred.splice(0)
+      for (const event of deferred) applyEvent(event)
+      sessions.delete(sessionID)
+      return true
+    },
+    clearSession(sessionID) {
+      const entry = sessions.get(sessionID)
+      if (!entry) return false
+      if (entry.timer) clearTimer(entry.timer)
+      sessions.delete(sessionID)
+      return true
+    },
+    flushAll() {
+      for (const sessionID of [...sessions.keys()]) api.flushSession(sessionID)
+    },
+    hasPendingSession(sessionID) {
+      const entry = sessions.get(sessionID)
+      return Boolean(entry && (entry.queue.length || entry.deferred.length || entry.partCounts.size || entry.timer))
+    },
+    hasPendingPart(sessionID, messageID, partID) {
+      return Boolean(sessions.get(sessionID)?.partCounts.has(pacedPartKey(messageID, partID)))
+    }
+  }
+  return api
+}
+
+function isPaceableDelta(event) {
+  return event?.type === "message.part.delta" && event.field === "text"
+}
+
+function isTextPartUpdate(event) {
+  return event?.type === "message.part.updated" &&
+    (event.part?.type === "text" || event.part?.type === "reasoning")
+}
+
+function maybeConsumePacedRuntimeEvent(event, activeSessionId = state.activeSessionId, pacer = streamPacer) {
+  if (!event?.sessionID || event.sessionID !== activeSessionId) return false
+  if (isPaceableDelta(event)) return pacer.enqueue(event)
+  if (isTextPartUpdate(event) && pacer.hasPendingPart(event.sessionID, event.part?.messageID, event.part?.id)) {
+    return pacer.defer(event)
+  }
+  if (STREAM_TERMINAL_EVENTS.has(event.type) && pacer.hasPendingSession(event.sessionID)) {
+    if (event.type === "session.aborted") {
+      pacer.flushSession(event.sessionID)
+      return false
+    }
+    return pacer.defer(event)
+  }
+  return false
+}
+
+function applyRuntimeStreamEvent(event) {
+  const sessionId = event?.sessionID
+  if (!sessionId) return
+  const thread = state.threads.get(sessionId)
+  if (!thread) {
+    // We are not tracking this session's thread yet, but a lifecycle change still
+    // moves its sidebar badge (busy/idle) — repaint badges without a full render.
+    if (SESSION_LIFECYCLE_EVENTS.has(event.type)) renderSessionBadges()
+    return
+  }
+  const result = applyThreadEvent(thread, event) || {}
+  const isActive = sessionId === state.activeSessionId
+  if (SESSION_LIFECYCLE_EVENTS.has(event.type)) {
+    if (isActive) updateComposerSubmitButton()
+    renderSessionBadges()
+  }
+  if (result.changed && isActive) {
+    maybeAutoOpenPlan()
+    scheduleThreadRender()
+  }
+  if (result.reconcile) scheduleRefresh()
+}
+
+const streamPacer = createStreamPacer({ applyEvent: applyRuntimeStreamEvent })
+
+function flushActiveStreamPacing() {
+  if (state.activeSessionId) streamPacer.flushSession(state.activeSessionId)
+}
 
 function handleRuntimeStream(event) {
   // Connection (re)established → reconcile every known thread from the server.
@@ -586,26 +1003,11 @@ function handleRuntimeStream(event) {
     handleMcpStreamEvent(event)
     return
   }
-  const sessionId = event?.sessionID
-  if (!sessionId) return
-  const thread = state.threads.get(sessionId)
-  if (!thread) {
-    // We are not tracking this session's thread yet, but a lifecycle change still
-    // moves its sidebar badge (busy/idle) — repaint badges without a full render.
-    if (SESSION_LIFECYCLE_EVENTS.has(event.type)) renderSessionBadges()
+  if (!event?.sessionID) return
+  if (maybeConsumePacedRuntimeEvent(event)) {
     return
   }
-  const result = applyThreadEvent(thread, event)
-  const isActive = sessionId === state.activeSessionId
-  if (SESSION_LIFECYCLE_EVENTS.has(event.type)) {
-    if (isActive) updateComposerSubmitButton()
-    renderSessionBadges()
-  }
-  if (result.changed && isActive) {
-    maybeAutoOpenPlan()
-    scheduleThreadRender()
-  }
-  if (result.reconcile) scheduleRefresh()
+  applyRuntimeStreamEvent(event)
 }
 
 // Live-update MCP server connection status from runtime stream events. Only repaint
@@ -645,6 +1047,42 @@ async function refreshMcpStatus() {
     if (state.nav === "skills" && state.skillsTab === "mcp") render()
   } catch {
     // Runtime not ready; leave status empty.
+  }
+}
+
+// Cross-chat memory: load both scopes into state, seeding the editable draft. Called when the
+// Memory tab is opened. Re-seeds the draft from disk so the editor reflects the assistant's writes.
+async function loadMemory() {
+  state.memoryLoading = true
+  state.memoryError = null
+  render()
+  try {
+    const memory = await window.openworking.memory.get()
+    state.memory = memory
+    state.memoryDraft = { global: memory.global || "", project: memory.project || "" }
+  } catch (error) {
+    state.memoryError = error?.message || "Failed to load memory."
+  } finally {
+    state.memoryLoading = false
+    if (state.nav === "skills" && state.skillsTab === "memory") render()
+  }
+}
+
+async function saveMemory(scope) {
+  if (!["global", "project"].includes(scope) || state.memorySaving) return
+  const content = state.memoryDraft?.[scope] ?? ""
+  state.memorySaving = scope
+  state.memoryError = null
+  render()
+  try {
+    const memory = await window.openworking.memory.save(scope, content)
+    state.memory = memory
+    state.memoryDraft = { global: memory.global || "", project: memory.project || "" }
+  } catch (error) {
+    state.memoryError = error?.message || "Failed to save memory."
+  } finally {
+    state.memorySaving = null
+    if (state.nav === "skills" && state.skillsTab === "memory") render()
   }
 }
 
@@ -690,10 +1128,33 @@ function openInlinePlan(text) {
   })
 }
 
+// Keep an already-open inline plan panel in sync with the assistant's latest
+// text. The plan agent streams its prose part-by-part, so the panel must follow
+// the live message instead of freezing on the first snapshot — otherwise it
+// shows a truncated, mid-stream copy of the plan. Returns true when the panel
+// content actually changed so the caller can repaint the document viewer (the
+// thread-only repaint path does not rebuild it).
+function syncInlinePlan() {
+  if (state.document?.requestedPath !== INLINE_PLAN_PATH) return false
+  const text = latestPlanText()
+  if (!text || text === state.document.content) return false
+  state.document.content = text
+  return true
+}
+
 function maybeAutoOpenPlan() {
-  if (!activePlanProposal()) return
+  if (!activePlanProposal()) {
+    state.planAutoOpened = null
+    return
+  }
   const sessionId = state.activeSessionId
-  if (!sessionId || state.planAutoOpened === sessionId) return
+  if (!sessionId) return
+  // If the panel is already showing this session's inline plan, keep its content
+  // fresh as more text streams in (re-sync runs even after the one-time auto-open).
+  // scheduleThreadRender (the stream-event repaint) skips the document viewer, so
+  // a content change needs a full coalesced render to paint.
+  if (syncInlinePlan()) scheduleRender()
+  if (state.planAutoOpened === sessionId) return
   const ref = latestPlanFileRef()
   if (ref) {
     state.planAutoOpened = sessionId
@@ -701,9 +1162,8 @@ function maybeAutoOpenPlan() {
     return
   }
   // No plan file written (common for prose-only plan agents): fall back to the
-  // assistant's text, but only once the reply has finished streaming.
-  const status = activeThread().status?.type
-  if (status === "busy" || status === "retry") return
+  // assistant's text. Open as soon as there is enough to show; syncInlinePlan
+  // then keeps it growing with the stream.
   const text = latestPlanText()
   if (text.length < PLAN_TEXT_MIN_LENGTH) return
   state.planAutoOpened = sessionId
@@ -727,13 +1187,50 @@ function scheduleRefresh() {
   scheduleRefresh.timer = setTimeout(() => refreshSessionData().catch(() => {}), 180)
 }
 
+async function reconcileThread(sessionId) {
+  const thread = state.threads.get(sessionId)
+  const serverStatus = state.runtime?.sessionStatuses?.[sessionId]
+  if (!thread || !needsThreadRehydration(thread, serverStatus)) return
+  const messages = await window.openworking.runtime.listMessages({ sessionId })
+  hydrateThread(thread, sessionId, messages, serverStatus)
+}
+
 async function refreshSessionData() {
   if (state.runtime?.status !== "running" || state.runtime.project?.id !== state.activeProjectId) return
-  state.sessionsByProject[state.activeProjectId] = await window.openworking.runtime.listSessions()
-  if (state.activeSessionId) {
-    hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId: state.activeSessionId }))
+  setProjectSessions(state.activeProjectId, await window.openworking.runtime.listSessions(), "active")
+  // Refresh the other expanded/pinned accordions' history (per-directory; coalesced via in-flight guard).
+  await loadAllSessions()
+  const activeId = state.activeSessionId
+  const staleIds = [...state.threads.keys()].filter((id) => (
+    id && needsThreadRehydration(state.threads.get(id), state.runtime?.sessionStatuses?.[id])
+  ))
+  let touchedBackground = false
+  let backgroundError = null
+  try {
+    for (const id of staleIds) {
+      if (id === activeId) continue
+      touchedBackground = true
+      await reconcileThread(id)
+    }
+  } catch (error) {
+    backgroundError = error
+  } finally {
+    if (backgroundError && touchedBackground && activeId) {
+      await window.openworking.runtime.listMessages({ sessionId: activeId }).catch(() => {})
+    }
   }
-  render()
+  if (backgroundError) throw backgroundError
+  if (activeId && needsThreadRehydration(state.threads.get(activeId), state.runtime?.sessionStatuses?.[activeId])) {
+    const serverStatus = state.runtime?.sessionStatuses?.[activeId]
+    hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId: activeId }), serverStatus)
+  } else if (touchedBackground && activeId) {
+    // listMessages updates the runtime's active session; restore focus after background reconciles.
+    await window.openworking.runtime.listMessages({ sessionId: activeId })
+  }
+  // Background refresh touches session lists (sidebar) and the active thread; repaint both
+  // surgically instead of rebuilding the whole window.
+  scheduleSidebarRender()
+  scheduleThreadRender()
 }
 
 function captureThreadScroll() {
@@ -756,6 +1253,17 @@ function restoreThreadScroll(previous, threadScroll) {
   }
 
   if (previous) thread.scrollTop = previous.scrollTop
+}
+
+function captureSidebarScroll() {
+  const sidebar = document.querySelector(".side-scroll")
+  return sidebar ? sidebar.scrollTop : null
+}
+
+function restoreSidebarScroll(previous) {
+  if (previous === null) return
+  const sidebar = document.querySelector(".side-scroll")
+  if (sidebar) sidebar.scrollTop = previous
 }
 
 function renderMarkdown(text) {
@@ -836,12 +1344,8 @@ function renderThreadContent({ threadScroll = "preserve" } = {}) {
   if (!inner) return
   const previousThreadScroll = captureThreadScroll()
   inner.innerHTML = renderThreadRows()
-  bindMessageActions(inner)
-  bindArtifactActions(inner)
-  bindToolStepActions(inner)
-  bindFileRefActions(inner)
-  bindPendingPromptActions(inner)
-  inner.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", handleAction))
+  // Thread-row clicks (copy/artifact/tool-step/file-ref/question/permission/data-action) are
+  // handled by the delegated #root listeners, so no per-render rebinding is needed here.
   scheduleMermaidRender(inner)
   restoreThreadScroll(previousThreadScroll, threadScroll)
 }
@@ -854,14 +1358,55 @@ function scheduleThreadRender() {
   })
 }
 
+// Repaints ONLY the sidebar subtree (#sidebarRoot) in place. Clicks are delegated from #root, so
+// replacing innerHTML needs no rebinding — this is O(sidebar) instead of the O(whole-DOM) full
+// render() + bindEvents() rebuild. Used by sidebar-only state changes (open project, expand/
+// collapse, session-list fill, pin/menu toggles, show-more).
+function renderSidebarInto() {
+  const host = document.getElementById("sidebarRoot")
+  if (!host) return
+  const previousSidebarScroll = captureSidebarScroll()
+  host.innerHTML = renderSidebar()
+  restoreSidebarScroll(previousSidebarScroll)
+}
+
+function scheduleSidebarRender() {
+  if (scheduleSidebarRender.frame) return
+  scheduleSidebarRender.frame = requestAnimationFrame(() => {
+    scheduleSidebarRender.frame = null
+    renderSidebarInto()
+  })
+}
+
+// Coalesces full renders into one per animation frame. Full render() rebuilds the whole #root
+// tree, so background-driven bursts (session refresh, stream reconciles) that each ask for a
+// repaint would otherwise thrash the DOM. Interactive paths still call render() directly so the
+// UI updates synchronously on click. Prefer scheduleSidebarRender()/scheduleThreadRender() when
+// only part of the UI changed.
+function scheduleRender() {
+  if (scheduleRender.frame) return
+  scheduleRender.frame = requestAnimationFrame(() => {
+    scheduleRender.frame = null
+    render()
+  })
+}
+
+// Full repaint: rebuilds all of #root. Clicks/inputs are handled by the delegated #root listeners
+// (installDelegatedListeners), so this NO LONGER rebinds listeners — bindEvents() now only runs the
+// few imperative post-render bits (focus a rename input, size the prompt textarea). Even so, a full
+// render() rebuilds the whole tree, so prefer the narrower paths when only part of the UI changed:
+//   - scheduleSidebarRender() for sidebar-only changes (open project, expand/collapse, pin, menus)
+//   - scheduleThreadRender() for the active thread
+//   - scheduleRender() to coalesce a full repaint across a burst of background updates
 function render({ threadScroll = "preserve" } = {}) {
+  const previousSidebarScroll = captureSidebarScroll()
   const previousThreadScroll = captureThreadScroll()
 
   document.getElementById("root").innerHTML = `
     <div class="desktop">
       <div class="window">
         <div class="app${state.sidebarCollapsed ? " collapsed" : ""}${state.document ? " has-doc" : ""}${state.rightSidebarOpen ? " right-open" : ""}">
-          ${renderSidebar()}
+          <div id="sidebarRoot" style="display:contents">${renderSidebar()}</div>
           ${renderMain()}
           ${state.document ? renderDocumentViewer() : ""}
           ${state.rightSidebarOpen ? renderRightFileSidebar() : ""}
@@ -881,6 +1426,7 @@ function render({ threadScroll = "preserve" } = {}) {
   bindEvents()
   renderToast()
   scheduleMermaidRender()
+  restoreSidebarScroll(previousSidebarScroll)
   restoreThreadScroll(previousThreadScroll, threadScroll)
 }
 
@@ -940,14 +1486,16 @@ function renderSkillUploadModal() {
 function renderDeleteSessionModal() {
   const target = state.sessionDeleteTarget
   if (!target) return ""
+  const disableActions = state.sessionDeleting ? " disabled" : ""
   return `
-    <div class="update-backdrop" data-action="cancelDeleteSession">
+    <div class="update-backdrop" ${state.sessionDeleting ? "" : 'data-action="cancelDeleteSession"'}>
       <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="deleteSessionTitle" data-stop-click>
         <div class="confirm-title" id="deleteSessionTitle">Delete session?</div>
         <p>“${escapeHtml(target.title)}” will be permanently deleted. This can’t be undone.</p>
+        <div class="field-error">${state.sessionDeleteError ? escapeHtml(state.sessionDeleteError) : ""}</div>
         <div class="confirm-actions">
-          <button class="secondary-btn" data-action="cancelDeleteSession">Cancel</button>
-          <button class="danger-btn" data-action="confirmDeleteSession">Delete</button>
+          <button class="secondary-btn${disableActions}" data-action="cancelDeleteSession">Cancel</button>
+          <button class="danger-btn${disableActions}" data-action="confirmDeleteSession">${state.sessionDeleting ? "Deleting..." : "Delete"}</button>
         </div>
       </div>
     </div>
@@ -1065,6 +1613,12 @@ function renderSidebar() {
         <button class="nav-item ${state.nav === "skills" ? "active" : ""}" data-nav="skills">
           ${icon("blocks")}<span>Skills</span>
         </button>
+        ${hasPinnedItems() ? `
+          <div class="side-label">
+            <span class="sl-title">Pinned</span>
+          </div>
+          ${renderPinnedSection()}
+        ` : ""}
         <div class="side-label">
           <span class="sl-title">Projects</span>
           <div class="sl-actions">
@@ -1072,7 +1626,7 @@ function renderSidebar() {
             <button class="sl-act" title="Add project" data-action="addProject">${icon("folderPlus")}</button>
           </div>
         </div>
-        ${state.projects.map(renderProjectGroup).join("")}
+        ${renderProjectList()}
       </div>
       <div class="side-foot">
         <button class="side-user ${state.nav === "config" ? "active" : ""}" data-nav="config">
@@ -1084,7 +1638,7 @@ function renderSidebar() {
         </button>
       </div>
     </aside>
-    <div class="sidebar-resizer" data-resizer></div>
+    <div class="sidebar-resizer" data-resizer ${resizeTipAttrs("Click to collapse", "Drag to resize", "⌘B")}></div>
   `
 }
 
@@ -1104,7 +1658,7 @@ function renderRightFileSidebar() {
     body = `<div class="file-tree">${renderFileTreeRows("", 0)}</div>`
   }
   return `
-    <div class="right-file-resizer" data-right-file-resizer></div>
+    <div class="right-file-resizer" data-right-file-resizer ${resizeTipAttrs("Drag to resize", "Adjust panel width")}></div>
     <aside class="right-file-sidebar">
       <div class="right-file-head">
         <span class="right-file-title">Files</span>
@@ -1148,10 +1702,40 @@ function renderFileTreeRows(directoryPath, depth) {
   }).join("")
 }
 
+// The "Projects" section lists only unpinned projects — pinned projects live in the
+// Pinned section above (rendered by renderPinnedSection), so they are not duplicated.
+function renderProjectList() {
+  return state.projects.filter((project) => !project.pinned).map(renderProjectGroup).join("")
+}
+
+function hasPinnedItems() {
+  return state.pinnedSessions.size > 0 || state.projects.some((project) => project.pinned)
+}
+
+// The unified Pinned section: pinned chat sessions first (flat, cross-project, no folder
+// label), then pinned projects as full accordions. Pinned session metadata is cached in
+// the pin store so rows render even when that session's project runtime isn't running;
+// when the project IS loaded we prefer its live session object for fresh title/time/busy.
+function renderPinnedSection() {
+  const pinnedProjects = state.projects.filter((project) => project.pinned)
+  const sessionRows = [...state.pinnedSessions.entries()].map(([sessionId, meta]) => {
+    const live = (state.sessionsByProject[meta.projectId] || []).find((session) => session.id === sessionId)
+    const session = live || { id: sessionId, title: meta.title, time: { updated: meta.updatedAt } }
+    return renderSessionRow({ id: meta.projectId }, session)
+  }).join("")
+  return `
+    ${sessionRows ? `<div class="pinned-list">${sessionRows}</div>` : ""}
+    ${pinnedProjects.map(renderProjectGroup).join("")}
+  `
+}
+
 function renderProjectGroup(project) {
   const sessions = projectSessions(project.id)
   const open = state.expanded.has(project.id)
-  const shown = state.showAll.has(project.id) ? sessions : sessions.slice(0, 5)
+  // Pinned chats are surfaced in the unified Pinned section, so they are excluded here
+  // to avoid showing the same chat twice.
+  const rest = sessions.filter((session) => !state.pinnedSessions.has(session.id))
+  const shownRest = state.showAll.has(project.id) ? rest : rest.slice(0, 5)
   return `
     <div class="proj-group">
       <div class="proj-head-wrap">
@@ -1163,6 +1747,9 @@ function renderProjectGroup(project) {
         <button class="proj-kebab" data-project-menu="${escapeHtml(project.id)}" title="Options">${icon("dots")}</button>
         ${state.projectMenu === project.id ? `
           <div class="pop project-pop">
+            <button class="pop-item" data-project-pin="${escapeHtml(project.id)}" data-pinned="${project.pinned ? "1" : "0"}">
+              ${icon("pin")}<span>${project.pinned ? "Unpin project" : "Pin project"}</span>
+            </button>
             <button class="pop-item" data-project-rename="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}">
               ${icon("edit")}<span>Rename</span>
             </button>
@@ -1173,28 +1760,40 @@ function renderProjectGroup(project) {
       </div>
       ${open ? `
         <div class="sessions">
-          ${sessions.length ? shown.map((session) => `
-            <div class="session-row-wrap ${session.id === state.activeSessionId ? "active" : ""}" data-session-row="${escapeHtml(session.id)}">
-              <button class="session-row" data-session-id="${escapeHtml(session.id)}" data-project-id="${escapeHtml(project.id)}">
-                <span class="session-busy-dot ${sessionBusy(session.id) ? "on" : ""}" title="Running"></span>
-                <span class="stitle">${escapeHtml(sessionDisplayTitle(session))}</span>
-                <span class="stime">${escapeHtml(relativeTime(sessionUpdatedAt(session)))}</span>
-              </button>
-              <button class="session-kebab" data-session-menu="${escapeHtml(session.id)}" title="Options">${icon("dots")}</button>
-              ${state.sessionMenu === session.id ? `
-                <div class="pop session-pop">
-                  <button class="pop-item" data-session-rename="${escapeHtml(session.id)}" data-session-project="${escapeHtml(project.id)}" data-session-title="${escapeHtml(session.title || "")}" data-session-label="${escapeHtml(sessionDisplayTitle(session))}">
-                    ${icon("edit")}<span>Rename</span>
-                  </button>
-                  <button class="pop-item danger" data-session-delete="${escapeHtml(session.id)}" data-session-title="${escapeHtml(sessionDisplayTitle(session))}">
-                    ${icon("trash")}<span>Delete</span>
-                  </button>
-                </div>` : ""}
-            </div>
-          `).join("") : `<div class="session-empty">${state.loading && project.id === state.activeProjectId ? "Loading..." : "No chats"}</div>`}
-          ${sessions.length > 5 ? `<button class="session-more" data-show-all="${escapeHtml(project.id)}">${state.showAll.has(project.id) ? "Show less" : "Show more"}</button>` : ""}
+          ${rest.length ? shownRest.map((session) => renderSessionRow(project, session)).join("")
+            : `<div class="session-empty">${state.loading && project.id === state.activeProjectId ? "Loading..." : "No chats"}</div>`}
+          ${rest.length > 5 ? `<button class="session-more" data-show-all="${escapeHtml(project.id)}">${state.showAll.has(project.id) ? "Show less" : "Show more"}</button>` : ""}
         </div>
       ` : ""}
+    </div>
+  `
+}
+
+function renderSessionRow(project, session) {
+  const isPinned = state.pinnedSessions.has(session.id)
+  const projectId = project?.id || ""
+  const rowKey = sessionRowKey(projectId, session.id)
+  const active = projectId === state.activeProjectId && session.id === state.activeSessionId
+  return `
+    <div class="session-row-wrap ${active ? "active" : ""}" data-session-row="${escapeHtml(session.id)}" data-session-row-key="${escapeHtml(rowKey)}">
+      <button class="session-row" data-session-id="${escapeHtml(session.id)}" data-project-id="${escapeHtml(projectId)}">
+        <span class="session-busy-dot ${sessionBusy(session.id) ? "on" : ""}" title="Running"></span>
+        <span class="stitle">${escapeHtml(sessionDisplayTitle(session))}</span>
+        <span class="stime">${escapeHtml(relativeTime(sessionUpdatedAt(session)))}</span>
+      </button>
+      <button class="session-kebab" data-session-menu="${escapeHtml(session.id)}" data-session-project="${escapeHtml(projectId)}" title="Options">${icon("dots")}</button>
+      ${state.sessionMenu === rowKey ? `
+        <div class="pop session-pop">
+          <button class="pop-item" data-session-pin="${escapeHtml(session.id)}" data-pinned="${isPinned ? "1" : "0"}" data-pin-project="${escapeHtml(projectId)}" data-pin-title="${escapeHtml(sessionDisplayTitle(session))}" data-pin-updated="${escapeHtml(sessionUpdatedAt(session) || "")}">
+            ${icon("pin")}<span>${isPinned ? "Unpin chat" : "Pin chat"}</span>
+          </button>
+          <button class="pop-item" data-session-rename="${escapeHtml(session.id)}" data-session-project="${escapeHtml(projectId)}" data-session-title="${escapeHtml(session.title || "")}" data-session-label="${escapeHtml(sessionDisplayTitle(session))}">
+            ${icon("edit")}<span>Rename</span>
+          </button>
+          <button class="pop-item danger" data-session-delete="${escapeHtml(session.id)}" data-session-project="${escapeHtml(projectId)}" data-session-title="${escapeHtml(sessionDisplayTitle(session))}">
+            ${icon("trash")}<span>Delete</span>
+          </button>
+        </div>` : ""}
     </div>
   `
 }
@@ -1206,17 +1805,15 @@ function renderMain() {
   return renderSessionScreen()
 }
 
-function renderHeader(title, subtitle) {
-  const label = runtimeLabel()
+function renderHeader(title) {
   const fileTitle = state.rightSidebarOpen ? "Close files" : "Open current folder"
   return `
     <div class="main-head">
       <button class="head-icon-btn head-sidebar-btn" data-action="toggleSidebar" title="Show sidebar" aria-label="Show sidebar">
         ${icon("sidebarToggle")}
       </button>
-      <div class="head-copy"><div class="head-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div><div class="head-path" title="${escapeHtml(subtitle || "")}">${escapeHtml(subtitle || "")}</div></div>
+      <div class="head-copy"><div class="head-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div></div>
       <div class="head-actions">
-        <button class="status-pill ${label}" data-action="toggleDiagnostics"><span class="status-dot"></span>${escapeHtml(label)}</button>
         <button class="head-icon-btn ${state.rightSidebarOpen ? "active" : ""}" data-action="toggleRightSidebar" title="${fileTitle}" aria-label="${fileTitle}">
           ${icon("sidebarRight")}
         </button>
@@ -1229,12 +1826,12 @@ function renderHeader(title, subtitle) {
 function renderSessionScreen() {
   const project = selectedProject()
   if (!project) {
-    return `<main class="main">${renderHeader("OpenWorking", state.configPath)}<div class="empty-state"><h1>Add a local project</h1><p>Choose a folder to start a local OpenCode session.</p><button class="primary-btn" data-action="addProject">${icon("plus")}Add project</button></div></main>`
+    return `<main class="main">${renderHeader("OpenWorking")}<div class="empty-state"><h1>Add a local project</h1><p>Choose a folder to start a local OpenCode session.</p><button class="primary-btn" data-action="addProject">${icon("plus")}Add project</button></div></main>`
   }
   const session = selectedSession()
   return `
     <main class="main">
-      ${renderHeader(session?.title || project.name, project.path)}
+      ${renderHeader(session?.title || project.name)}
       ${session ? renderThread(project) : renderNewSession(project)}
     </main>
   `
@@ -1270,12 +1867,28 @@ function renderThreadRows() {
   const status = thread.status || { type: "idle" }
   const awaiting = pendingPrompts()
   return `
-    ${thread.messages.map(renderThreadMessage).join("")}
+    ${renderThreadMessages(thread.messages)}
     ${status.type === "busy" && !hasRunningTool(thread) && !awaiting ? renderThinkingRow() : ""}
     ${status.type === "retry" ? renderRetryRow(status) : ""}
     ${renderPendingPermissions()}
     ${renderPendingQuestions()}
     ${renderPlanProposal()}
+  `
+}
+
+function renderThreadMessages(messages) {
+  const markerAfter = state.forkMarkers.get(state.activeSessionId)
+  if (markerAfter === null && !messages.length) return renderForkMarker()
+  return messages.map((message) => `${renderThreadMessage(message)}${message.id === markerAfter ? renderForkMarker() : ""}`).join("")
+}
+
+function renderForkMarker() {
+  return `
+    <div class="fork-marker" role="note" aria-label="Forked from conversation">
+      <span class="fork-marker-line"></span>
+      <span class="fork-marker-label">${icon("fork")}<span>Forked from conversation</span></span>
+      <span class="fork-marker-line"></span>
+    </div>
   `
 }
 
@@ -1333,9 +1946,8 @@ function renderThreadMessage(message) {
   }
   const parts = message.parts.map(renderAssistantPart).join("")
   if (!parts) return ""
-  const fileRefs = renderFileRefChips(messageFileRefs(message))
   const changes = renderMessageChanges(message)
-  return `<div class="msg-ai"><div class="message-stack assistant-message"><div class="message-card ai-body">${parts}${fileRefs}${changes}</div>${actions}</div></div>`
+  return `<div class="msg-ai"><div class="message-stack assistant-message"><div class="message-card ai-body">${parts}${changes}</div>${actions}</div></div>`
 }
 
 const MUTATING_FILE_TOOLS = new Set(["edit", "write", "apply_patch"])
@@ -1419,17 +2031,16 @@ function renderDocumentViewer() {
     : escapeHtml(doc.name || "")
   const path = doc.path || doc.requestedPath || doc.name
   const hasDiff = Boolean(doc.diff)
-  // "diff" only when there is a diff to show; otherwise fall back to the file's
-  // natural render mode (markdown for .md, code for everything else).
-  const tab = hasDiff && doc.tab === "diff" ? "diff" : "code"
+  const hasRealFile = isViewableFilePath(path)
+  const tab = hasDiff && (doc.tab === "diff" || !hasRealFile) ? "diff" : "code"
   const previewTabLabel = (doc.renderMode || (isMarkdownFilePath(path) ? "markdown" : "code")) === "markdown" ? "Preview" : "Code"
   let body
   if (doc.loading) {
     body = `<div class="doc-state">Loading…</div>`
-  } else if (doc.error) {
-    body = `<div class="doc-state error">${escapeHtml(doc.error)}</div>`
   } else if (tab === "diff") {
     body = renderUnifiedDiff(doc.diff, path)
+  } else if (doc.error) {
+    body = `<div class="doc-state error">${escapeHtml(doc.error)}</div>`
   } else if (doc.previewMode === "pdf") {
     body = `${renderArtifactExternalAction(doc)}<iframe class="doc-pdf" src="${escapeHtml(doc.url || "")}" title="${escapeHtml(doc.name || "PDF preview")}"></iframe>`
   } else if (doc.previewMode === "external") {
@@ -1442,11 +2053,11 @@ function renderDocumentViewer() {
   const tabs = hasDiff
     ? `<div class="doc-tabs" role="tablist">
         <button class="doc-tab" role="tab" data-doc-tab="diff" aria-selected="${tab === "diff"}">Diff</button>
-        <button class="doc-tab" role="tab" data-doc-tab="code" aria-selected="${tab === "code"}">${previewTabLabel}</button>
+        ${hasRealFile ? `<button class="doc-tab" role="tab" data-doc-tab="code" aria-selected="${tab === "code"}">${previewTabLabel}</button>` : ""}
       </div>`
     : ""
   return `
-    <div class="document-resizer" data-document-resizer></div>
+    <div class="document-resizer" data-document-resizer ${resizeTipAttrs("Drag to resize", "Adjust preview width")}></div>
     <aside class="document-viewer">
       <div class="doc-head">
         <div class="doc-crumbs">${breadcrumb}</div>
@@ -1493,7 +2104,7 @@ function findDiffForPath(filePath) {
   let found = null
   for (const message of activeThread().messages || []) {
     for (const entry of collectMessageDiffs(message)) {
-      if (entry.filepath === filePath) found = entry.diff
+      if (entry.filepath === filePath || entry.fileKey === filePath) found = entry.diff
     }
   }
   return found
@@ -1664,7 +2275,12 @@ async function openFileTreeFile(filePath) {
 }
 
 function renderMessageActions(message) {
-  if (!messageCopyText(message)) return ""
+  const copyText = messageCopyText(message)
+  if (message.role === "assistant") {
+    const copyButton = copyText ? `<button class="message-action" data-copy-message="${escapeHtml(message.id)}" title="Copy message" aria-label="Copy message">${icon("copy")}</button>` : ""
+    return `<div class="message-actions message-actions-left">${copyButton}<button class="message-action" data-fork-message="${escapeHtml(message.id)}" title="Fork chat" aria-label="Fork chat">${icon("fork")}</button></div>`
+  }
+  if (!copyText) return ""
   return `<div class="message-actions"><button class="message-action" data-copy-message="${escapeHtml(message.id)}" title="Copy message" aria-label="Copy message">${icon("copy")}</button></div>`
 }
 
@@ -1900,6 +2516,51 @@ function computePromptAttachments({ command, pendingAttachments, fileMentions })
       })
 }
 
+// OpenCode's `todowrite` tool carries the plan/progress checklist in
+// `state.input.todos` ([{ content, status }], status ∈ pending|in_progress|
+// completed|cancelled). Read it defensively so minor schema differences (e.g.
+// `text` instead of `content`) still render.
+function planTodos(part) {
+  const todos = part?.state?.input?.todos
+  if (!Array.isArray(todos)) return []
+  return todos
+    .map((todo) => ({
+      text: String(todo?.content ?? todo?.text ?? todo?.title ?? "").trim(),
+      status: String(todo?.status ?? "pending")
+    }))
+    .filter((todo) => todo.text)
+}
+
+function planTodoSummary(todos) {
+  if (!Array.isArray(todos) || !todos.length) return ""
+  const done = todos.filter((todo) => String(todo?.status) === "completed").length
+  return `${done}/${todos.length} done`
+}
+
+const TODO_STATUS_LABELS = {
+  pending: "To do",
+  in_progress: "In progress",
+  completed: "Done",
+  cancelled: "Cancelled"
+}
+
+function renderPlanTodos(part) {
+  const todos = planTodos(part)
+  if (!todos.length) return ""
+  const rows = todos.map((todo) => {
+    const status = TODO_STATUS_LABELS[todo.status] ? todo.status : "pending"
+    const mark = status === "completed" ? icon("check") : status === "cancelled" ? icon("x") : ""
+    return `
+      <div class="plan-todo ${escapeHtml(status)}">
+        <span class="plan-todo-check">${mark}</span>
+        <span class="plan-todo-text">${escapeHtml(todo.text)}</span>
+        <span class="plan-todo-status">${escapeHtml(TODO_STATUS_LABELS[status])}</span>
+      </div>
+    `
+  }).join("")
+  return `<div class="plan-todos">${rows}</div>`
+}
+
 function toolInfo(part) {
   const input = part.state?.input || {}
   const files = Array.isArray(input.files) ? input.files : []
@@ -1914,7 +2575,9 @@ function toolInfo(part) {
     apply_patch: { icon: "doc", activeLabel: "Applying patch", completedLabel: "Applied patch", subtitle: files.length ? `${files.length} file${files.length === 1 ? "" : "s"}` : "" },
     skill: { icon: "sparkle", activeLabel: "Loading skill", completedLabel: "Loaded skill", subtitle: input.name },
     translate_document: { icon: "doc", activeLabel: "Translating document", completedLabel: "Translated document", subtitle: filename(input.inputPath) },
-    task: { icon: "agent", activeLabel: "Running task", completedLabel: "Completed task", subtitle: input.description }
+    task: { icon: "agent", activeLabel: "Running task", completedLabel: "Completed task", subtitle: input.description },
+    todowrite: { icon: "check", activeLabel: "Updating plan", completedLabel: "Updated plan", subtitle: planTodoSummary(input.todos) },
+    todoread: { icon: "check", activeLabel: "Reading plan", completedLabel: "Read plan", subtitle: "" }
   }
   const fallback = part.state?.title || part.tool || "Tool"
   return mapping[part.tool] || { icon: "activity", activeLabel: fallback, completedLabel: fallback, subtitle: "" }
@@ -1972,6 +2635,7 @@ function renderToolRow(part) {
         <span class="tool-chevron">${icon("chevRight")}</span>
       </button>
       ${disclosure.open ? renderToolDetails(part, info, error) : ""}
+      ${part.tool === "todowrite" ? renderPlanTodos(part) : ""}
       ${status === "completed" ? renderToolArtifacts(part.state?.metadata) : ""}
     </div>
   `
@@ -2179,11 +2843,11 @@ function renderUnifiedDiff(diff, path) {
 // Renders one file row in the inline "Changes" card. Clicking it opens the diff
 // in the document-viewer panel (Diff tab) rather than expanding inline. Rows
 // without a resolvable file path are shown read-only (no panel to open).
-function renderDiffRow(key, { filepath, label, diff, truncated }) {
+function renderDiffRow(key, { fileKey, filepath, label, diff, truncated }) {
   const displayLabel = label || (filepath ? filename(filepath) : "Changes")
   const { additions, deletions } = diffStats(diff)
-  const openable = Boolean(filepath) && isViewableFilePath(filepath)
-  const active = openable && state.document?.requestedPath === filepath && state.document?.tab === "diff"
+  const openable = Boolean(filepath && isViewableFilePath(filepath)) || Boolean(diff)
+  const active = openable && state.document?.requestedPath === (filepath || fileKey) && state.document?.tab === "diff"
   const head = `
         ${icon("doc")}
         <span class="tool-diff-name">${escapeHtml(displayLabel)}</span>
@@ -2192,7 +2856,7 @@ function renderDiffRow(key, { filepath, label, diff, truncated }) {
   return `
     <div class="tool-diff-block">
       ${openable
-        ? `<button class="tool-diff-head${active ? " active" : ""}" data-open-file="${escapeHtml(filepath)}" data-open-tab="diff" title="${escapeHtml(filepath)}">${head}</button>`
+        ? `<button class="tool-diff-head${active ? " active" : ""}" data-open-file="${escapeHtml(filepath || fileKey)}" data-open-tab="diff" title="${escapeHtml(filepath || filename(filepath || fileKey))}">${head}</button>`
         : `<div class="tool-diff-head readonly"${filepath ? ` title="${escapeHtml(filepath)}"` : ""}>${head}</div>`}
     </div>
   `
@@ -2208,6 +2872,7 @@ function collectMessageDiffs(message) {
     const diff = metadata?.diff
     if (typeof diff !== "string" || !diff) continue
     const filepath = metadata.filepath
+      || part.state?.input?.filePath
       || (Array.isArray(metadata.files) && metadata.files.length ? metadata.files.join(", ") : "")
     const fileKey = filepath || part.id
     const label = Array.isArray(metadata.files) && metadata.files.length > 1
@@ -2256,7 +2921,7 @@ function renderToolArtifacts(metadata) {
     <div class="tool-artifacts ${metadata?.quality === "warning" ? "warning" : ""}">
       ${artifacts.map((artifact) => `
         <button class="artifact-chip ${state.document?.requestedPath === artifact.path || state.document?.path === artifact.path ? "active" : ""}" data-open-artifact="${escapeHtml(artifact.path)}" title="${escapeHtml(artifact.path)}">
-          ${icon("doc")}<span><strong>${escapeHtml(artifact.filename)}</strong><small>${escapeHtml(artifact.path)}</small></span>
+          ${icon("doc")}<span><strong>${escapeHtml(artifact.filename)}</strong></span>
         </button>
       `).join("")}
       ${warnings.map((warning) => `<small class="artifact-warning">${escapeHtml(warning)}</small>`).join("")}
@@ -2358,9 +3023,10 @@ function renderProjectsScreen() {
         <section class="admin-panel">
           <div class="panel-head"><div><h1>Local projects</h1><p>Folder entries stay on this machine.</p></div><button class="primary-btn" data-action="addProject">${icon("plus")}Add</button></div>
           <div class="project-cards">
-            ${state.projects.length ? state.projects.map((project) => `
+            ${state.projects.length ? sortProjectsByPin(state.projects).map((project) => `
               <article class="project-card ${project.id === state.activeProjectId ? "active" : ""}">
-                <button class="project-main" data-open-project="${escapeHtml(project.id)}"><strong>${escapeHtml(project.name)}</strong><span>${escapeHtml(project.path)}</span></button>
+                <button class="project-main" data-open-project="${escapeHtml(project.id)}"><strong>${escapeHtml(project.name)}${project.pinned ? `<span class="proj-pin-badge" title="Pinned">${icon("pin")}</span>` : ""}</strong><span>${escapeHtml(project.path)}</span></button>
+                <button class="small-icon-btn" data-project-pin="${escapeHtml(project.id)}" data-pinned="${project.pinned ? "1" : "0"}" title="${project.pinned ? "Unpin" : "Pin"}">${icon("pin")}</button>
                 <button class="small-icon-btn" data-rename-project="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}" title="Rename">${icon("edit")}</button>
                 <button class="small-icon-btn danger" data-remove-project="${escapeHtml(project.id)}" data-project-name="${escapeHtml(project.name)}" title="Remove">${icon("trash")}</button>
               </article>
@@ -2443,7 +3109,8 @@ function renderSettingsAdvanced() {
 }
 
 function renderSkillsScreen() {
-  const tab = state.skillsTab === "mcp" ? "mcp" : "skills"
+  const tab = ["mcp", "memory"].includes(state.skillsTab) ? state.skillsTab : "skills"
+  const panel = tab === "mcp" ? renderMcpPanel() : tab === "memory" ? renderMemoryPanel() : renderSkillsPanel()
   return `
     <main class="main">
       ${renderHeader("Skills", "Bundled and custom OpenCode skills")}
@@ -2451,11 +3118,39 @@ function renderSkillsScreen() {
         <div class="skills-tabs">
           <button class="skills-tab ${tab === "skills" ? "active" : ""}" data-skills-tab="skills">${icon("blocks")}<span>Skills</span></button>
           <button class="skills-tab ${tab === "mcp" ? "active" : ""}" data-skills-tab="mcp">${icon("server")}<span>Extensions</span></button>
+          <button class="skills-tab ${tab === "memory" ? "active" : ""}" data-skills-tab="memory">${icon("brain")}<span>Memory</span></button>
         </div>
-        ${tab === "mcp" ? renderMcpPanel() : renderSkillsPanel()}
+        ${panel}
       </div>
       ${renderSkillPreviewModal()}
     </main>
+  `
+}
+
+// Cross-chat memory: editable text for the global memory (applies everywhere) and the active
+// project's memory (applies only to it). The assistant writes these via the `remember` tool; here
+// the user can review, edit, or clear them. Edits are saved per-scope and re-read by the runtime.
+function renderMemoryPanel() {
+  if (state.memoryLoading && !state.memory) {
+    return `<section class="admin-panel"><div class="config-note">Loading memory…</div></section>`
+  }
+  const draft = state.memoryDraft || { global: "", project: "" }
+  const hasProject = state.memory?.hasProject
+  const card = (scope, title, subtitle, value, disabled) => `
+    <section class="admin-panel memory-panel">
+      <div class="panel-head"><div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(subtitle)}</p></div>
+        <button class="primary-btn" data-memory-save="${scope}" ${disabled || state.memorySaving ? "disabled" : ""}>
+          ${state.memorySaving === scope ? "Saving…" : "Save"}
+        </button>
+      </div>
+      <textarea class="memory-editor" data-memory-field="${scope}" spellcheck="false" ${disabled ? "disabled" : ""}
+        placeholder="${disabled ? "Open a project to edit its memory." : "Nothing remembered yet. The assistant adds facts here, or you can add them manually as Markdown bullets."}">${escapeHtml(value || "")}</textarea>
+    </section>
+  `
+  return `
+    ${state.memoryError ? `<div class="config-note field-error">${escapeHtml(state.memoryError)}</div>` : ""}
+    ${card("global", "Global memory", "Facts the assistant recalls in every chat across all projects.", draft.global, false)}
+    ${card("project", "Project memory", hasProject ? "Facts the assistant recalls in chats for the current project only." : "Open a project to give it its own memory.", draft.project, !hasProject)}
   `
 }
 
@@ -2487,17 +3182,18 @@ function mcpServerSubtitle(server) {
 }
 
 // Resolve the connection state of a server into a status pill + whether an auth action
-// is offered. Returns { pill: html, action: "authenticate"|"reconnect"|null }.
+// is offered. Returns { pill: html, action: "authenticate"|"reconnect"|"retry"|null }.
 function mcpStatusInfo(server) {
   const oauthEligible = server.type === "remote" && server.oauth !== false
   if (state.mcpAuthenticating?.[server.name]) {
-    return { pill: `<span class="mcp-pill mcp-pill-pending">Authenticating…</span>`, action: null }
+    return { pill: `<span class="mcp-pill mcp-pill-pending">Connecting…</span>`, action: null }
   }
   const status = state.mcpStatus?.[server.name]
   if (!server.enabled) return { pill: `<span class="mcp-pill mcp-pill-muted">Disabled</span>`, action: null }
   if (status === "connected") return { pill: `<span class="mcp-pill mcp-pill-ok">Connected</span>`, action: null }
   if (status === "failed") {
-    return { pill: `<span class="mcp-pill mcp-pill-bad">Failed</span>`, action: oauthEligible ? "reconnect" : null }
+    // Remote OAuth servers re-run the auth flow; local stdio servers (e.g. a bad PATH) just retry the connect.
+    return { pill: `<span class="mcp-pill mcp-pill-bad">Failed</span>`, action: oauthEligible ? "reconnect" : "retry" }
   }
   if (status === "needs_auth") {
     return { pill: `<span class="mcp-pill mcp-pill-warn">Needs auth</span>`, action: oauthEligible ? "authenticate" : null }
@@ -2516,9 +3212,12 @@ function renderMcpServerCard(server) {
     ? state.mcpError
     : (state.mcpStatusError?.[server.name] || "")
   const error = errorText ? `<div class="mcp-card-error">${escapeHtml(errorText)}</div>` : ""
-  const authBtn = action
-    ? `<button class="secondary-btn" data-action="authenticateMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}${action === "reconnect" ? "Reconnect" : "Authenticate"}</button>`
-    : ""
+  // Local stdio servers retry the connect (no OAuth); remote servers run the auth/reconnect flow.
+  const authBtn = action === "retry"
+    ? `<button class="secondary-btn" data-action="retryMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}Retry</button>`
+    : action
+      ? `<button class="secondary-btn" data-action="authenticateMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}${action === "reconnect" ? "Reconnect" : "Authenticate"}</button>`
+      : ""
   // On a failed connect, offer a reset that clears any stale stored OAuth state before re-auth —
   // this recovers from a partial/dynamic registration left by an earlier attempt.
   const clearBtn = action === "reconnect"
@@ -2793,79 +3492,6 @@ function renderToast() {
   host.innerHTML = state.toast ? `<div class="toast">${icon("check")}<span>${escapeHtml(state.toast)}</span></div>` : ""
 }
 
-function bindMessageActions(root = document) {
-  root.querySelectorAll("[data-copy-message]").forEach((element) => element.addEventListener("click", () => copyMessage(element.dataset.copyMessage).catch((error) => showToast(error.message))))
-}
-
-function bindArtifactActions(root = document) {
-  root.querySelectorAll("[data-open-artifact]").forEach((element) => element.addEventListener("click", () => openArtifact(element.dataset.openArtifact).catch((error) => showToast(error.message))))
-}
-
-function bindToolStepActions(root = document) {
-  root.querySelectorAll("[data-tool-step]").forEach((element) => element.addEventListener("click", () => {
-    const disclosure = state.toolDisclosure.get(element.dataset.toolStep)
-    if (!disclosure) return
-    disclosure.open = !disclosure.open
-    renderThreadContent()
-  }))
-}
-
-function bindFileRefActions(root = document) {
-  root.querySelectorAll("[data-open-file]").forEach((element) => element.addEventListener("click", () =>
-    openDocument(element.dataset.openFile, { tab: element.dataset.openTab || null }).catch((error) => showToast(error.message))))
-}
-
-function bindDocTabActions(root = document) {
-  root.querySelectorAll("[data-doc-tab]").forEach((element) => element.addEventListener("click", () => switchDocumentTab(element.dataset.docTab)))
-}
-
-function bindPendingPromptActions(root = document) {
-  root.querySelectorAll("[data-question-option]").forEach((element) => element.addEventListener("click", () => {
-    const requestID = element.dataset.questionOption
-    const index = Number(element.dataset.questionIndex)
-    const value = element.dataset.questionValue
-    if (element.dataset.questionMultiple === "1") {
-      const draft = questionDraft(requestID, index)
-      draft.selected.has(value) ? draft.selected.delete(value) : draft.selected.add(value)
-      renderThreadContent()
-    } else {
-      submitQuestion(requestID, index, [value]).catch((error) => showToast(error.message))
-    }
-  }))
-  root.querySelectorAll("[data-question-other]").forEach((element) => element.addEventListener("input", () => {
-    const draft = questionDraft(element.dataset.questionOther, Number(element.dataset.questionIndex))
-    draft.other = element.value
-  }))
-  root.querySelectorAll("[data-question-other-submit]").forEach((element) => element.addEventListener("click", () => {
-    const requestID = element.dataset.questionOtherSubmit
-    const index = Number(element.dataset.questionIndex)
-    const other = questionDraft(requestID, index).other.trim()
-    if (!other) {
-      showToast("Type an answer or pick an option.")
-      return
-    }
-    submitQuestion(requestID, index, [other]).catch((error) => showToast(error.message))
-  }))
-  root.querySelectorAll("[data-question-submit]").forEach((element) => element.addEventListener("click", () => {
-    const requestID = element.dataset.questionSubmit
-    const index = Number(element.dataset.questionIndex)
-    const draft = questionDraft(requestID, index)
-    const answers = [...draft.selected]
-    if (draft.other.trim()) answers.push(draft.other.trim())
-    if (!answers.length) {
-      showToast("Select at least one option.")
-      return
-    }
-    submitQuestion(requestID, index, answers).catch((error) => showToast(error.message))
-  }))
-  root.querySelectorAll("[data-question-dismiss]").forEach((element) => element.addEventListener("click", () => {
-    dismissQuestion(element.dataset.questionDismiss).catch((error) => showToast(error.message))
-  }))
-  root.querySelectorAll("[data-permission-reply]").forEach((element) => element.addEventListener("click", () => {
-    replyPermission(element.dataset.permissionReply, element.dataset.permissionDecision).catch((error) => showToast(error.message))
-  }))
-}
-
 function clearQuestionDrafts(requestID) {
   for (const key of [...state.questionDrafts.keys()]) {
     if (key.startsWith(`${requestID}:`)) state.questionDrafts.delete(key)
@@ -2899,90 +3525,11 @@ async function replyPermission(requestID, decision) {
   renderThreadContent()
 }
 
-function bindSkillUploadDrop(root = document) {
-  root.querySelectorAll("[data-skill-drop]").forEach((element) => {
-    element.addEventListener("dragover", (event) => {
-      event.preventDefault()
-      element.classList.add("dragging")
-    })
-    element.addEventListener("dragleave", () => {
-      element.classList.remove("dragging")
-    })
-    element.addEventListener("drop", (event) => {
-      event.preventDefault()
-      element.classList.remove("dragging")
-      const file = event.dataTransfer?.files?.[0]
-      const filePath = file ? window.openworking.skills.pathForFile(file) : ""
-      if (!filePath) {
-        showToast("Drop a .zip or .skill file from disk.")
-        return
-      }
-      uploadSkill(filePath).catch((error) => showToast(error.message))
-    })
-  })
-}
-
+// All click/input/keydown/mousedown wiring now lives in the delegated #root listeners
+// (installDelegatedListeners). bindEvents() keeps only the imperative, per-element bits that
+// must run AFTER each render() rebuilds #root: focus/select of a freshly-rendered rename input,
+// restoring focus to a session kebab after a rename, and sizing the prompt textarea + overlay.
 function bindEvents() {
-  document.querySelectorAll("[data-nav]").forEach((element) => element.addEventListener("click", () => {
-    state.nav = element.dataset.nav
-    state.popover = null
-    render()
-  }))
-  document.querySelectorAll("[data-action]").forEach((element) => element.addEventListener("click", handleAction))
-  document.querySelectorAll("[data-resizer]").forEach((element) => element.addEventListener("mousedown", startSidebarResize))
-  document.querySelectorAll("[data-document-resizer]").forEach((element) => element.addEventListener("mousedown", startDocumentViewerResize))
-  document.querySelectorAll("[data-right-file-resizer]").forEach((element) => element.addEventListener("mousedown", startRightFileSidebarResize))
-  document.querySelectorAll("[data-tree-dir]").forEach((element) => element.addEventListener("click", () => toggleFileTreeDirectory(element.dataset.treeDir).catch((error) => showToast(error.message))))
-  document.querySelectorAll("[data-tree-file]").forEach((element) => element.addEventListener("click", () => openFileTreeFile(element.dataset.treeFile).catch((error) => showToast(error.message))))
-  document.querySelectorAll("[data-open-project]").forEach((element) => element.addEventListener("click", () => openProject(element.dataset.openProject)))
-  document.querySelectorAll("[data-new-session]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    newSession(element.dataset.newSession)
-  }))
-  document.querySelectorAll("[data-session-id]").forEach((element) => element.addEventListener("click", () => selectSession(element.dataset.projectId, element.dataset.sessionId)))
-  document.querySelectorAll("[data-session-menu]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    const id = element.dataset.sessionMenu
-    state.sessionMenu = state.sessionMenu === id ? null : id
-    render()
-  }))
-  document.querySelectorAll("[data-session-delete]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    state.sessionDeleteTarget = { id: element.dataset.sessionDelete, title: element.dataset.sessionTitle || "Untitled session" }
-    state.sessionMenu = null
-    render()
-  }))
-  document.querySelectorAll("[data-session-rename]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    state.sessionRenameTarget = {
-      sessionId: element.dataset.sessionRename,
-      projectId: element.dataset.sessionProject,
-      title: element.dataset.sessionTitle || "",
-      label: element.dataset.sessionLabel || "Untitled session",
-    }
-    state.sessionRenameDraft = element.dataset.sessionTitle || ""
-    state.sessionRenameError = null
-    state.sessionRenaming = false
-    state.sessionRenameAutoFocus = true
-    state.sessionMenu = null
-    render()
-  }))
-  document.querySelectorAll("[data-session-rename-input]").forEach((element) => {
-    element.addEventListener("input", () => {
-      state.sessionRenameDraft = element.value
-      state.sessionRenameError = null
-    })
-    element.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault()
-        confirmRenameSession().catch((error) => showToast(error.message))
-      }
-      if (event.key === "Escape" && !state.sessionRenaming) {
-        event.preventDefault()
-        closeRenameSessionModal()
-      }
-    })
-  })
   if (state.sessionRenameTarget && state.sessionRenameAutoFocus) {
     const input = document.querySelector("[data-session-rename-input]")
     if (input) {
@@ -2996,39 +3543,6 @@ function bindEvents() {
     trigger?.focus()
     state.sessionRenameFocusId = null
   }
-  document.querySelectorAll("[data-project-menu]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    const id = element.dataset.projectMenu
-    state.projectMenu = state.projectMenu === id ? null : id
-    render()
-  }))
-  document.querySelectorAll("[data-project-rename]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    openRenameProjectModal(element.dataset.projectRename, element.dataset.projectName || "")
-  }))
-  document.querySelectorAll("[data-project-delete]").forEach((element) => element.addEventListener("click", (event) => {
-    event.stopPropagation()
-    state.projectDeleteTarget = { id: element.dataset.projectDelete, name: element.dataset.projectName || "this project" }
-    state.projectRemoving = false
-    state.projectMenu = null
-    render()
-  }))
-  document.querySelectorAll("[data-project-rename-input]").forEach((element) => {
-    element.addEventListener("input", () => {
-      state.projectRenameDraft = element.value
-      state.projectRenameError = null
-    })
-    element.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") {
-        event.preventDefault()
-        confirmRenameProject().catch((error) => showToast(error.message))
-      }
-      if (event.key === "Escape" && !state.projectRenaming) {
-        event.preventDefault()
-        closeRenameProjectModal()
-      }
-    })
-  })
   if (state.projectRenameTarget && state.projectRenameAutoFocus) {
     const input = document.querySelector("[data-project-rename-input]")
     if (input) {
@@ -3037,172 +3551,11 @@ function bindEvents() {
     }
     state.projectRenameAutoFocus = false
   }
-  document.querySelectorAll("[data-stop-click]").forEach((element) => element.addEventListener("click", (event) => event.stopPropagation()))
-  document.querySelectorAll("[data-show-all]").forEach((element) => element.addEventListener("click", () => {
-    const id = element.dataset.showAll
-    state.showAll.has(id) ? state.showAll.delete(id) : state.showAll.add(id)
-    render()
-  }))
-  document.querySelectorAll("[data-popover]").forEach((element) => element.addEventListener("click", () => {
-    state.popover = state.popover === element.dataset.popover ? null : element.dataset.popover
-    render()
-    document.getElementById("promptInput")?.focus()
-  }))
-  document.querySelectorAll("[data-model]").forEach((element) => element.addEventListener("click", () => {
-    state.selectedModelKey = element.dataset.model
-    state.popover = null
-    render()
-  }))
-  document.querySelectorAll("[data-chip]").forEach((element) => element.addEventListener("click", () => sendPrompt(chips[Number(element.dataset.chip)].text)))
-  document.querySelectorAll("[data-provider]").forEach((element) => element.addEventListener("click", () => {
-    state.providerId = element.dataset.provider
-    render()
-  }))
-  document.querySelectorAll("[data-field]").forEach((element) => element.addEventListener("input", () => updateConfigField(element.dataset.field, element.value)))
-  document.querySelectorAll("[data-model-modalities]").forEach((element) => element.addEventListener("input", () => updateModelModalities(element.dataset.modelId, element.dataset.modelModalities, element.value)))
-  document.querySelectorAll("[data-settings-section]").forEach((element) => element.addEventListener("click", () => {
-    state.settingsSection = element.dataset.settingsSection
-    render()
-  }))
-  document.querySelectorAll("[data-skill-open]").forEach((element) => element.addEventListener("click", () => {
-    openSkillPreview(element.dataset.skillOpen, element.dataset.skillBuiltin === "1")
-  }))
-  document.querySelectorAll("[data-skills-tab]").forEach((element) => element.addEventListener("click", () => {
-    state.skillsTab = element.dataset.skillsTab
-    render()
-    if (state.skillsTab === "mcp") refreshMcpStatus()
-  }))
-  document.querySelectorAll("[data-mcp-type]").forEach((element) => element.addEventListener("click", () => {
-    if (state.mcpSaving || !state.mcpDraft) return
-    state.mcpDraft.type = element.dataset.mcpType
-    state.mcpError = null
-    render()
-  }))
-  document.querySelectorAll("[data-mcp-toggle]").forEach((element) => element.addEventListener("click", () => {
-    toggleMcpEnabled(element.dataset.mcpToggle, element.dataset.mcpEnabled !== "1")
-  }))
-  document.querySelectorAll("[data-mcp-field]").forEach((element) => element.addEventListener("input", () => {
-    if (!state.mcpDraft) return
-    state.mcpDraft[element.dataset.mcpField] = element.value
-  }))
-  document.querySelectorAll("[data-mcp-oauth-mode]").forEach((element) => element.addEventListener("click", () => {
-    if (state.mcpSaving || !state.mcpDraft) return
-    const mode = element.dataset.mcpOauthMode
-    state.mcpDraft.oauthMode = mode
-    if (mode === "custom") state.mcpDraft.oauthAdvancedOpen = true
-    state.mcpError = null
-    render()
-  }))
-  document.querySelectorAll("[data-mcp-header]").forEach((element) => element.addEventListener("input", () => {
-    if (!state.mcpDraft) return
-    const index = Number(element.dataset.mcpHeaderIndex)
-    const row = state.mcpDraft.headers?.[index]
-    if (row) row[element.dataset.mcpHeader] = element.value
-  }))
-  document.querySelectorAll("[data-mcp-env]").forEach((element) => element.addEventListener("input", () => {
-    if (!state.mcpDraft) return
-    const index = Number(element.dataset.mcpEnvIndex)
-    const row = state.mcpDraft.env?.[index]
-    if (row) row[element.dataset.mcpEnv] = element.value
-  }))
-  document.querySelectorAll("[data-rename-project]").forEach((element) => element.addEventListener("click", () => openRenameProjectModal(element.dataset.renameProject, element.dataset.projectName || "")))
-  document.querySelectorAll("[data-remove-project]").forEach((element) => element.addEventListener("click", () => {
-    state.projectDeleteTarget = { id: element.dataset.removeProject, name: element.dataset.projectName || "this project" }
-    state.projectRemoving = false
-    render()
-  }))
-  document.querySelectorAll("[data-remove-attachment]").forEach((element) => element.addEventListener("click", () => removeAttachment(element.dataset.removeAttachment)))
-  document.querySelectorAll("[data-remove-file-mention]").forEach((element) => element.addEventListener("click", () => removeFileMention(element.dataset.removeFileMention)))
-  bindMessageActions()
-  bindArtifactActions()
-  bindToolStepActions()
-  bindFileRefActions()
-  bindDocTabActions()
-  bindPendingPromptActions()
-  bindSkillUploadDrop()
-  document.querySelectorAll("[data-command]").forEach((element) => element.addEventListener("mousedown", (event) => {
-    event.preventDefault()
-    selectCommand(element.dataset.command)
-  }))
   const promptInput = document.getElementById("promptInput")
   if (promptInput) {
     promptInput.style.height = "auto"
     promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
     syncPromptOverlay(promptInput)
-    promptInput.addEventListener("input", () => {
-      state.promptDraft = promptInput.value
-      syncPendingFileMentions(promptInput.value, { rerender: true, promptInput })
-      const liveInput = document.getElementById("promptInput") || promptInput
-      const send = document.querySelector(".send")
-      if (send) send.classList.toggle("disabled", !threadAbortable() && !liveInput.value.trim())
-      liveInput.style.height = "auto"
-      liveInput.style.height = `${Math.min(liveInput.scrollHeight, 200)}px`
-      syncPromptOverlay(liveInput)
-      syncPromptAssist(liveInput)
-    })
-    promptInput.addEventListener("scroll", () => {
-      syncPromptOverlay(promptInput)
-    })
-    promptInput.addEventListener("keydown", (event) => {
-      if (state.commandMenu.open) {
-        const candidates = commandCandidates(state.commandMenu.query)
-        if (event.key === "ArrowDown") {
-          event.preventDefault()
-          state.commandMenu.index = Math.min(state.commandMenu.index + 1, Math.max(candidates.length - 1, 0))
-          paintCommandMenu()
-          return
-        }
-        if (event.key === "ArrowUp") {
-          event.preventDefault()
-          state.commandMenu.index = Math.max(state.commandMenu.index - 1, 0)
-          paintCommandMenu()
-          return
-        }
-        if (event.key === "Enter" || event.key === "Tab") {
-          event.preventDefault()
-          const choice = candidates[state.commandMenu.index]
-          if (choice) selectCommand(choice.name)
-          else closeCommandMenu()
-          return
-        }
-        if (event.key === "Escape") {
-          event.preventDefault()
-          closeCommandMenu()
-          return
-        }
-      }
-      if (state.fileMentionMenu.open) {
-        const candidates = fileMentionCandidates(state.fileMentionMenu.query)
-        if (event.key === "ArrowDown") {
-          event.preventDefault()
-          state.fileMentionMenu.index = Math.min(state.fileMentionMenu.index + 1, Math.max(candidates.length - 1, 0))
-          paintPromptAssistMenu()
-          return
-        }
-        if (event.key === "ArrowUp") {
-          event.preventDefault()
-          state.fileMentionMenu.index = Math.max(state.fileMentionMenu.index - 1, 0)
-          paintPromptAssistMenu()
-          return
-        }
-        if (event.key === "Enter" || event.key === "Tab") {
-          event.preventDefault()
-          const choice = candidates[state.fileMentionMenu.index]
-          if (choice) selectFileMention(choice).catch((error) => showToast(error.message))
-          else closeFileMentionMenu()
-          return
-        }
-        if (event.key === "Escape") {
-          event.preventDefault()
-          closeFileMentionMenu()
-          return
-        }
-      }
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault()
-        sendPrompt(promptInput.value)
-      }
-    })
   }
 }
 
@@ -3219,14 +3572,7 @@ function paintPromptAssistMenu() {
   if (existing) existing.remove()
   const html = renderCommandMenu() || renderFileMentionMenu()
   if (html) wrap.insertAdjacentHTML("afterbegin", html)
-  wrap.querySelectorAll("[data-command]").forEach((element) => element.addEventListener("mousedown", (event) => {
-    event.preventDefault()
-    selectCommand(element.dataset.command)
-  }))
-  wrap.querySelectorAll("[data-file-mention]").forEach((element) => element.addEventListener("mousedown", (event) => {
-    event.preventDefault()
-    selectFileMention(element.dataset.fileMention).catch((error) => showToast(error.message))
-  }))
+  // data-command / data-file-mention mousedown is handled by the delegated #root listener.
 }
 
 function syncPromptOverlay(promptInput) {
@@ -3332,75 +3678,86 @@ async function selectFileMention(filePath) {
   }
 }
 
-function startSidebarResize(event) {
+// Shared divider-drag driver. `apply(clientX)` sets the new width (clamped) and
+// returns it; the latest width is persisted under `storageKey` on release.
+// Width writes are coalesced into one rAF so we touch layout at most once per
+// frame, and `.app.resizing` suppresses every panel transition so the dragged
+// edge tracks the cursor 1:1 instead of easing toward each new value.
+// `onClick` (optional) fires when the pointer is released without moving — used
+// by the sidebar divider to double as a collapse toggle.
+function startDividerResize(event, { apply, storageKey, initialWidth, onClick }) {
   event.preventDefault()
-  const sidebar = document.querySelector(".sidebar")
-  if (!sidebar) return
-  const left = sidebar.getBoundingClientRect().left
+  const app = appElement()
+  if (app) app.classList.add("resizing")
   document.body.style.cursor = "col-resize"
   document.body.style.userSelect = "none"
 
-  let width = SIDEBAR_MIN_WIDTH
+  let width = initialWidth
+  let moved = false
+  let pendingX = null
+  let frame = null
+  const flush = () => {
+    frame = null
+    if (pendingX === null) return
+    width = apply(pendingX)
+    pendingX = null
+  }
   const onMove = (moveEvent) => {
-    width = setSidebarWidth(moveEvent.clientX - left)
+    moved = true
+    pendingX = moveEvent.clientX
+    if (frame === null) frame = requestAnimationFrame(flush)
   }
   const onUp = () => {
     document.removeEventListener("mousemove", onMove)
     document.removeEventListener("mouseup", onUp)
+    if (frame !== null) { cancelAnimationFrame(frame); flush() }
+    if (app) app.classList.remove("resizing")
     document.body.style.cursor = ""
     document.body.style.userSelect = ""
-    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(width))
+    if (!moved) {
+      if (onClick) onClick()
+      return
+    }
+    localStorage.setItem(storageKey, String(width))
   }
   document.addEventListener("mousemove", onMove)
   document.addEventListener("mouseup", onUp)
 }
 
+function startSidebarResize(event) {
+  const sidebar = document.querySelector(".sidebar")
+  if (!sidebar) return
+  const left = sidebar.getBoundingClientRect().left
+  startDividerResize(event, {
+    apply: (clientX) => setSidebarWidth(clientX - left),
+    storageKey: SIDEBAR_WIDTH_KEY,
+    initialWidth: SIDEBAR_MIN_WIDTH,
+    onClick: toggleSidebar,
+  })
+}
+
 function startRightFileSidebarResize(event) {
-  event.preventDefault()
   const sidebar = document.querySelector(".right-file-sidebar")
   if (!sidebar) return
   const startX = event.clientX
   const startWidth = sidebar.getBoundingClientRect().width
-  document.body.style.cursor = "col-resize"
-  document.body.style.userSelect = "none"
-
-  let width = startWidth
-  const onMove = (moveEvent) => {
-    width = setRightFileSidebarWidth(startWidth + startX - moveEvent.clientX)
-  }
-  const onUp = () => {
-    document.removeEventListener("mousemove", onMove)
-    document.removeEventListener("mouseup", onUp)
-    document.body.style.cursor = ""
-    document.body.style.userSelect = ""
-    localStorage.setItem(RIGHT_FILE_WIDTH_KEY, String(width))
-  }
-  document.addEventListener("mousemove", onMove)
-  document.addEventListener("mouseup", onUp)
+  startDividerResize(event, {
+    apply: (clientX) => setRightFileSidebarWidth(startWidth + startX - clientX),
+    storageKey: RIGHT_FILE_WIDTH_KEY,
+    initialWidth: startWidth,
+  })
 }
 
 function startDocumentViewerResize(event) {
-  event.preventDefault()
   const viewer = document.querySelector(".document-viewer")
   if (!viewer) return
   const startX = event.clientX
   const startWidth = viewer.getBoundingClientRect().width
-  document.body.style.cursor = "col-resize"
-  document.body.style.userSelect = "none"
-
-  let width = startWidth
-  const onMove = (moveEvent) => {
-    width = setDocumentViewerWidth(startWidth + startX - moveEvent.clientX)
-  }
-  const onUp = () => {
-    document.removeEventListener("mousemove", onMove)
-    document.removeEventListener("mouseup", onUp)
-    document.body.style.cursor = ""
-    document.body.style.userSelect = ""
-    localStorage.setItem(DOCUMENT_WIDTH_KEY, String(width))
-  }
-  document.addEventListener("mousemove", onMove)
-  document.addEventListener("mouseup", onUp)
+  startDividerResize(event, {
+    apply: (clientX) => setDocumentViewerWidth(startWidth + startX - clientX),
+    storageKey: DOCUMENT_WIDTH_KEY,
+    initialWidth: startWidth,
+  })
 }
 
 async function copyMessage(messageId) {
@@ -3409,6 +3766,52 @@ async function copyMessage(messageId) {
   if (!text) return
   await window.openworking.clipboard.writeText(text)
   showToast("Message copied")
+}
+
+async function forkAssistantMessage(messageId) {
+  const project = selectedProject()
+  const sessionId = state.activeSessionId
+  if (!project || !sessionId) throw new Error("Select a chat before forking it.")
+  const thread = activeThread()
+  const messages = thread.messages || []
+  const index = messages.findIndex((item) => item.id === messageId)
+  const message = index === -1 ? null : messages[index]
+  if (!message || message.role !== "assistant") throw new Error("Only assistant responses can be forked.")
+
+  const runtimeAlive = state.runtime?.status === "running" || state.runtime?.status === "starting"
+  if (!runtimeAlive) {
+    await openProject(project.id, { selectLatest: false })
+  }
+
+  const nextMessageId = messages[index + 1]?.id
+  const directory = selectedSession()?.directory || project.path
+  const forked = await window.openworking.runtime.forkSession({
+    sessionId,
+    ...(nextMessageId ? { messageId: nextMessageId } : {}),
+    directory
+  })
+  if (!forked?.id) throw new Error("OpenCode did not return a forked session.")
+
+  flushActiveStreamPacing()
+  state.activeProjectId = project.id
+  state.activeSessionId = forked.id
+  state.nav = "session"
+  state.expanded.add(project.id)
+  persistExpanded()
+
+  const sessions = typeof window.openworking.runtime.listSessionsForDirectory === "function"
+    ? await window.openworking.runtime.listSessionsForDirectory(project.path)
+    : await window.openworking.runtime.listSessions()
+  setProjectSessions(
+    project.id,
+    sessions.length ? sessions : [forked, ...projectSessions(project.id)],
+    sessions.length ? "directory" : "active"
+  )
+  const forkMessages = await window.openworking.runtime.listMessages({ sessionId: forked.id, directory: project.path })
+  state.forkMarkers.set(forked.id, forkMessages[forkMessages.length - 1]?.id || null)
+  hydrateActiveThread(forkMessages, state.runtime?.sessionStatuses?.[forked.id])
+  showToast("Chat forked")
+  render({ threadScroll: "latest" })
 }
 
 async function openArtifact(artifactPath) {
@@ -3437,7 +3840,8 @@ async function handleAction(event) {
     if (action === "addProject") await addProject()
     if (action === "collapseAll") {
       state.expanded.clear()
-      render()
+      persistExpanded()
+      scheduleSidebarRender()
     }
     if (action === "toggleSidebar") toggleSidebar()
     if (action === "toggleRightSidebar") await toggleRightSidebar()
@@ -3518,6 +3922,9 @@ async function handleAction(event) {
     if (action === "clearMcpAuth") {
       await authenticateMcp(event.currentTarget.dataset.mcpName, { clear: true })
     }
+    if (action === "retryMcp") {
+      await reconnectMcp(event.currentTarget.dataset.mcpName)
+    }
     if (action === "cancelRemoveMcp") {
       if (state.mcpRemoving) return
       state.mcpDeleteTarget = null
@@ -3525,15 +3932,12 @@ async function handleAction(event) {
     }
     if (action === "confirmRemoveMcp") await confirmRemoveMcp()
     if (action === "cancelDeleteSession") {
+      if (state.sessionDeleting) return
       state.sessionDeleteTarget = null
+      state.sessionDeleteError = null
       render()
     }
-    if (action === "confirmDeleteSession") {
-      const target = state.sessionDeleteTarget
-      state.sessionDeleteTarget = null
-      render()
-      if (target) await deleteSession(target.id)
-    }
+    if (action === "confirmDeleteSession") await confirmDeleteSession()
     if (action === "cancelRenameSession") closeRenameSessionModal()
     if (action === "confirmRenameSession") await confirmRenameSession()
     if (action === "cancelRemoveProject") {
@@ -3623,6 +4027,7 @@ async function clearPendingAttachments() {
 
 async function abortSession() {
   if (!state.activeSessionId || !threadAbortable()) return
+  flushActiveStreamPacing()
   await window.openworking.runtime.abortSession({ sessionId: state.activeSessionId })
   activeThread().status = { type: "idle" }
   updateComposerSubmitButton()
@@ -3636,10 +4041,12 @@ async function openProject(projectId, { selectLatest = true } = {}) {
   const sameProject = state.activeProjectId === projectId
   if (sameProject && state.expanded.has(projectId) && state.nav === "session" && state.runtime?.project?.id === projectId) {
     state.expanded.delete(projectId)
+    persistExpanded()
     render()
     return
   }
   await clearPendingAttachments()
+  flushActiveStreamPacing()
   const switchingProject = state.activeProjectId !== projectId
   state.activeProjectId = projectId
   resetFileTree(projectId)
@@ -3647,6 +4054,7 @@ async function openProject(projectId, { selectLatest = true } = {}) {
   resetActiveThread()
   state.nav = "session"
   state.expanded.add(projectId)
+  persistExpanded()
   state.loading = true
   let scrollLatest = false
   render()
@@ -3654,8 +4062,7 @@ async function openProject(projectId, { selectLatest = true } = {}) {
     state.runtime = await window.openworking.runtime.openProject(project)
     state.commands = await window.openworking.runtime.listCommands().catch(() => [])
     state.commandMenu = { open: false, query: "", index: 0 }
-    const sessions = await window.openworking.runtime.listSessions()
-    state.sessionsByProject[projectId] = sessions
+    const sessions = setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
     // Opening a different project's runtime drops the old project's sessions — clear
     // their in-memory threads so background state from another workspace can't leak.
     if (switchingProject) pruneThreads(sessions.map((session) => session.id))
@@ -3668,6 +4075,10 @@ async function openProject(projectId, { selectLatest = true } = {}) {
     state.loading = false
     render({ threadScroll: scrollLatest ? "latest" : "preserve" })
   }
+  // Fill the other expanded/pinned accordions' history AFTER the active project has settled, so a
+  // slow/failed background fetch never delays or breaks the active load. Fire-and-forget; repaint
+  // when done. The in-flight guard coalesces this with refreshSessionData's trigger.
+  loadAllSessions().then(() => scheduleSidebarRender()).catch(() => {})
   if (state.rightSidebarOpen) loadFileTreeDirectory("").catch((error) => showToast(error.message))
 }
 
@@ -3676,7 +4087,11 @@ async function openProject(projectId, { selectLatest = true } = {}) {
 function pruneThreads(keepSessionIds) {
   const keep = new Set([...keepSessionIds, state.activeSessionId, null])
   for (const sessionId of [...state.threads.keys()]) {
-    if (!keep.has(sessionId)) state.threads.delete(sessionId)
+    if (!keep.has(sessionId)) {
+      streamPacer.clearSession(sessionId)
+      state.threads.delete(sessionId)
+      state.forkMarkers.delete(sessionId)
+    }
   }
 }
 
@@ -3695,8 +4110,7 @@ async function ensureRuntimeProject(projectId, { preserveSessionId = null } = {}
     state.runtime = await window.openworking.runtime.openProject(project)
     state.commands = await window.openworking.runtime.listCommands().catch(() => [])
     state.commandMenu = { open: false, query: "", index: 0 }
-    const sessions = await window.openworking.runtime.listSessions()
-    state.sessionsByProject[projectId] = sessions
+    const sessions = setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
     return chooseSessionAfterRuntimeReconnect(preserveSessionId, sessions)
   } finally {
     state.loading = false
@@ -3709,19 +4123,21 @@ async function newSession(projectId, { clearAttachments = true } = {}) {
   const project = state.projects.find((item) => item.id === projectId)
   if (!project) return
   if (clearAttachments) await clearPendingAttachments()
+  flushActiveStreamPacing()
   state.activeProjectId = projectId
   resetFileTree(projectId)
   state.activeSessionId = null
   resetActiveThread()
   state.nav = "session"
   state.expanded.add(projectId)
+  persistExpanded()
   render()
   if (state.runtime?.project?.id !== projectId || state.runtime.status !== "running") {
     state.loading = true
     render()
     try {
       state.runtime = await window.openworking.runtime.openProject(project)
-      state.sessionsByProject[projectId] = await window.openworking.runtime.listSessions()
+      setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
     } finally {
       state.loading = false
       render()
@@ -3732,39 +4148,120 @@ async function newSession(projectId, { clearAttachments = true } = {}) {
 }
 
 async function selectSession(projectId, sessionId) {
-  await clearPendingAttachments()
-  if (state.runtime?.project?.id !== projectId || state.runtime.status !== "running") {
-    await openProject(projectId, { selectLatest: false })
+  // A pinned session caches its projectId; if it's missing (legacy pin) or its project
+  // was removed, the click would have nothing to point at.
+  const project = state.projects.find((item) => item.id === projectId)
+  if (!project) {
+    showToast("This chat's project is no longer available. Re-pin it from the project to restore the link.")
+    return
   }
+  await clearPendingAttachments()
+  // Selecting any session dismisses an open context menu — including one left open on a different
+  // row. The document-click handler can't catch this because each row is its own .session-row-wrap,
+  // so a click on another row stays "inside" a wrap and never trips the outside-click close.
+  state.sessionMenu = null
+  // Clicking a session must never collapse its accordion — keep it expanded regardless of how the
+  // runtime is doing (it may still be starting up from a fresh app launch).
+  state.expanded.add(projectId)
+  persistExpanded()
+  // VIEW the chat without switching projects: OpenCode serves any project's history from the one
+  // running server when we pass its `directory`. We deliberately do NOT restart the server when it
+  // is already running on a different project — restarting on every cross-project click is what
+  // caused the ECONNRESET/"not running" storm. Sending a prompt still restarts to the right cwd via
+  // ensureRuntimeProject in sendPrompt.
+  //
+  // Only cold-start when there is genuinely NO live runtime. If one is already starting/running,
+  // do NOT call openProject — its same-project branch would TOGGLE the accordion CLOSED, and the
+  // directory-scoped listMessages below waits for the in-flight start via the runtime's
+  // waitUntilReady() anyway. ("starting" means the user clicked before init finished.)
+  const runtimeAlive = state.runtime?.status === "running" || state.runtime?.status === "starting"
+  if (!runtimeAlive) {
+    await openProject(projectId, { selectLatest: false }).catch((error) => showToast(error.message))
+  }
+  if (state.activeSessionId !== sessionId) flushActiveStreamPacing()
   state.activeProjectId = projectId
   state.activeSessionId = sessionId
   state.nav = "session"
-  // If we already hold a live thread for this session that is mid-flight (busy), keep
-  // it as-is — re-hydrating from the server would drop streamed parts not yet
-  // persisted there. Idle or first-time threads hydrate from the server as before.
+  // Re-hydrate unless the session is genuinely still streaming (local + server busy
+  // with streamed output already in memory). Stale busy threads missed stream events
+  // during backgrounding or SSE reconnect and must fetch from the server.
   const existing = state.threads.get(sessionId)
-  if (!existing || !threadIsBusy(existing)) {
-    hydrateActiveThread(await window.openworking.runtime.listMessages({ sessionId }))
+  const serverStatus = state.runtime?.sessionStatuses?.[sessionId]
+  if (needsThreadRehydration(existing, serverStatus)) {
+    try {
+      hydrateActiveThread(
+        await window.openworking.runtime.listMessages({ sessionId, directory: project.path }),
+        serverStatus
+      )
+    } catch (error) {
+      showToast(error.message || "Could not load this chat.")
+    }
   }
   render({ threadScroll: "latest" })
 }
 
-async function deleteSession(sessionId) {
-  const projectId = state.activeProjectId
-  try {
-    await window.openworking.runtime.deleteSession({ sessionId })
-  } catch (error) {
-    showToast(error.message || "Could not delete session.")
-    return
+async function deleteSession(target) {
+  const sessionId = target?.sessionId
+  const projectId = target?.projectId
+  if (!sessionId || !projectId) {
+    throw new Error("Could not identify that session's project.")
   }
-  state.sessionsByProject[projectId] = await window.openworking.runtime.listSessions()
+  if (projectId !== state.activeProjectId && threadIsBusy(activeThread())) {
+    throw new Error("Finish the active session before deleting from another project.")
+  }
+  await runWithRuntimeProject(projectId, async () => {
+    if (state.runtime?.project?.id !== projectId || state.runtime?.status !== "running") {
+      throw new Error("Could not open the session workspace.")
+    }
+    await window.openworking.runtime.deleteSession({ sessionId })
+    setProjectSessions(projectId, await window.openworking.runtime.listSessions(), "active")
+  })
   state.threads.delete(sessionId)
-  if (state.activeSessionId === sessionId) {
+  state.forkMarkers.delete(sessionId)
+  if (state.activeProjectId === projectId && state.activeSessionId === sessionId) {
     state.activeSessionId = null
     resetActiveThread()
   }
   state.sessionMenu = null
   render()
+}
+
+async function confirmDeleteSession() {
+  const target = state.sessionDeleteTarget
+  if (!target?.sessionId || !target.projectId) {
+    state.sessionDeleteTarget = null
+    state.sessionDeleteError = null
+    state.sessionDeleting = false
+    render()
+    return
+  }
+  if (state.sessionDeleting) return
+  state.sessionDeleting = true
+  state.sessionDeleteError = null
+  render()
+  try {
+    await deleteSession(target)
+    state.sessionDeleteTarget = null
+    state.sessionDeleteError = null
+    state.sessionDeleting = false
+    render()
+  } catch (error) {
+    state.sessionDeleting = false
+    state.sessionDeleteError = error.message || "Could not delete session."
+    render()
+  }
+}
+
+async function togglePin(sessionId, pinned, meta = {}) {
+  try {
+    const pins = await window.openworking.pins.set(sessionId, pinned, meta)
+    state.pinnedSessions = pinsToMap(pins)
+  } catch (error) {
+    showToast(error.message || "Could not update pin.")
+    return
+  }
+  // Pin/unpin only reshuffles the sidebar's Pinned section + accordions.
+  scheduleSidebarRender()
 }
 
 function closeRenameSessionModal({ restoreFocus = true } = {}) {
@@ -3848,7 +4345,7 @@ async function confirmRenameSession() {
         throw new Error("Could not open the session workspace.")
       }
       await window.openworking.runtime.renameSession({ sessionId: target.sessionId, title: trimmedTitle })
-      state.sessionsByProject[target.projectId] = await window.openworking.runtime.listSessions()
+      setProjectSessions(target.projectId, await window.openworking.runtime.listSessions(), "active")
     })
     closeRenameSessionModal()
   } catch (error) {
@@ -3908,8 +4405,7 @@ async function sendPrompt(rawPrompt) {
       const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
       const session = await window.openworking.runtime.createSession({ title })
       state.activeSessionId = session.id
-      state.sessionsByProject[project.id] ||= []
-      state.sessionsByProject[project.id].unshift(session)
+      setProjectSessions(project.id, [session, ...projectSessions(project.id)], "active")
       // Discard the unsaved "new session" draft thread and start a clean thread under
       // the real session id, so subsequent stream events route to it by sessionID.
       state.threads.delete(null)
@@ -4031,6 +4527,8 @@ async function removeProject(projectId) {
   await window.openworking.projects.remove(projectId)
   state.projects = await window.openworking.projects.list()
   delete state.sessionsByProject[projectId]
+  state.expanded.delete(projectId)
+  persistExpanded()
   if (state.activeProjectId === projectId) {
     state.activeProjectId = state.projects[0]?.id || null
     resetFileTree(state.activeProjectId)
@@ -4039,6 +4537,19 @@ async function removeProject(projectId) {
     resetActiveThread()
   }
   render()
+}
+
+async function toggleProjectPin(projectId, pinned) {
+  try {
+    await window.openworking.projects.setPinned(projectId, pinned)
+    state.projects = await window.openworking.projects.list()
+  } catch (error) {
+    showToast(error.message || "Could not update pin.")
+    return
+  }
+  state.projectMenu = null
+  // Pinning a project only moves it between the sidebar's Pinned/Projects sections.
+  scheduleSidebarRender()
 }
 
 function updateConfigField(field, value) {
@@ -4348,6 +4859,12 @@ async function submitMcpServer() {
     const result = editing
       ? await window.openworking.mcp.update(state.mcpEditTarget, payload)
       : await window.openworking.mcp.add(payload)
+    // mcp:add can fail while installing an on-demand server (e.g. Backlog offline) — keep the modal
+    // open and surface the real reason instead of pretending it was added.
+    if (result?.error) {
+      state.mcpError = result.error
+      return
+    }
     state.mcpServers = result?.servers || state.mcpServers
     state.mcpModalOpen = false
     state.mcpEditTarget = null
@@ -4384,6 +4901,35 @@ async function authenticateMcp(name, { clear = false } = {}) {
     }
   } catch (error) {
     state.mcpError = error.message
+  } finally {
+    state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: false }
+    render()
+  }
+}
+
+// Retry connecting a failed (typically local stdio) MCP server. Reloads the runtime so a freshly
+// resolved PATH is picked up, then re-connects — recovering from a bad PATH without a manual
+// disable/enable. Reuses `mcpAuthenticating` as the busy flag so the card shows "Connecting…".
+async function reconnectMcp(name) {
+  const serverName = String(name || "")
+  if (!serverName || state.mcpAuthenticating?.[serverName]) return
+  state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: true }
+  state.mcpError = null
+  state.mcpErrorTarget = null
+  render()
+  try {
+    const result = await window.openworking.mcp.connect(serverName)
+    if (result?.error) {
+      state.mcpError = result.error
+      state.mcpErrorTarget = serverName
+    } else {
+      if (result.servers) state.mcpServers = result.servers
+      applyMcpStatusList(result.status)
+      if (state.mcpStatus[serverName] === "connected") showToast(`Connected ${serverName}`)
+    }
+  } catch (error) {
+    state.mcpError = error.message
+    state.mcpErrorTarget = serverName
   } finally {
     state.mcpAuthenticating = { ...state.mcpAuthenticating, [serverName]: false }
     render()
@@ -4439,14 +4985,544 @@ if (typeof module !== "undefined" && module.exports) {
     fileMentionTokenPattern,
     filterPromptAttachments,
     livePendingFileMentions,
+    loadAllSessions,
+    sessionsForProjectPath,
+    loadStoredExpanded,
+    persistExpanded,
     renderPromptOverlayHtml,
     renderTextWithFileMentions,
     resolveFileMentionsFromPrompt,
+    setProjectSessions,
+    sessionRowKey,
     __test: {
+      confirmDeleteSession,
+      deleteSession,
+      forkAssistantMessage,
+      refreshSessionData,
+      renderMessageActions,
+      renderThreadMessages,
+      renderThreadMessage,
+      selectSession,
       sendPrompt,
-      state
+      state,
+      dispatchDelegated,
+      delegationShim,
+      createStreamPacer,
+      flushActiveStreamPacing,
+      handleRuntimeStream,
+      maybeConsumePacedRuntimeEvent,
+      render,
+      renderSidebarInto,
+      splitStreamDeltaSegments,
+      streamPacer,
+      // DELEGATED_CLICK is a `const` (TDZ) at exports-eval time, so expose it via a getter.
+      getDelegatedClick: () => DELEGATED_CLICK
     }
   }
+}
+
+// Event delegation: a single set of listeners on #root replaces the per-render
+// querySelectorAll(...).forEach(addEventListener) storm that bindEvents() used to run on every
+// repaint. Each click/input/keydown/mousedown is matched against an ordered table of
+// [attribute|selector] → handler. Handlers keep reading `event.currentTarget.dataset` / calling
+// `event.stopPropagation()` exactly as before — the dispatcher hands them a small shim whose
+// currentTarget is the matched element and whose stopPropagation() ends dispatch for this event.
+// Ordering matters: more-specific targets (a session kebab/menu) are listed BEFORE the row they
+// sit inside, reproducing the old stopPropagation() guards that kept a kebab click from also
+// selecting the row.
+
+// Build the per-handler shim. `stop()` flips a flag the dispatcher checks to stop walking the
+// table, matching the old event.stopPropagation() semantics (each element used to own its
+// listener, so a stopPropagation there simply meant "no other handler runs for this click").
+function delegationShim(event, element) {
+  let stopped = false
+  const shim = {
+    type: event.type,
+    key: event.key,
+    shiftKey: event.shiftKey,
+    // Pointer coordinates are needed by the resizer mousedown handlers
+    // (startSidebarResize / startDocumentViewerResize / startRightFileSidebarResize)
+    // to seed the drag origin — without them startX is undefined and the resize
+    // computes NaN.
+    clientX: event.clientX,
+    clientY: event.clientY,
+    dataTransfer: event.dataTransfer,
+    target: event.target,
+    currentTarget: element,
+    stopPropagation() { stopped = true },
+    preventDefault() { event.preventDefault() }
+  }
+  return { shim, isStopped: () => stopped }
+}
+
+// Click handlers, most-specific first. Each entry: [attribute, handler(shim)].
+const DELEGATED_CLICK = [
+  ["data-session-menu", (e) => {
+    const id = e.currentTarget.dataset.sessionMenu
+    const projectId = e.currentTarget.dataset.sessionProject || ""
+    const key = sessionRowKey(projectId, id)
+    state.sessionMenu = state.sessionMenu === key ? null : key
+    scheduleSidebarRender()
+  }],
+  ["data-session-pin", (e) => {
+    state.sessionMenu = null
+    const meta = {
+      projectId: e.currentTarget.dataset.pinProject || null,
+      title: e.currentTarget.dataset.pinTitle || "",
+      updatedAt: e.currentTarget.dataset.pinUpdated || null
+    }
+    togglePin(e.currentTarget.dataset.sessionPin, e.currentTarget.dataset.pinned !== "1", meta).catch((error) => showToast(error.message))
+  }],
+  ["data-session-delete", (e) => {
+    state.sessionDeleteTarget = {
+      sessionId: e.currentTarget.dataset.sessionDelete,
+      projectId: e.currentTarget.dataset.sessionProject,
+      title: e.currentTarget.dataset.sessionTitle || "Untitled session"
+    }
+    state.sessionDeleting = false
+    state.sessionDeleteError = null
+    state.sessionMenu = null
+    render()
+  }],
+  ["data-session-rename", (e) => {
+    state.sessionRenameTarget = {
+      sessionId: e.currentTarget.dataset.sessionRename,
+      projectId: e.currentTarget.dataset.sessionProject,
+      title: e.currentTarget.dataset.sessionTitle || "",
+      label: e.currentTarget.dataset.sessionLabel || "Untitled session",
+    }
+    state.sessionRenameDraft = e.currentTarget.dataset.sessionTitle || ""
+    state.sessionRenameError = null
+    state.sessionRenaming = false
+    state.sessionRenameAutoFocus = true
+    state.sessionMenu = null
+    render()
+  }],
+  ["data-session-id", (e) => selectSession(e.currentTarget.dataset.projectId, e.currentTarget.dataset.sessionId)],
+  ["data-project-menu", (e) => {
+    const id = e.currentTarget.dataset.projectMenu
+    state.projectMenu = state.projectMenu === id ? null : id
+    scheduleSidebarRender()
+  }],
+  ["data-project-pin", (e) => {
+    toggleProjectPin(e.currentTarget.dataset.projectPin, e.currentTarget.dataset.pinned !== "1").catch((error) => showToast(error.message))
+  }],
+  ["data-project-rename", (e) => openRenameProjectModal(e.currentTarget.dataset.projectRename, e.currentTarget.dataset.projectName || "")],
+  ["data-project-delete", (e) => {
+    state.projectDeleteTarget = { id: e.currentTarget.dataset.projectDelete, name: e.currentTarget.dataset.projectName || "this project" }
+    state.projectRemoving = false
+    state.projectMenu = null
+    render()
+  }],
+  ["data-new-session", (e) => newSession(e.currentTarget.dataset.newSession)],
+  ["data-open-project", (e) => openProject(e.currentTarget.dataset.openProject)],
+  ["data-show-all", (e) => {
+    const id = e.currentTarget.dataset.showAll
+    state.showAll.has(id) ? state.showAll.delete(id) : state.showAll.add(id)
+    scheduleSidebarRender()
+  }],
+  ["data-nav", (e) => {
+    state.nav = e.currentTarget.dataset.nav
+    state.popover = null
+    render()
+  }],
+  ["data-tree-dir", (e) => toggleFileTreeDirectory(e.currentTarget.dataset.treeDir).catch((error) => showToast(error.message))],
+  ["data-tree-file", (e) => openFileTreeFile(e.currentTarget.dataset.treeFile).catch((error) => showToast(error.message))],
+  ["data-popover", (e) => {
+    state.popover = state.popover === e.currentTarget.dataset.popover ? null : e.currentTarget.dataset.popover
+    render()
+    document.getElementById("promptInput")?.focus()
+  }],
+  ["data-model", (e) => {
+    state.selectedModelKey = e.currentTarget.dataset.model
+    state.popover = null
+    render()
+  }],
+  ["data-chip", (e) => sendPrompt(chips[Number(e.currentTarget.dataset.chip)].text)],
+  ["data-provider", (e) => {
+    state.providerId = e.currentTarget.dataset.provider
+    render()
+  }],
+  ["data-settings-section", (e) => {
+    state.settingsSection = e.currentTarget.dataset.settingsSection
+    render()
+  }],
+  ["data-skill-open", (e) => openSkillPreview(e.currentTarget.dataset.skillOpen, e.currentTarget.dataset.skillBuiltin === "1")],
+  ["data-skills-tab", (e) => {
+    state.skillsTab = e.currentTarget.dataset.skillsTab
+    render()
+    if (state.skillsTab === "mcp") refreshMcpStatus()
+    if (state.skillsTab === "memory") loadMemory()
+  }],
+  ["data-memory-save", (e) => saveMemory(e.currentTarget.dataset.memorySave)],
+  ["data-mcp-type", (e) => {
+    if (state.mcpSaving || !state.mcpDraft) return
+    state.mcpDraft.type = e.currentTarget.dataset.mcpType
+    state.mcpError = null
+    render()
+  }],
+  ["data-mcp-toggle", (e) => toggleMcpEnabled(e.currentTarget.dataset.mcpToggle, e.currentTarget.dataset.mcpEnabled !== "1")],
+  ["data-mcp-oauth-mode", (e) => {
+    if (state.mcpSaving || !state.mcpDraft) return
+    const mode = e.currentTarget.dataset.mcpOauthMode
+    state.mcpDraft.oauthMode = mode
+    if (mode === "custom") state.mcpDraft.oauthAdvancedOpen = true
+    state.mcpError = null
+    render()
+  }],
+  ["data-rename-project", (e) => openRenameProjectModal(e.currentTarget.dataset.renameProject, e.currentTarget.dataset.projectName || "")],
+  ["data-remove-project", (e) => {
+    state.projectDeleteTarget = { id: e.currentTarget.dataset.removeProject, name: e.currentTarget.dataset.projectName || "this project" }
+    state.projectRemoving = false
+    render()
+  }],
+  ["data-remove-attachment", (e) => removeAttachment(e.currentTarget.dataset.removeAttachment)],
+  ["data-remove-file-mention", (e) => removeFileMention(e.currentTarget.dataset.removeFileMention)],
+  // Thread-row actions (these used to be wired by bindMessageActions/etc. on every renderThreadContent).
+  ["data-copy-message", (e) => copyMessage(e.currentTarget.dataset.copyMessage).catch((error) => showToast(error.message))],
+  ["data-fork-message", (e) => forkAssistantMessage(e.currentTarget.dataset.forkMessage).catch((error) => showToast(error.message))],
+  ["data-open-artifact", (e) => openArtifact(e.currentTarget.dataset.openArtifact).catch((error) => showToast(error.message))],
+  ["data-tool-step", (e) => {
+    const disclosure = state.toolDisclosure.get(e.currentTarget.dataset.toolStep)
+    if (!disclosure) return
+    disclosure.open = !disclosure.open
+    renderThreadContent()
+  }],
+  ["data-open-file", (e) => openDocument(e.currentTarget.dataset.openFile, { tab: e.currentTarget.dataset.openTab || null }).catch((error) => showToast(error.message))],
+  ["data-doc-tab", (e) => switchDocumentTab(e.currentTarget.dataset.docTab)],
+  ["data-question-option", (e) => {
+    const requestID = e.currentTarget.dataset.questionOption
+    const index = Number(e.currentTarget.dataset.questionIndex)
+    const value = e.currentTarget.dataset.questionValue
+    if (e.currentTarget.dataset.questionMultiple === "1") {
+      const draft = questionDraft(requestID, index)
+      draft.selected.has(value) ? draft.selected.delete(value) : draft.selected.add(value)
+      renderThreadContent()
+    } else {
+      submitQuestion(requestID, index, [value]).catch((error) => showToast(error.message))
+    }
+  }],
+  ["data-question-other-submit", (e) => {
+    const requestID = e.currentTarget.dataset.questionOtherSubmit
+    const index = Number(e.currentTarget.dataset.questionIndex)
+    const other = questionDraft(requestID, index).other.trim()
+    if (!other) {
+      showToast("Type an answer or pick an option.")
+      return
+    }
+    submitQuestion(requestID, index, [other]).catch((error) => showToast(error.message))
+  }],
+  ["data-question-submit", (e) => {
+    const requestID = e.currentTarget.dataset.questionSubmit
+    const index = Number(e.currentTarget.dataset.questionIndex)
+    const draft = questionDraft(requestID, index)
+    const answers = [...draft.selected]
+    if (draft.other.trim()) answers.push(draft.other.trim())
+    if (!answers.length) {
+      showToast("Select at least one option.")
+      return
+    }
+    submitQuestion(requestID, index, answers).catch((error) => showToast(error.message))
+  }],
+  ["data-question-dismiss", (e) => dismissQuestion(e.currentTarget.dataset.questionDismiss).catch((error) => showToast(error.message))],
+  ["data-permission-reply", (e) => replyPermission(e.currentTarget.dataset.permissionReply, e.currentTarget.dataset.permissionDecision).catch((error) => showToast(error.message))],
+  // data-action is the broad fallback — checked last so specific attributes win.
+  ["data-action", (e) => handleAction(e)],
+]
+
+// input handlers, most-specific first.
+const DELEGATED_INPUT = [
+  ["data-session-rename-input", (e) => {
+    state.sessionRenameDraft = e.currentTarget.value
+    state.sessionRenameError = null
+  }],
+  ["data-project-rename-input", (e) => {
+    state.projectRenameDraft = e.currentTarget.value
+    state.projectRenameError = null
+  }],
+  ["data-field", (e) => updateConfigField(e.currentTarget.dataset.field, e.currentTarget.value)],
+  ["data-model-modalities", (e) => updateModelModalities(e.currentTarget.dataset.modelId, e.currentTarget.dataset.modelModalities, e.currentTarget.value)],
+  ["data-memory-field", (e) => {
+    if (!state.memoryDraft) return
+    state.memoryDraft[e.currentTarget.dataset.memoryField] = e.currentTarget.value
+  }],
+  ["data-mcp-header", (e) => {
+    if (!state.mcpDraft) return
+    const index = Number(e.currentTarget.dataset.mcpHeaderIndex)
+    const row = state.mcpDraft.headers?.[index]
+    if (row) row[e.currentTarget.dataset.mcpHeader] = e.currentTarget.value
+  }],
+  ["data-mcp-env", (e) => {
+    if (!state.mcpDraft) return
+    const index = Number(e.currentTarget.dataset.mcpEnvIndex)
+    const row = state.mcpDraft.env?.[index]
+    if (row) row[e.currentTarget.dataset.mcpEnv] = e.currentTarget.value
+  }],
+  ["data-mcp-field", (e) => {
+    if (!state.mcpDraft) return
+    state.mcpDraft[e.currentTarget.dataset.mcpField] = e.currentTarget.value
+  }],
+  ["data-question-other", (e) => {
+    const draft = questionDraft(e.currentTarget.dataset.questionOther, Number(e.currentTarget.dataset.questionIndex))
+    draft.other = e.currentTarget.value
+  }],
+]
+
+// mousedown handlers (preventDefault to keep textarea focus while clicking a menu item).
+const DELEGATED_MOUSEDOWN = [
+  ["data-command", (e) => {
+    e.preventDefault()
+    selectCommand(e.currentTarget.dataset.command)
+  }],
+  ["data-file-mention", (e) => {
+    e.preventDefault()
+    selectFileMention(e.currentTarget.dataset.fileMention).catch((error) => showToast(error.message))
+  }],
+  ["data-resizer", (e) => startSidebarResize(e)],
+  ["data-document-resizer", (e) => startDocumentViewerResize(e)],
+  ["data-right-file-resizer", (e) => startRightFileSidebarResize(e)],
+]
+
+// Walk an ordered table for the first matching ancestor of event.target and run its handler.
+// `[data-stop-click]` (used on modal content) is a boundary: a matched element that lives OUTSIDE
+// that boundary (e.g. the backdrop's data-action="cancel…") is skipped when the click originated
+// INSIDE the modal, mirroring the old per-element event.stopPropagation() on the modal content.
+// Buttons inside the modal still match normally since they sit within the boundary.
+function dispatchDelegated(event, table) {
+  const stopBoundary = event.target.closest?.("[data-stop-click]") || null
+  for (const [attribute, handler] of table) {
+    const element = event.target.closest?.(`[${attribute}]`)
+    if (!element) continue
+    // If a stop-click boundary exists and the matched element is an ancestor of it (outside the
+    // protected content), this click must not trigger that handler — skip to the next entry.
+    if (stopBoundary && element !== stopBoundary && element.contains?.(stopBoundary)) continue
+    const { shim, isStopped } = delegationShim(event, element)
+    handler(shim)
+    if (isStopped()) return
+    return
+  }
+}
+
+// The two rename inputs share Enter=confirm / Escape=close keydown behavior.
+function handleRenameKeydown(event, element) {
+  if (element.matches("[data-session-rename-input]")) {
+    if (event.key === "Enter") {
+      event.preventDefault()
+      confirmRenameSession().catch((error) => showToast(error.message))
+    }
+    if (event.key === "Escape" && !state.sessionRenaming) {
+      event.preventDefault()
+      closeRenameSessionModal()
+    }
+    return
+  }
+  if (element.matches("[data-project-rename-input]")) {
+    if (event.key === "Enter") {
+      event.preventDefault()
+      confirmRenameProject().catch((error) => showToast(error.message))
+    }
+    if (event.key === "Escape" && !state.projectRenaming) {
+      event.preventDefault()
+      closeRenameProjectModal()
+    }
+  }
+}
+
+// The prompt textarea owns its own input/scroll/keydown logic (command + file-mention menus,
+// height auto-size, Enter-to-send). Delegated off #root by matching #promptInput.
+function handlePromptInput(promptInput) {
+  state.promptDraft = promptInput.value
+  syncPendingFileMentions(promptInput.value, { rerender: true, promptInput })
+  const liveInput = document.getElementById("promptInput") || promptInput
+  const send = document.querySelector(".send")
+  if (send) send.classList.toggle("disabled", !threadAbortable() && !liveInput.value.trim())
+  liveInput.style.height = "auto"
+  liveInput.style.height = `${Math.min(liveInput.scrollHeight, 200)}px`
+  syncPromptOverlay(liveInput)
+  syncPromptAssist(liveInput)
+}
+
+function handlePromptKeydown(event, promptInput) {
+  if (state.commandMenu.open) {
+    const candidates = commandCandidates(state.commandMenu.query)
+    if (event.key === "ArrowDown") {
+      event.preventDefault()
+      state.commandMenu.index = Math.min(state.commandMenu.index + 1, Math.max(candidates.length - 1, 0))
+      paintCommandMenu()
+      return
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault()
+      state.commandMenu.index = Math.max(state.commandMenu.index - 1, 0)
+      paintCommandMenu()
+      return
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault()
+      const choice = candidates[state.commandMenu.index]
+      if (choice) selectCommand(choice.name)
+      else closeCommandMenu()
+      return
+    }
+    if (event.key === "Escape") {
+      event.preventDefault()
+      closeCommandMenu()
+      return
+    }
+  }
+  if (state.fileMentionMenu.open) {
+    const candidates = fileMentionCandidates(state.fileMentionMenu.query)
+    if (event.key === "ArrowDown") {
+      event.preventDefault()
+      state.fileMentionMenu.index = Math.min(state.fileMentionMenu.index + 1, Math.max(candidates.length - 1, 0))
+      paintPromptAssistMenu()
+      return
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault()
+      state.fileMentionMenu.index = Math.max(state.fileMentionMenu.index - 1, 0)
+      paintPromptAssistMenu()
+      return
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault()
+      const choice = candidates[state.fileMentionMenu.index]
+      if (choice) selectFileMention(choice).catch((error) => showToast(error.message))
+      else closeFileMentionMenu()
+      return
+    }
+    if (event.key === "Escape") {
+      event.preventDefault()
+      closeFileMentionMenu()
+      return
+    }
+  }
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault()
+    sendPrompt(promptInput.value)
+  }
+}
+
+// A single floating tooltip that follows the cursor over any resize divider
+// (elements carrying data-tip-main, written by resizeTipAttrs). Delegated on
+// document so it survives re-renders without rebinding; appears after a short
+// hover delay and hides on leave or while a drag is in progress (.app.resizing).
+function attachResizeTip() {
+  const tip = document.createElement("div")
+  tip.className = "resize-tip"
+  document.body.appendChild(tip)
+
+  const OFFSET_X = 16  // keep the box clear of the cursor
+  const GAP = 8        // min distance from the viewport edge
+  let target = null    // the resizer currently hovered
+  let showTimer = null
+
+  const hide = () => {
+    tip.classList.remove("visible")
+    target = null
+    if (showTimer) { clearTimeout(showTimer); showTimer = null }
+  }
+
+  const place = (x, y) => {
+    // Measure after the content is set so width/height are accurate.
+    const w = tip.offsetWidth
+    const h = tip.offsetHeight
+    let left = x + OFFSET_X
+    if (left + w + GAP > window.innerWidth) left = x - OFFSET_X - w  // flip left near the right edge
+    let top = y - h / 2
+    top = Math.max(GAP, Math.min(top, window.innerHeight - h - GAP))
+    tip.style.left = `${Math.max(GAP, left)}px`
+    tip.style.top = `${top}px`
+  }
+
+  document.addEventListener("mousemove", (event) => {
+    // A drag is in progress — never show a hint.
+    if (document.querySelector(".app.resizing")) { hide(); return }
+    const resizer = event.target.closest?.("[data-tip-main]")
+    if (!resizer) { if (target) hide(); return }
+    if (resizer !== target) {
+      target = resizer
+      const key = resizer.dataset.tipKey
+      const keyChip = key ? `<span class="tip-key">${escapeHtml(key)}</span>` : ""
+      tip.innerHTML = `<span class="tip-main">${escapeHtml(resizer.dataset.tipMain || "")}${keyChip}</span><span class="tip-sub">${escapeHtml(resizer.dataset.tipSub || "")}</span>`
+      if (showTimer) clearTimeout(showTimer)
+      showTimer = setTimeout(() => { tip.classList.add("visible") }, 300)
+    }
+    place(event.clientX, event.clientY)
+  })
+  // Hide immediately when a drag starts (mousedown on a resizer).
+  document.addEventListener("mousedown", (event) => {
+    if (event.target.closest?.("[data-tip-main]")) hide()
+  })
+  window.addEventListener("blur", hide)
+}
+
+// Attach the delegated listeners to #root exactly once. Replaces ~45 per-render bindEvents groups.
+function installDelegatedListeners() {
+  const root = document.getElementById("root")
+  if (!root || root.dataset.delegated === "1") return
+  root.dataset.delegated = "1"
+
+  root.addEventListener("click", (event) => dispatchDelegated(event, DELEGATED_CLICK))
+  root.addEventListener("mousedown", (event) => dispatchDelegated(event, DELEGATED_MOUSEDOWN))
+
+  root.addEventListener("input", (event) => {
+    if (event.target.id === "promptInput") {
+      handlePromptInput(event.target)
+      return
+    }
+    dispatchDelegated(event, DELEGATED_INPUT)
+  })
+
+  root.addEventListener("scroll", (event) => {
+    if (event.target.id === "promptInput") syncPromptOverlay(event.target)
+  }, true)
+
+  root.addEventListener("keydown", (event) => {
+    if (event.target.id === "promptInput") {
+      handlePromptKeydown(event, event.target)
+      return
+    }
+    const renameInput = event.target.closest?.("[data-session-rename-input],[data-project-rename-input]")
+    if (renameInput) handleRenameKeydown(event, renameInput)
+  })
+
+  // Cmd/Ctrl+B toggles the sidebar from anywhere (mirrors the divider tooltip
+  // hint). Listens on window so it fires regardless of focus; toggling the
+  // sidebar never steals text focus, so it is safe inside the composer.
+  window.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "b") {
+      event.preventDefault()
+      toggleSidebar()
+    }
+  })
+
+  // The skill-upload dropzone is a single transient element; delegate its drag/drop off #root.
+  root.addEventListener("dragover", (event) => {
+    const zone = event.target.closest?.("[data-skill-drop]")
+    if (!zone) return
+    event.preventDefault()
+    zone.classList.add("dragging")
+  })
+  root.addEventListener("dragleave", (event) => {
+    const zone = event.target.closest?.("[data-skill-drop]")
+    if (zone) zone.classList.remove("dragging")
+  })
+  root.addEventListener("drop", (event) => {
+    const zone = event.target.closest?.("[data-skill-drop]")
+    if (!zone) return
+    event.preventDefault()
+    zone.classList.remove("dragging")
+    const file = event.dataTransfer?.files?.[0]
+    const filePath = file ? window.openworking.skills.pathForFile(file) : ""
+    if (!filePath) {
+      showToast("Drop a .zip or .skill file from disk.")
+      return
+    }
+    uploadSkill(filePath).catch((error) => showToast(error.message))
+  })
+
+  attachResizeTip()
 }
 
 if (typeof document !== "undefined") {
@@ -4471,6 +5547,7 @@ if (typeof document !== "undefined") {
     if (dirty) render()
   })
 
+  installDelegatedListeners()
   loadInitialState().catch((error) => {
     document.getElementById("root").innerHTML = `<pre class="fatal">${escapeHtml(error.stack || error.message)}</pre>`
   })

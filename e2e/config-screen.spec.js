@@ -37,12 +37,11 @@ test.describe("config / settings screen", () => {
     await expect(json).toBeVisible()
 
     const text = await json.inputValue()
-    // If an apiKey is present at all, it must be the redacted placeholder —
-    // a raw secret must never reach the rendered JSON preview.
-    if (text.includes('"apiKey"')) {
-      expect(text).toContain("[redacted]")
-      expect(text).not.toMatch(/"apiKey":\s*"(?!\[redacted\])[^"]+"/)
-    }
+    // A non-empty apiKey must always be rendered as the redacted placeholder —
+    // a raw secret must never reach the JSON preview. An empty apiKey ("") has
+    // no secret to hide, so it is left as-is. The forbidden case is a non-empty
+    // value that is anything other than the placeholder.
+    expect(text).not.toMatch(/"apiKey":\s*"(?!\[redacted\])[^"]+"/)
 
     // The config textarea is read-only (editing happens via the Provider form).
     await expect(json).toHaveAttribute("readonly", "")

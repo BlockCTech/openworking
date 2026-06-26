@@ -6,6 +6,8 @@
   let optimisticId = 0
   const OFFICE_ATTACHMENT_CONTEXT_MARKER = "Attached document files are provided as local paths plus extracted text context"
   const NO_RESPONSE_DETAIL = "The request ended without a response. Check provider/model/API key or runtime diagnostics."
+  const LIVE_STREAM_STALE_MS = 60 * 1000
+  const LIVE_STREAM_GRACE_MS = LIVE_STREAM_STALE_MS
 
   function idleStatus() {
     return { type: "idle" }
@@ -17,7 +19,10 @@
       status: idleStatus(),
       messages: [],
       pendingQuestions: [],
-      pendingPermissions: []
+      pendingPermissions: [],
+      lastStreamEventAt: 0,
+      lastEventAt: 0,
+      lastAssistantOutputAt: 0
     }
   }
 
@@ -27,7 +32,23 @@
     thread.messages = []
     thread.pendingQuestions = []
     thread.pendingPermissions = []
+    thread.lastStreamEventAt = 0
+    thread.lastEventAt = 0
+    thread.lastAssistantOutputAt = 0
     return thread
+  }
+
+  function touchThread(thread, at = Date.now()) {
+    if (!thread) return 0
+    thread.lastEventAt = at
+    return at
+  }
+
+  function markAssistantOutput(thread, at = Date.now()) {
+    if (!thread) return 0
+    thread.lastAssistantOutputAt = at
+    thread.lastEventAt = at
+    return at
   }
 
   function projectPart(part, fallbackId) {
@@ -336,7 +357,11 @@
       if (message.role === "user") return false
       if (assistantMessageHasOutput(message)) return true
     }
-    return true
+    return false
+  }
+
+  function hasPendingRequest(thread) {
+    return Boolean(thread?.pendingQuestions?.length || thread?.pendingPermissions?.length)
   }
 
   function appendSyntheticError(thread, { title, detail }) {
@@ -508,6 +533,8 @@
       }
     }
     insertRetainedSyntheticMessages(thread.messages, syntheticErrors)
+    touchThread(thread)
+    if (hasAssistantOutputAfterLastUser(thread)) markAssistantOutput(thread, thread.lastEventAt)
     return thread
   }
 
@@ -608,6 +635,7 @@
 
     if (event.type === "session.status") {
       thread.status = event.status || idleStatus()
+      touchThread(thread)
       return { changed: true, reconcile: false }
     }
     if (event.type === "session.idle") {
@@ -636,12 +664,16 @@
       return { changed: true, reconcile: true }
     }
     if (event.type === "message.updated") {
+      thread.lastStreamEventAt = Date.now()
       const message = normalizeMessage(event.info, thread.messages.length)
       if (!message) return { changed: false, reconcile: false }
       const updated = upsertMessage(thread, message)
+      if (updated?.role === "assistant" && assistantMessageHasOutput(updated)) markAssistantOutput(thread)
+      else if (updated) touchThread(thread)
       return { changed: Boolean(updated), reconcile: false }
     }
     if (event.type === "message.part.updated") {
+      thread.lastStreamEventAt = Date.now()
       const part = projectPart(event.part, event.part?.id)
       if (!part) return { changed: false, reconcile: false }
       const existing = thread.messages.find((message) => message.id === part.messageID)
@@ -660,6 +692,8 @@
       upsertPart(message, normalizedPart)
       message.parts = normalizeParts(message.role, message.parts)
       if (message.role === "user") removeMatchingOptimistic(thread, message)
+      if (message.role === "assistant" && assistantMessageHasOutput(message)) markAssistantOutput(thread)
+      else touchThread(thread)
       return { changed: true, reconcile: false }
     }
     // OpenCode streams both answer text and reasoning through `message.part.delta`
@@ -669,6 +703,7 @@
     // inferring type from `field`. If the delta arrives before its part.updated,
     // default to a text part.
     if (event.type === "message.part.delta" && event.field === "text") {
+      thread.lastStreamEventAt = Date.now()
       const existing = thread.messages.find((message) => message.id === event.messageID)
       const message = ensureMessage(thread, event.messageID, existing?.role || "assistant")
       let part = message.parts.find((item) => item.id === event.partID)
@@ -681,26 +716,32 @@
       // A delta can complete a stray tool-call-marker part (Gemma emits the marker
       // as text). Re-normalize so it never even flickers into the rendered thread.
       message.parts = normalizeParts(message.role, message.parts)
+      if (message.role === "assistant" && assistantMessageHasOutput(message)) markAssistantOutput(thread)
+      else touchThread(thread)
       return { changed: true, reconcile: false }
     }
     if (event.type === "question.asked" && event.requestID) {
       if (!Array.isArray(thread.pendingQuestions)) thread.pendingQuestions = []
       upsertPendingRequest(thread.pendingQuestions, { requestID: event.requestID, ...(event.question || {}) })
+      touchThread(thread)
       return { changed: true, reconcile: false }
     }
     if ((event.type === "question.replied" || event.type === "question.rejected") && event.requestID) {
       if (!Array.isArray(thread.pendingQuestions)) thread.pendingQuestions = []
       const changed = removePendingRequest(thread.pendingQuestions, event.requestID)
+      if (changed) touchThread(thread)
       return { changed, reconcile: false }
     }
     if (event.type === "permission.asked" && event.requestID) {
       if (!Array.isArray(thread.pendingPermissions)) thread.pendingPermissions = []
       upsertPendingRequest(thread.pendingPermissions, { requestID: event.requestID, ...(event.permission || {}) })
+      touchThread(thread)
       return { changed: true, reconcile: false }
     }
     if (event.type === "permission.replied" && event.requestID) {
       if (!Array.isArray(thread.pendingPermissions)) thread.pendingPermissions = []
       const changed = removePendingRequest(thread.pendingPermissions, event.requestID)
+      if (changed) touchThread(thread)
       return { changed, reconcile: false }
     }
     return { changed: false, reconcile: false }
@@ -709,6 +750,21 @@
   function threadIsBusy(thread) {
     const type = thread?.status?.type
     return type === "busy" || type === "retry"
+  }
+
+  function needsThreadRehydration(thread, serverStatus, now = Date.now()) {
+    if (!thread || !threadIsBusy(thread)) return true
+    if (serverStatus?.type === "idle") return true
+    // Keep the live busy state for sessions that have not emitted assistant output yet.
+    if (!hasAssistantOutputAfterLastUser(thread)) return false
+    if (hasRunningTool(thread) || hasPendingRequest(thread)) return false
+    const lastActivityAt = Math.max(
+      thread.lastAssistantOutputAt || 0,
+      thread.lastStreamEventAt || 0,
+      thread.lastEventAt || 0
+    )
+    if (!lastActivityAt) return true
+    return now - lastActivityAt > LIVE_STREAM_STALE_MS
   }
 
   function hasRunningTool(thread) {
@@ -742,10 +798,12 @@
     fileRefsFromBacktickPaths,
     hydrateThread,
     messageCopyText,
+    needsThreadRehydration,
     userMessageFileRefs,
     messageText,
     removeOptimisticUser,
     resetThread,
-    threadIsBusy
+    threadIsBusy,
+    LIVE_STREAM_GRACE_MS
   }
 })

@@ -3,9 +3,12 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { assertTranslationArtifact, assertProjectFile, listProjectDirectory, previewTranslationArtifact, readProjectFileContent } = require("./artifact-path")
 const { AttachmentRegistry } = require("./attachment-registry")
-const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, writeEditableProfileConfig } = require("./opencode-profile")
+const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, setActiveProjectMemory, writeEditableProfileConfig } = require("./opencode-profile")
+const { SCOPES, ensureProjectMemory, readMemory, writeMemory } = require("./memory-store")
 const { ProjectRegistry } = require("./project-registry")
+const { PinRegistry } = require("./pin-registry")
 const { RuntimeProcessManager } = require("./runtime/process-manager")
+const { BACKLOG_PACKAGE, backlogCommand, ensureBacklogServer, isLegacyBacklogNpxCommand } = require("./mcp-install")
 const { checkDesktopVersion, downloadInstaller, installDmg, versionCheckConfigured } = require("./version-check")
 
 // Walks up from the executable path to the enclosing .app bundle directory.
@@ -21,6 +24,7 @@ function resolveAppBundlePath(exePath) {
 
 let mainWindow = null
 let projectRegistry = null
+let pinRegistry = null
 let runtimeManager = null
 let opencodeProfile = null
 const attachmentRegistry = new AttachmentRegistry()
@@ -143,6 +147,10 @@ function registerIpc() {
   ipcMain.handle("projects:remove", (_event, projectId) => projectRegistry.remove(projectId))
   ipcMain.handle("projects:rename", (_event, projectId, name) => projectRegistry.rename(projectId, name))
   ipcMain.handle("projects:touch", (_event, projectId) => projectRegistry.touch(projectId))
+  ipcMain.handle("projects:setPinned", (_event, projectId, pinned) => projectRegistry.setPinned(projectId, pinned))
+
+  ipcMain.handle("pins:list", () => pinRegistry.list())
+  ipcMain.handle("pins:set", (_event, { sessionId, pinned, meta }) => pinRegistry.set(sessionId, pinned, meta))
 
   ipcMain.handle("config:get", () => ({
     ...readProfileConfig(opencodeProfile),
@@ -177,11 +185,47 @@ function registerIpc() {
     return { ...result, customSkills: listCustomSkills(opencodeProfile) }
   })
 
+  // A command (string or array) references the Backlog MCP package — covers the `npx
+  // backlog-mcp-server` preset and any user-typed variant. Used to swap in the node-based launcher.
+  function commandUsesBacklog(command) {
+    if (Array.isArray(command)) return command.some((part) => String(part).includes(BACKLOG_PACKAGE))
+    return String(command || "").includes(BACKLOG_PACKAGE)
+  }
+
+  // For a Backlog connector, install the package on-demand into the app profile and rewrite the
+  // payload's command to `node <entry>` so it never runs through npx (which a project's
+  // devEngines/packageManager can break with EBADDEVENGINES). No-op for other servers.
+  async function prepareBacklogCommand(server) {
+    if (!server || (server.name !== "backlog" && !commandUsesBacklog(server.command))) return server
+    await ensureBacklogServer(opencodeProfile.profileDir)
+    return { ...server, command: backlogCommand(opencodeProfile.profileDir) }
+  }
+
+  // Ensure an already-stored Backlog connector is installed and using the node-based command.
+  // Migrates a legacy `npx backlog-mcp-server` command in place (preserving env). No-op for others.
+  async function ensureBacklogConnectorReady(name) {
+    const stored = readProfileConfig(opencodeProfile).config.mcp?.[name]
+    if (!stored || (name !== "backlog" && !commandUsesBacklog(stored.command))) return
+    await ensureBacklogServer(opencodeProfile.profileDir)
+    if (isLegacyBacklogNpxCommand(stored.command)) {
+      updateMcpServer(opencodeProfile, name, {
+        type: "local",
+        command: backlogCommand(opencodeProfile.profileDir),
+        environment: stored.environment || {}
+      })
+    }
+  }
+
   ipcMain.handle("mcp:list", () => listMcpServers(opencodeProfile))
   ipcMain.handle("mcp:add", async (_event, server) => {
-    const added = addMcpServer(opencodeProfile, server)
-    await runtimeManager.reload()
-    return { server: added, servers: listMcpServers(opencodeProfile) }
+    try {
+      const prepared = await prepareBacklogCommand(server)
+      const added = addMcpServer(opencodeProfile, prepared)
+      await runtimeManager.reload()
+      return { server: added, servers: listMcpServers(opencodeProfile) }
+    } catch (error) {
+      return { error: error.message }
+    }
   })
   ipcMain.handle("mcp:update", async (_event, { name, server }) => {
     const updated = updateMcpServer(opencodeProfile, name, server)
@@ -189,9 +233,16 @@ function registerIpc() {
     return { server: updated, servers: listMcpServers(opencodeProfile) }
   })
   ipcMain.handle("mcp:setEnabled", async (_event, { name, enabled }) => {
-    setMcpServerEnabled(opencodeProfile, name, enabled)
-    await runtimeManager.reload()
-    return { servers: listMcpServers(opencodeProfile) }
+    try {
+      // Enabling a Backlog connector (possibly added before the node-based launcher, or never
+      // installed) ensures the package and migrates a legacy `npx` command to `node <entry>`.
+      if (enabled) await ensureBacklogConnectorReady(name)
+      setMcpServerEnabled(opencodeProfile, name, enabled)
+      await runtimeManager.reload()
+      return { servers: listMcpServers(opencodeProfile) }
+    } catch (error) {
+      return { error: error.message }
+    }
   })
   ipcMain.handle("mcp:remove", async (_event, name) => {
     removeMcpServer(opencodeProfile, name)
@@ -233,6 +284,25 @@ function registerIpc() {
       return { error: error.message }
     }
   })
+  // Retry a (typically local) MCP server that failed to connect — e.g. a stdio server whose `npx`
+  // could not be found on a stale PATH. Reload first so opencode picks up a freshly resolved PATH,
+  // then re-connect and report the new status (with opencode's real failure reason if it still fails).
+  ipcMain.handle("mcp:connect", async (_event, name) => {
+    const serverName = String(name || "")
+    try {
+      // For Backlog, make sure the package is installed and the command is the node-based launcher
+      // before retrying — this is what recovers a connector that failed under the old npx command.
+      await ensureBacklogConnectorReady(serverName)
+      await runtimeManager.reload()
+      await runtimeManager.connectMcp(serverName)
+      return {
+        servers: listMcpServers(opencodeProfile),
+        status: await runtimeManager.listMcpStatus()
+      }
+    } catch (error) {
+      return { error: error.message }
+    }
+  })
   ipcMain.handle("mcp:clearAuth", async (_event, name) => {
     const serverName = String(name || "")
     try {
@@ -242,6 +312,38 @@ function registerIpc() {
       return { cleared: result.cleared, ...(await runMcpAuth(serverName)) }
     } catch (error) {
       return { error: error.message }
+    }
+  })
+
+  // Cross-chat memory: read/write the global and active-project memory files. The active project
+  // comes from the runtime snapshot (its id keys the per-project file). Global memory always exists.
+  function activeProjectId() {
+    return runtimeManager.snapshot().project?.id || null
+  }
+  ipcMain.handle("memory:get", () => {
+    const profileDir = opencodeProfile.profileDir
+    const projectId = activeProjectId()
+    if (projectId) ensureProjectMemory(profileDir, projectId)
+    return {
+      global: readMemory(profileDir, "global"),
+      project: projectId ? readMemory(profileDir, "project", projectId) : "",
+      projectId,
+      hasProject: !!projectId
+    }
+  })
+  ipcMain.handle("memory:save", async (_event, { scope, content }) => {
+    if (!SCOPES.includes(scope)) throw new Error(`Invalid memory scope: ${scope}`)
+    const profileDir = opencodeProfile.profileDir
+    const projectId = activeProjectId()
+    if (scope === "project" && !projectId) throw new Error("Open a project before editing its memory.")
+    writeMemory(profileDir, scope, projectId, content)
+    // Re-read so OpenCode picks up the edited files on the next session.
+    if (runtimeManager.snapshot().status === "running") await runtimeManager.reload()
+    return {
+      global: readMemory(profileDir, "global"),
+      project: projectId ? readMemory(profileDir, "project", projectId) : "",
+      projectId,
+      hasProject: !!projectId
     }
   })
 
@@ -302,7 +404,11 @@ function registerIpc() {
   })
 
   ipcMain.handle("version:check", () =>
-    checkDesktopVersion({ currentVersion: app.getVersion(), platform: process.platform })
+    checkDesktopVersion({ 
+      currentVersion: app.getVersion(), 
+      platform: process.platform, 
+      arch: process.arch 
+    })
   )
   ipcMain.handle("version:downloadAndInstall", async (_event, downloadUrl) => {
     const destDir = app.getPath("temp")
@@ -344,18 +450,46 @@ function registerIpc() {
   ipcMain.handle("runtime:openProject", async (_event, { project }) => {
     opencodeProfile = ensureOpenworkingProfile({ userDataPath: app.getPath("userData") })
     runtimeManager.profile = opencodeProfile
+    // Point cross-chat memory's `instructions` entry at this project before the runtime reads config.
+    setActiveProjectMemory(opencodeProfile, project.id)
     projectRegistry.touch(project.id)
     return runtimeManager.openProject({ project })
   })
   ipcMain.handle("runtime:start", async (_event, { project }) => {
     opencodeProfile = ensureOpenworkingProfile({ userDataPath: app.getPath("userData") })
     runtimeManager.profile = opencodeProfile
+    // Point cross-chat memory's `instructions` entry at this project before the runtime reads config.
+    setActiveProjectMemory(opencodeProfile, project.id)
     projectRegistry.touch(project.id)
     return runtimeManager.openProject({ project })
   })
   ipcMain.handle("runtime:stop", () => runtimeManager.stop())
-  ipcMain.handle("runtime:listSessions", () => runtimeManager.listSessions())
-  ipcMain.handle("runtime:listCommands", () => runtimeManager.listCommands())
+  // Best-effort reads (listSessions/listSessionsForDirectory/listCommands) fill the sidebar and the
+  // slash-command menu and are always treated as optional by the renderer (it does .catch(() => [])).
+  // A transient failure — the server stopping/restarting mid-request → ECONNRESET / socket hang up —
+  // must resolve to [] rather than reject, or Electron logs a noisy "Error occurred in handler" for
+  // every dropped socket. waitUntilReady() handles the orderly case; this catch covers the racy one.
+  ipcMain.handle("runtime:listSessions", async () => {
+    try {
+      return await runtimeManager.listSessions()
+    } catch {
+      return []
+    }
+  })
+  ipcMain.handle("runtime:listSessionsForDirectory", async (_event, { directory } = {}) => {
+    try {
+      return await runtimeManager.listSessionsForDirectory(directory)
+    } catch {
+      return []
+    }
+  })
+  ipcMain.handle("runtime:listCommands", async () => {
+    try {
+      return await runtimeManager.listCommands()
+    } catch {
+      return []
+    }
+  })
   ipcMain.handle("runtime:createSession", (_event, payload) => runtimeManager.createSession(payload))
   ipcMain.handle("runtime:renameSession", (_event, payload) => runtimeManager.renameSession(payload))
   ipcMain.handle("runtime:sendPrompt", async (_event, payload) => {
@@ -369,6 +503,7 @@ function registerIpc() {
   ipcMain.handle("runtime:sendCommand", (_event, payload) => runtimeManager.sendCommand(payload))
   ipcMain.handle("runtime:abortSession", (_event, payload) => runtimeManager.abortSession(payload))
   ipcMain.handle("runtime:deleteSession", (_event, payload) => runtimeManager.deleteSession(payload))
+  ipcMain.handle("runtime:forkSession", (_event, payload) => runtimeManager.forkSession(payload))
   ipcMain.handle("runtime:answerQuestion", (_event, payload) => runtimeManager.answerQuestion(payload))
   ipcMain.handle("runtime:rejectQuestion", (_event, payload) => runtimeManager.rejectQuestion(payload))
   ipcMain.handle("runtime:replyPermission", (_event, payload) => runtimeManager.replyPermission(payload))
@@ -376,6 +511,7 @@ function registerIpc() {
 
 app.whenReady().then(() => {
   projectRegistry = new ProjectRegistry(app.getPath("userData"))
+  pinRegistry = new PinRegistry(app.getPath("userData"))
   opencodeProfile = ensureOpenworkingProfile({ userDataPath: app.getPath("userData") })
   runtimeManager = new RuntimeProcessManager({
     userDataPath: app.getPath("userData"),

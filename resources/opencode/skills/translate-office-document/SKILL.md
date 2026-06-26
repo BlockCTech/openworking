@@ -8,7 +8,7 @@ compatibility: opencode; requires the bundled translate_document tool and the co
 
 Use the bundled `translate_document` tool for PPTX and XLSX translation. Do not write ad hoc OOXML scripts while this tool is available.
 
-For `.pptx` and `.xlsx`, the tool prioritizes complete segment coverage over speed. It may split large translation batches and retry when the gateway returns malformed JSON or omits segment IDs, which can use more gateway calls and tokens. PPTX translation handles editable slide text and may use vision OCR best-effort for large raster screenshots or diagrams; translating editable shapes is still more faithful than translating screenshot text.
+For `.pptx` and `.xlsx`, the tool prioritizes complete segment coverage over speed. It may split large translation batches and retry when the gateway returns malformed JSON or omits segment IDs, which can use more gateway calls and tokens. PPTX translation handles editable slide text and may use vision OCR best-effort for large raster screenshots or diagrams; translating editable shapes is still more faithful than translating screenshot text. Image OCR is best-effort: if a slide image cannot be auto-translated, that image is left as-is and reported as a warning — the editable slide text is still translated and the artifact is still produced. Surface those warnings instead of claiming the whole translation failed.
 
 ## XLSX has two modes — pick one from the user's intent
 

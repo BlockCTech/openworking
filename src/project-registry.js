@@ -38,7 +38,8 @@ class ProjectRegistry {
       name: path.basename(resolvedPath) || resolvedPath,
       path: resolvedPath,
       addedAt: existing?.addedAt || now,
-      lastOpenedAt: now
+      lastOpenedAt: now,
+      pinned: existing?.pinned || false
     }
 
     projects.unshift(project)
@@ -63,6 +64,15 @@ class ProjectRegistry {
     const now = new Date().toISOString()
     const next = projects.map((project) =>
       project.id === projectId ? { ...project, lastOpenedAt: now } : project
+    )
+    this.save(next)
+    return next.find((project) => project.id === projectId) || null
+  }
+
+  setPinned(projectId, pinned) {
+    const projects = this.list()
+    const next = projects.map((project) =>
+      project.id === projectId ? { ...project, pinned: Boolean(pinned) } : project
     )
     this.save(next)
     return next.find((project) => project.id === projectId) || null

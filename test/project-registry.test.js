@@ -36,3 +36,36 @@ test("project registry renames and removes entries without deleting files", () =
   assert.deepEqual(remaining, [])
   assert.ok(fs.existsSync(projectPath))
 })
+
+test("project registry pins and unpins a project, persisting across reloads", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-registry-"))
+  const projectPath = path.join(temp, "project")
+  fs.mkdirSync(projectPath)
+  const userData = path.join(temp, "app-data")
+  const registry = new ProjectRegistry(userData)
+  const project = registry.add(projectPath)
+
+  // A freshly added project starts unpinned.
+  assert.equal(project.pinned, false)
+
+  const pinned = registry.setPinned(project.id, true)
+  assert.equal(pinned.pinned, true)
+  // A fresh registry over the same userData sees the persisted pin.
+  assert.equal(new ProjectRegistry(userData).list()[0].pinned, true)
+
+  const unpinned = registry.setPinned(project.id, false)
+  assert.equal(unpinned.pinned, false)
+  assert.equal(new ProjectRegistry(userData).list()[0].pinned, false)
+})
+
+test("project registry preserves a pin when the same folder is re-added", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-registry-"))
+  const projectPath = path.join(temp, "project")
+  fs.mkdirSync(projectPath)
+  const registry = new ProjectRegistry(path.join(temp, "app-data"))
+  const project = registry.add(projectPath)
+  registry.setPinned(project.id, true)
+
+  const readded = registry.add(projectPath)
+  assert.equal(readded.pinned, true)
+})

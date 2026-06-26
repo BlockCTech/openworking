@@ -1,6 +1,6 @@
 # Built-In Skills Contract
 
-OpenWorking ships fourteen native OpenCode skills offline:
+OpenWorking ships fifteen native OpenCode skills offline:
 
 | Skill | Purpose |
 | --- | --- |
@@ -18,6 +18,7 @@ OpenWorking ships fourteen native OpenCode skills offline:
 | `translate-document` | Translate PDF, DOCX and Markdown files into new structure-preserving artifacts. |
 | `translate-office-document` | Translate PPTX and XLSX files. For XLSX, either create a new translated workbook (default) or edit the original file in place by adding a translated sheet next to each original sheet. |
 | `webapp-testing` | Test local web applications with focused browser automation. |
+| `cross-chat-memory` | Remember durable facts, preferences and decisions (via the `remember` tool) so they carry across separate chats. |
 
 ## Source And Sync
 
@@ -34,6 +35,7 @@ At startup OpenWorking syncs changed files into:
 ```text
 <Electron userData>/opencode-profile/skills/<name>/
 <Electron userData>/opencode-profile/tools/translate_document.js
+<Electron userData>/opencode-profile/tools/remember.js
 <Electron userData>/opencode-profile/document-tools/...
 ```
 
@@ -47,7 +49,7 @@ The runtime receives:
 OPENCODE_CONFIG_DIR=<Electron userData>/opencode-profile
 ```
 
-OpenCode discovers each `skills/<name>/SKILL.md` through its native `skill` tool and scans `tools/translate_document.js` as a custom tool. The regression test runs the pinned bundled binary with `opencode debug skill` and verifies all fourteen names.
+OpenCode discovers each `skills/<name>/SKILL.md` through its native `skill` tool and scans `tools/translate_document.js` and `tools/remember.js` as custom tools. The regression test runs the pinned bundled binary with `opencode debug skill` and verifies all fifteen names.
 
 ## Toggles And Plugins
 
@@ -104,3 +106,22 @@ opencode collapses MCP connect/auth errors into an opaque `HTTP 500 UnknownError
 `GET /mcp` returns a per-server `{ status, error }` map (opencode records the real connect-failure reason in `error`; its WARN log only prints the status). `listMcpStatus` preserves `error` and the renderer shows it on the card via `state.mcpStatusError`. Statuses include `connected`, `needs_auth`, `needs_client_registration` (server has no DCR and no clientId), `failed`, `disabled`.
 
 If a connect fails after a prior partial/dynamic registration left stale OAuth state, the failed card shows a **Reset auth** button → `mcp:clearAuth` deletes the server's entry from opencode's auth store (`<profile>/data/opencode/auth.json`, keyed by server name; only entries with `tokens`/`clientInfo`/`oauthState`/`codeVerifier` are removed), reloads the runtime, and re-authenticates clean.
+
+## Cross-Chat Memory
+
+Chats are stateless: by default nothing said in one session is visible in another. Cross-chat memory persists durable facts and recalls them automatically in future sessions. It is built entirely on OpenCode's **native** instruction-file loading — no prompt injection — and stays local-first (memory lives only under the app-managed profile, never in the user's project folder or `~/.config/opencode`).
+
+Two stores, both under `<profile>`:
+
+| Scope | File | How OpenCode loads it |
+| --- | --- | --- |
+| Global | `<profile>/AGENTS.md` | Native global-`AGENTS.md` pickup in the config dir. Loaded into every session. |
+| Per-project | `<profile>/memory/<projectId>.md` | Referenced by absolute path in `opencode.json` → `instructions`, swapped to the active project on open. |
+
+`<projectId>` is `projectIdForPath()` (`proj_<sha256-16>`). Each file is a Markdown bullet list under a managed header comment (`<!-- OpenWorking managed memory… -->`) so the app owns it safely.
+
+- **Capture** — the model calls the bundled `remember` tool (`resources/opencode/tools/remember.js`) with `{ fact, scope: "global"|"project" }`; the `cross-chat-memory` skill teaches when to use it. The tool runs inside the runtime and resolves paths from the spawn env (`OPENCODE_CONFIG_DIR`, `OPENWORKING_PROJECT_ID`) — no IPC back to the app. It dedups and rejects trivially short facts.
+- **Per-project wiring** — on `runtime:openProject`/`runtime:start`, `setActiveProjectMemory` (`src/opencode-profile.js`) rewrites the single managed `instructions` entry to the active project's file via `applyProjectInstruction` (`src/memory-store.js`), leaving any user-authored `instructions` untouched.
+- **Review/edit UI** — the Skills screen's **Memory** tab (`state.skillsTab === "memory"`) shows the global and current-project memory as editable Markdown. IPC `memory:get`/`memory:save` (`src/main.js`, exposed via `window.openworking.memory`) read/write the files (`readMemory`/`writeMemory`) and reload the runtime so edits take effect on the next session.
+
+Shared helpers live in `src/memory-store.js` (pure fs/path, unit-tested in `test/memory-store.test.js`); the runtime-side `remember.js` mirrors the same file format independently because it cannot import app modules.
