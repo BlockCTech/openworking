@@ -194,6 +194,34 @@ test("reasoning part projection keeps only the text content across the boundary"
   })
 })
 
+test("tool part projection preserves child session ids for task-tool fallback tracking", () => {
+  assert.deepEqual(projectMessagePart({
+    id: "part_tool",
+    sessionID: "sess_parent",
+    messageID: "msg_tool",
+    type: "tool",
+    tool: "task",
+    state: {
+      status: "running",
+      sessionId: "sess_child",
+      metadata: { secret: "drop" }
+    }
+  }), {
+    id: "part_tool",
+    sessionID: "sess_parent",
+    messageID: "msg_tool",
+    type: "tool",
+    tool: "task",
+    state: {
+      status: "running",
+      input: {},
+      title: undefined,
+      error: undefined,
+      sessionId: "sess_child"
+    }
+  })
+})
+
 test("question.asked projection whitelists prompt and option display fields", () => {
   const projected = projectRuntimeEvent({
     type: "question.asked",
@@ -290,6 +318,39 @@ test("permission.replied projection forwards only ids and drops malformed events
   })
   assert.equal(projectRuntimeEvent({ type: "permission.asked", properties: { sessionID: "sess_one" } }), null)
   assert.equal(projectRuntimeEvent({ type: "question.asked", properties: { requestID: "q1" } }), null)
+})
+
+test("session.created projection forwards child-session linkage from upstream info payload", () => {
+  assert.deepEqual(projectRuntimeEvent({
+    type: "session.created",
+    properties: {
+      info: { id: "sess_child", parentID: "sess_parent", title: "Subagent" },
+      secret: "drop"
+    }
+  }), {
+    type: "session.created",
+    sessionID: "sess_child",
+    parentSessionId: "sess_parent"
+  })
+})
+
+test("session.created projection still accepts direct child-session linkage fields", () => {
+  assert.deepEqual(projectRuntimeEvent({
+    type: "session.created",
+    properties: { sessionID: "sess_child", parentSessionId: "sess_parent", secret: "drop" }
+  }), {
+    type: "session.created",
+    sessionID: "sess_child",
+    parentSessionId: "sess_parent"
+  })
+
+})
+
+test("session.created projection ignores events without parent linkage", () => {
+  assert.equal(projectRuntimeEvent({
+    type: "session.created",
+    properties: { info: { id: "sess_top_level" } }
+  }), null)
 })
 
 test("prompt parts route an office attachment as a local path instead of a model file part", () => {

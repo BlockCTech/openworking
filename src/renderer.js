@@ -131,6 +131,7 @@ const state = {
   activeProjectId: null,
   activeSessionId: null,
   sessionsByProject: {},
+  subagentSessionIds: new Set(),
   // One live thread per session, keyed by sessionId. Background sessions keep their
   // thread (and its streaming state) alive while another session is on screen, so a
   // long task in session A is not lost when the user switches to / creates session B.
@@ -186,6 +187,7 @@ const state = {
   planProposal: null,
   selectedModelKey: "",
   promptDraft: "",
+  firstSendInFlight: false,
   pendingAttachments: [],
   pendingFileMentions: [],
   commands: [],
@@ -485,6 +487,10 @@ function dedupeSessions(sessions) {
   return unique
 }
 
+function removeTrackedSubagentSessions(sessions) {
+  return (Array.isArray(sessions) ? sessions : []).filter((session) => !state.subagentSessionIds.has(session?.id))
+}
+
 // Keeps only sessions whose `directory` matches the given project path. /session?directory= is
 // already directory-scoped, so this is a defensive filter against any session tagged with a
 // sibling/child directory leaking into a project's list. Sessions without `directory` are only
@@ -504,11 +510,11 @@ function activeSessionsForProjectPath(sessions, projectPath) {
 function setProjectSessions(projectId, sessions, source = "directory") {
   const project = state.projects.find((item) => item.id === projectId)
   if (!project) return []
-  const next = dedupeSessions(
+  const next = removeTrackedSubagentSessions(dedupeSessions(
     source === "active"
       ? activeSessionsForProjectPath(sessions, project.path)
       : sessionsForProjectPath(sessions, project.path)
-  )
+  ))
   const nextIds = new Set(next.map((session) => session.id))
   if (nextIds.size) {
     for (const [otherProjectId, otherSessions] of Object.entries(state.sessionsByProject)) {
@@ -519,6 +525,35 @@ function setProjectSessions(projectId, sessions, source = "directory") {
   }
   state.sessionsByProject[projectId] = next
   return next
+}
+
+function pruneTrackedSubagentSession(sessionId) {
+  if (!sessionId) return false
+  let changed = false
+  for (const [projectId, sessions] of Object.entries(state.sessionsByProject)) {
+    if (!Array.isArray(sessions)) continue
+    const filtered = sessions.filter((session) => session?.id !== sessionId)
+    if (filtered.length !== sessions.length) {
+      state.sessionsByProject[projectId] = filtered
+      changed = true
+    }
+  }
+  return changed
+}
+
+function fallbackSubagentSessionId(event) {
+  if (event?.type !== "message.part.updated") return null
+  if (event.part?.type !== "tool" || event.part?.tool !== "task") return null
+  return event.part?.state?.sessionId || null
+}
+
+function trackSubagentSession(event) {
+  const sessionId = event?.type === "session.created" && event?.parentSessionId
+    ? event.sessionID
+    : fallbackSubagentSessionId(event)
+  if (!sessionId || state.subagentSessionIds.has(sessionId)) return false
+  state.subagentSessionIds.add(sessionId)
+  return pruneTrackedSubagentSession(sessionId)
 }
 
 // Populates sidebar history for EVERY project from the single running server. OpenCode's
@@ -1005,6 +1040,9 @@ function handleRuntimeStream(event) {
     handleMcpStreamEvent(event)
     return
   }
+  const sidebarChanged = trackSubagentSession(event)
+  if (sidebarChanged) scheduleSidebarRender()
+  if (event?.type === "session.created") return
   if (!event?.sessionID) return
   if (maybeConsumePacedRuntimeEvent(event)) {
     return
@@ -4580,11 +4618,15 @@ async function sendPrompt(rawPrompt) {
   const mode = modes.find((item) => item.id === state.mode) || modes[0]
   let thread = null
   let optimisticId = null
+  let ownsFirstSendGuard = false
   try {
     if (state.runtime?.project?.id !== project.id || state.runtime.status !== "running") {
       state.activeSessionId = await ensureRuntimeProject(project.id, { preserveSessionId: state.activeSessionId })
     }
     if (!state.activeSessionId) {
+      if (state.firstSendInFlight) return
+      state.firstSendInFlight = true
+      ownsFirstSendGuard = true
       const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
       const session = await window.openworking.runtime.createSession({ title })
       state.activeSessionId = session.id
@@ -4658,6 +4700,8 @@ async function sendPrompt(rawPrompt) {
     }
     render({ threadScroll: "latest" })
     showToast(error.message || "Could not send prompt.")
+  } finally {
+    if (ownsFirstSendGuard) state.firstSendInFlight = false
   }
 }
 

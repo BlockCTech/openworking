@@ -355,7 +355,8 @@ test("sessionsForProjectPath keeps only directory-matching sessions (trailing sl
 test("setProjectSessions accepts active no-directory sessions and removes that id from other projects", () => {
   const previous = {
     projects: __test.state.projects,
-    sessionsByProject: __test.state.sessionsByProject
+    sessionsByProject: __test.state.sessionsByProject,
+    subagentSessionIds: __test.state.subagentSessionIds
   }
   try {
     __test.state.projects = [
@@ -368,6 +369,7 @@ test("setProjectSessions accepts active no-directory sessions and removes that i
         { id: "b_only", directory: "/Users/me/b" }
       ]
     }
+    __test.state.subagentSessionIds = new Set()
 
     const stored = setProjectSessions("proj_a", [
       { id: "shared" },
@@ -381,6 +383,32 @@ test("setProjectSessions accepts active no-directory sessions and removes that i
   } finally {
     __test.state.projects = previous.projects
     __test.state.sessionsByProject = previous.sessionsByProject
+    __test.state.subagentSessionIds = previous.subagentSessionIds
+  }
+})
+
+test("setProjectSessions excludes tracked subagent sessions from sidebar state", () => {
+  const previous = {
+    projects: __test.state.projects,
+    sessionsByProject: __test.state.sessionsByProject,
+    subagentSessionIds: __test.state.subagentSessionIds
+  }
+  try {
+    __test.state.projects = [{ id: "proj_a", path: "/Users/me/a" }]
+    __test.state.sessionsByProject = {}
+    __test.state.subagentSessionIds = new Set(["sess_sub"])
+
+    const stored = setProjectSessions("proj_a", [
+      { id: "sess_sub", directory: "/Users/me/a" },
+      { id: "sess_top", directory: "/Users/me/a" }
+    ], "directory")
+
+    assert.deepEqual(stored.map((session) => session.id), ["sess_top"])
+    assert.deepEqual(__test.state.sessionsByProject.proj_a.map((session) => session.id), ["sess_top"])
+  } finally {
+    __test.state.projects = previous.projects
+    __test.state.sessionsByProject = previous.sessionsByProject
+    __test.state.subagentSessionIds = previous.subagentSessionIds
   }
 })
 
@@ -423,6 +451,100 @@ test("loadAllSessions fetches each project directory and fills state for every p
     assert.deepEqual(__test.state.sessionsByProject.proj_b.map((s) => s.id), ["s2"])
   } finally {
     restore()
+  }
+})
+
+test("handleRuntimeStream tracks child sessions from session.created and removes them from sidebar state", () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousState = {
+    projects: __test.state.projects,
+    sessionsByProject: __test.state.sessionsByProject,
+    subagentSessionIds: __test.state.subagentSessionIds,
+    activeProjectId: __test.state.activeProjectId,
+    activeSessionId: __test.state.activeSessionId,
+    runtime: __test.state.runtime
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  try {
+    Object.assign(__test.state, {
+      projects: [{ id: "proj_a", path: "/Users/me/a" }],
+      sessionsByProject: {
+        proj_a: [
+          { id: "sess_parent", directory: "/Users/me/a" },
+          { id: "sess_sub", directory: "/Users/me/a" }
+        ]
+      },
+      subagentSessionIds: new Set(),
+      activeProjectId: "proj_a",
+      activeSessionId: "sess_parent",
+      runtime: { status: "running", project: { id: "proj_a" }, sessionStatuses: {} }
+    })
+
+    __test.handleRuntimeStream({
+      type: "session.created",
+      sessionID: "sess_sub",
+      parentSessionId: "sess_parent"
+    })
+
+    assert.equal(__test.state.subagentSessionIds.has("sess_sub"), true)
+    assert.deepEqual(__test.state.sessionsByProject.proj_a.map((session) => session.id), ["sess_parent"])
+  } finally {
+    Object.assign(__test.state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+  }
+})
+
+test("handleRuntimeStream falls back to tool sessionId tracking for task tool updates", () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousState = {
+    projects: __test.state.projects,
+    sessionsByProject: __test.state.sessionsByProject,
+    subagentSessionIds: __test.state.subagentSessionIds,
+    activeProjectId: __test.state.activeProjectId,
+    activeSessionId: __test.state.activeSessionId,
+    runtime: __test.state.runtime
+  }
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  try {
+    Object.assign(__test.state, {
+      projects: [{ id: "proj_a", path: "/Users/me/a" }],
+      sessionsByProject: {
+        proj_a: [
+          { id: "sess_parent", directory: "/Users/me/a" },
+          { id: "sess_sub", directory: "/Users/me/a" }
+        ]
+      },
+      subagentSessionIds: new Set(),
+      activeProjectId: "proj_a",
+      activeSessionId: "sess_parent",
+      runtime: { status: "running", project: { id: "proj_a" }, sessionStatuses: {} }
+    })
+
+    __test.handleRuntimeStream({
+      type: "message.part.updated",
+      sessionID: "sess_parent",
+      part: {
+        id: "part_tool",
+        messageID: "msg_tool",
+        type: "tool",
+        tool: "task",
+        state: { status: "running", sessionId: "sess_sub" }
+      }
+    })
+
+    assert.equal(__test.state.subagentSessionIds.has("sess_sub"), true)
+    assert.deepEqual(__test.state.sessionsByProject.proj_a.map((session) => session.id), ["sess_parent"])
+  } finally {
+    Object.assign(__test.state, previousState)
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
   }
 })
 
@@ -719,6 +841,176 @@ test("sendPrompt restores the draft and surfaces runtime startup failures", asyn
     assert.equal(state.loading, false)
     assert.equal(state.toast, "Runtime failed to start")
     assert.match(document.getElementById("toastHost").innerHTML, /Runtime failed to start/)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt ignores concurrent first-send submits while session creation is in flight", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  let createSessionCalls = 0
+  let sendPromptCalls = 0
+  let resolveSession = null
+  const sessionReady = new Promise((resolve) => {
+    resolveSession = resolve
+  })
+  global.window.openworking = {
+    runtime: {
+      async createSession() {
+        createSessionCalls += 1
+        await sessionReady
+        return { id: "sess_new", title: "Please inspect this", directory: "/tmp/project" }
+      },
+      async sendPrompt() {
+        sendPromptCalls += 1
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: null,
+    sessionsByProject: {},
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    firstSendInFlight: false,
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    const first = sendPrompt("Please inspect this")
+    const second = sendPrompt("Please inspect this")
+    await Promise.resolve()
+
+    assert.equal(state.firstSendInFlight, true)
+    assert.equal(createSessionCalls, 1)
+
+    resolveSession()
+    await Promise.all([first, second])
+
+    assert.equal(createSessionCalls, 1)
+    assert.equal(sendPromptCalls, 1)
+    assert.equal(state.activeSessionId, "sess_new")
+    assert.deepEqual(state.sessionsByProject.proj_1.map((session) => session.id), ["sess_new"])
+    assert.equal(state.threads.has("sess_new"), true)
+    assert.equal(state.firstSendInFlight, false)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt clears the first-send guard after a session-creation failure", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  let createSessionCalls = 0
+  let shouldFail = true
+  let sendPromptCalls = 0
+  global.window.openworking = {
+    runtime: {
+      async createSession() {
+        createSessionCalls += 1
+        if (shouldFail) throw new Error("session create failed")
+        return { id: "sess_retry", title: "Please inspect this", directory: "/tmp/project" }
+      },
+      async sendPrompt() {
+        sendPromptCalls += 1
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: null,
+    sessionsByProject: {},
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    firstSendInFlight: false,
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    await sendPrompt("Please inspect this")
+    assert.equal(createSessionCalls, 1)
+    assert.equal(sendPromptCalls, 0)
+    assert.equal(state.firstSendInFlight, false)
+    assert.equal(state.activeSessionId, null)
+    assert.equal(state.toast, "session create failed")
+
+    shouldFail = false
+    state.toast = null
+    await sendPrompt("Please inspect this")
+
+    assert.equal(createSessionCalls, 2)
+    assert.equal(sendPromptCalls, 1)
+    assert.equal(state.activeSessionId, "sess_retry")
+    assert.equal(state.firstSendInFlight, false)
   } finally {
     state.toast = null
     global.document = previousDocument

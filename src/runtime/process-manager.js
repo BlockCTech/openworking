@@ -385,6 +385,7 @@ function projectMessagePart(part) {
         input: part.state?.input || {},
         title: part.state?.title,
         error: part.state?.error,
+        ...(part.state?.sessionId ? { sessionId: part.state.sessionId } : {}),
         ...(metadata ? { metadata } : {})
       }
     }
@@ -504,10 +505,22 @@ function projectPermission(properties) {
   }
 }
 
+function projectSessionCreated(event) {
+  const properties = event?.properties || {}
+  const info = properties.info || {}
+  const sessionID = properties.sessionID || info.id
+  const parentSessionId = properties.parentSessionId || info.parentID
+  if (!sessionID || !parentSessionId) return null
+  return { type: event.type, sessionID, parentSessionId }
+}
+
 function projectRuntimeEvent(event) {
   const properties = event?.properties || {}
   if (event?.type === "server.connected") {
     return { type: "runtime.stream.connected" }
+  }
+  if (event?.type === "session.created") {
+    return projectSessionCreated(event)
   }
   if (event?.type === "session.status" && properties.sessionID) {
     return { type: event.type, sessionID: properties.sessionID, status: properties.status }
