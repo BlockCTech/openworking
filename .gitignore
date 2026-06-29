@@ -5,9 +5,12 @@ out/
 .DS_Store
 tmp-diagnostics/
 .claude/
+.agents/
 .opencode/
 playwright-report/
 test-results/
 blob-report/
 playwright/.cache/
 /build/*
+/design/*
+/tmp/*

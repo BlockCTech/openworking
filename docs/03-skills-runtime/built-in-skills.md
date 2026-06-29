@@ -1,6 +1,6 @@
 # Built-In Skills Contract
 
-OpenWorking ships fifteen native OpenCode skills offline:
+OpenWorking ships sixteen native OpenCode skills offline:
 
 | Skill | Purpose |
 | --- | --- |
@@ -19,6 +19,7 @@ OpenWorking ships fifteen native OpenCode skills offline:
 | `translate-office-document` | Translate PPTX and XLSX files. For XLSX, either create a new translated workbook (default) or edit the original file in place by adding a translated sheet next to each original sheet. |
 | `webapp-testing` | Test local web applications with focused browser automation. |
 | `cross-chat-memory` | Remember durable facts, preferences and decisions (via the `remember` tool) so they carry across separate chats. |
+| `browser-use` | Drive the user's logged-in Chrome (navigate, read, click, type, screenshot) through the `browser_*` tools; mutating actions are HITL-gated via `askToolPermissions`. |
 
 ## Source And Sync
 
@@ -49,7 +50,7 @@ The runtime receives:
 OPENCODE_CONFIG_DIR=<Electron userData>/opencode-profile
 ```
 
-OpenCode discovers each `skills/<name>/SKILL.md` through its native `skill` tool and scans `tools/translate_document.js` and `tools/remember.js` as custom tools. The regression test runs the pinned bundled binary with `opencode debug skill` and verifies all fifteen names.
+OpenCode discovers each `skills/<name>/SKILL.md` through its native `skill` tool and scans `tools/translate_document.js` and `tools/remember.js` as custom tools. The regression test runs the pinned bundled binary with `opencode debug skill` and verifies all sixteen names.
 
 ## Toggles And Plugins
 

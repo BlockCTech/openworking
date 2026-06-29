@@ -15,7 +15,8 @@ const BUILT_IN_SKILLS = [
   { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
   { name: "webapp-testing", description: "Test local web applications with focused browser automation." },
-  { name: "cross-chat-memory", description: "Remember durable facts, preferences and decisions so they carry across separate chats." }
+  { name: "cross-chat-memory", description: "Remember durable facts, preferences and decisions so they carry across separate chats." },
+  { name: "browser-use", description: "Drive the user's logged-in Chrome through the browser_* tools." }
 ]
 
 const icons = {
@@ -52,6 +53,7 @@ const icons = {
   cloud: '<svg viewBox="0 0 24 24"><path d="M7 18a4.2 4.2 0 0 1-.4-8.38 5 5 0 0 1 9.61-1.1A3.8 3.8 0 0 1 17.5 18z"/></svg>',
   logout: '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>',
   server: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>',
+  search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>',
   brain: '<svg viewBox="0 0 24 24"><path d="M9.5 3A2.5 2.5 0 0 0 7 5.5v.5a3 3 0 0 0-2 5.6V13a3 3 0 0 0 3 3v1.5A2.5 2.5 0 0 0 12 20m0-17a2.5 2.5 0 0 1 2.5 2.5v.5a3 3 0 0 1 2 5.6V13a3 3 0 0 1-3 3v1.5A2.5 2.5 0 0 1 12 20m0-17v17"/></svg>',
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'
 }
@@ -151,10 +153,15 @@ const state = {
   config: null,
   customSkills: [],
   mcpServers: [],
+  browserStatus: null,             // { chromeInstalled, hostInstalled, extensionId, … } from browser:status
+  browserBusy: false,              // true while installing the native host
+  browserError: null,              // last browser-bridge action error
   mcpStatus: {},                   // name -> "connected" | "needs_auth" | "failed" | "disabled"
   mcpStatusError: {},              // name -> opencode's real failure reason (from GET /mcp), if any
   mcpAuthenticating: {},           // name -> true while an auth flow is in progress
   skillsTab: "skills",             // skills | mcp | memory (mcp tab is the Extensions marketplace)
+  skillsQuery: "",                 // live search text on the Skills tab (DOM-filtered, no re-render)
+  skillsFilter: "all",             // all | installed | builtin — which skill group(s) to show
   memory: null,                    // { global, project, projectId, hasProject } once loaded
   memoryDraft: null,               // { global, project } edited text, mirrors `memory` while editing
   memoryLoading: false,
@@ -1050,6 +1057,41 @@ async function refreshMcpStatus() {
   }
 }
 
+// Browser-use bridge: fetch native-host/extension install status for the Extensions screen card.
+async function refreshBrowserStatus() {
+  try {
+    state.browserStatus = await window.openworking.browser.status()
+    if (state.nav === "skills" && state.skillsTab === "mcp") render()
+  } catch {
+    // Bridge unavailable (older main); leave the card in its default state.
+  }
+}
+
+async function installBrowserHost() {
+  state.browserBusy = true
+  state.browserError = null
+  render()
+  try {
+    await window.openworking.browser.installHost()
+    state.browserStatus = await window.openworking.browser.status()
+  } catch (error) {
+    state.browserError = error.message
+  } finally {
+    state.browserBusy = false
+    render()
+  }
+}
+
+async function openBrowserExtension() {
+  state.browserError = null
+  try {
+    await window.openworking.browser.openExtensionPage()
+  } catch (error) {
+    state.browserError = error.message
+    render()
+  }
+}
+
 // Cross-chat memory: load both scopes into state, seeding the editable draft. Called when the
 // Memory tab is opened. Re-seeds the draft from disk so the editor reflects the assistant's writes.
 async function loadMemory() {
@@ -1426,6 +1468,9 @@ function render({ threadScroll = "preserve" } = {}) {
   bindEvents()
   renderToast()
   scheduleMermaidRender()
+  // Re-apply the Skills search/filter to the freshly-rendered rows so the active query/filter
+  // survives a full re-render (e.g. switching tabs or saving). No-op off the Skills tab.
+  if (state.nav === "skills" && state.skillsTab === "skills") filterSkillsDom()
   restoreSidebarScroll(previousSidebarScroll)
   restoreThreadScroll(previousThreadScroll, threadScroll)
 }
@@ -3111,16 +3156,20 @@ function renderSettingsAdvanced() {
 function renderSkillsScreen() {
   const tab = ["mcp", "memory"].includes(state.skillsTab) ? state.skillsTab : "skills"
   const panel = tab === "mcp" ? renderMcpPanel() : tab === "memory" ? renderMemoryPanel() : renderSkillsPanel()
+  const segBtn = (id, label, ic) => `
+    <button class="seg-btn ${tab === id ? "active" : ""}" data-skills-tab="${id}">${icon(ic)}<span>${label}</span></button>`
   return `
     <main class="main">
-      ${renderHeader("Skills", "Bundled and custom OpenCode skills")}
-      <div class="admin-content skills-screen">
-        <div class="skills-tabs">
-          <button class="skills-tab ${tab === "skills" ? "active" : ""}" data-skills-tab="skills">${icon("blocks")}<span>Skills</span></button>
-          <button class="skills-tab ${tab === "mcp" ? "active" : ""}" data-skills-tab="mcp">${icon("server")}<span>Extensions</span></button>
-          <button class="skills-tab ${tab === "memory" ? "active" : ""}" data-skills-tab="memory">${icon("brain")}<span>Memory</span></button>
+      ${renderHeader("Skills")}
+      <div class="skills-screen">
+        <div class="sk-wrap">
+          <div class="seg" role="tablist">
+            ${segBtn("skills", "Skills", "blocks")}
+            ${segBtn("mcp", "Extensions", "server")}
+            ${segBtn("memory", "Memory", "brain")}
+          </div>
+          ${panel}
         </div>
-        ${panel}
       </div>
       ${renderSkillPreviewModal()}
     </main>
@@ -3132,48 +3181,146 @@ function renderSkillsScreen() {
 // the user can review, edit, or clear them. Edits are saved per-scope and re-read by the runtime.
 function renderMemoryPanel() {
   if (state.memoryLoading && !state.memory) {
-    return `<section class="admin-panel"><div class="config-note">Loading memory…</div></section>`
+    return `<section class="tabpanel" data-panel="memory"><div class="config-note">Loading memory…</div></section>`
   }
   const draft = state.memoryDraft || { global: "", project: "" }
   const hasProject = state.memory?.hasProject
-  const card = (scope, title, subtitle, value, disabled) => `
-    <section class="admin-panel memory-panel">
-      <div class="panel-head"><div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(subtitle)}</p></div>
-        <button class="primary-btn" data-memory-save="${scope}" ${disabled || state.memorySaving ? "disabled" : ""}>
+  const projectName = selectedProject()?.name || ""
+  // scope: "global" | "project". `file` is the editor-bar filename label, `chip` an optional
+  // project-name pill shown after the heading.
+  const card = (scope, title, chip, subtitle, file, value, disabled) => `
+    <div class="mem-card">
+      <div class="mem-head">
+        <div>
+          <h2>${escapeHtml(title)}${chip ? `<span class="mem-proj">${escapeHtml(chip)}</span>` : ""}</h2>
+          <p>${escapeHtml(subtitle)}</p>
+        </div>
+        <button class="mem-save" data-memory-save="${scope}" ${disabled || state.memorySaving ? "disabled" : ""}>
           ${state.memorySaving === scope ? "Saving…" : "Save"}
         </button>
       </div>
-      <textarea class="memory-editor" data-memory-field="${scope}" spellcheck="false" ${disabled ? "disabled" : ""}
-        placeholder="${disabled ? "Open a project to edit its memory." : "Nothing remembered yet. The assistant adds facts here, or you can add them manually as Markdown bullets."}">${escapeHtml(value || "")}</textarea>
-    </section>
+      <div class="editor">
+        <div class="editor-bar"><span class="ef">${escapeHtml(file)}</span><span class="ed"></span></div>
+        <textarea data-memory-field="${scope}" spellcheck="false" ${disabled ? "disabled" : ""}
+          placeholder="${disabled ? "Open a project to edit its memory." : "Add a fact the assistant should always remember…"}">${escapeHtml(value || "")}</textarea>
+      </div>
+    </div>
   `
   return `
-    ${state.memoryError ? `<div class="config-note field-error">${escapeHtml(state.memoryError)}</div>` : ""}
-    ${card("global", "Global memory", "Facts the assistant recalls in every chat across all projects.", draft.global, false)}
-    ${card("project", "Project memory", hasProject ? "Facts the assistant recalls in chats for the current project only." : "Open a project to give it its own memory.", draft.project, !hasProject)}
+    <section class="tabpanel" data-panel="memory">
+      ${state.memoryError ? `<div class="config-note field-error">${escapeHtml(state.memoryError)}</div>` : ""}
+      ${card("global", "Global memory", "", "Facts the assistant recalls in every chat across all projects.", "memory.md", draft.global, false)}
+      ${card("project", "Project memory", projectName, hasProject ? "Facts the assistant recalls in chats for the current project only." : "Open a project to give it its own memory.", projectName ? `${projectName}/memory.md` : "memory.md", draft.project, !hasProject)}
+    </section>
+  `
+}
+
+// Pick an existing icon for a skill row by name, falling back to a generic sparkle.
+const SKILL_ICONS = {
+  "explain-project": "book", "find-bugs": "ask", "write-tests": "check",
+  "summarize-changes": "doc", "code-review": "blocks", "docs-update": "doc",
+  pdf: "doc", pptx: "doc", docx: "doc", xlsx: "doc",
+  "skill-creator": "sparkle", "translate-document": "doc", "translate-office-document": "doc",
+  "webapp-testing": "activity", "cross-chat-memory": "brain", "browser-use": "server"
+}
+function skillIcon(name) { return icon(SKILL_ICONS[name] || "sparkle") }
+
+// One row in a skill card. Custom skills get the accent icon + "Active" tag; built-ins get a
+// "Built-in" tag + a chevron affordance. data-name carries the searchable text for live filtering.
+function renderSkillRow(skill) {
+  const haystack = `${skill.name} ${skill.description || skill.path || ""}`.toLowerCase()
+  return `
+    <button class="row ${skill.builtIn ? "" : "custom"}" data-skill-open="${escapeHtml(skill.name)}" data-skill-builtin="${skill.builtIn ? "1" : "0"}" data-name="${escapeHtml(haystack)}">
+      <span class="row-ic">${skillIcon(skill.name)}</span>
+      <span class="row-main">
+        <span class="row-name">
+          <span class="nm">${escapeHtml(skill.name)}</span>
+          ${skill.builtIn ? "" : `<span class="tag on"><span class="dt"></span>Active</span>`}
+        </span>
+        <span class="row-desc">${escapeHtml(skill.description || skill.path || "")}</span>
+      </span>
+      <span class="row-meta">
+        ${skill.builtIn ? `<span class="tag">Built-in</span><span class="row-act">${icon("chevRight")}</span>` : `<span class="row-act">${icon("dots")}</span>`}
+      </span>
+    </button>
   `
 }
 
 function renderSkillsPanel() {
   const builtIn = BUILT_IN_SKILLS.map((skill) => ({ ...skill, builtIn: true }))
   const custom = state.customSkills.map((skill) => ({ ...skill, builtIn: false }))
+  const filter = ["installed", "builtin"].includes(state.skillsFilter) ? state.skillsFilter : "all"
+  const filterBtn = (id, label, count) => `
+    <button class="filter ${filter === id ? "active" : ""}" data-skills-filter="${id}">${label} <span class="fc">${count}</span></button>`
+  const installedGroup = `
+    <div class="grp ${filter === "builtin" ? "hidden" : ""}" data-group="installed">
+      <div class="grp-lbl">Installed<span class="gc">Custom · removable</span></div>
+      ${custom.length
+        ? `<div class="card">${custom.map(renderSkillRow).join("")}</div>`
+        : `<div class="config-note">No custom skills installed yet. Use "Upload skill" to add one.</div>`}
+    </div>`
+  const builtinGroup = `
+    <div class="grp ${filter === "installed" ? "hidden" : ""}" data-group="builtin">
+      <div class="grp-lbl">Built-in<span class="gc">${builtIn.length}</span></div>
+      <div class="card">${builtIn.map(renderSkillRow).join("")}</div>
+    </div>`
   return `
-    <section class="admin-panel skills-panel">
-      <div class="panel-head"><div><h1>Skills</h1><p>Click a skill to preview its SKILL.md. Custom skills can be uninstalled.</p></div><button class="secondary-btn" data-action="openSkillUpload">${icon("arrowUp")}Upload skill</button></div>
-      <div class="skill-list">
-        ${[...builtIn, ...custom].map((skill) => `
-          <button class="skill-list-item" data-skill-open="${escapeHtml(skill.name)}" data-skill-builtin="${skill.builtIn ? "1" : "0"}">
-            <span class="sli-text">
-              <strong>${escapeHtml(skill.name)}</strong>
-              <small>${escapeHtml(skill.description || skill.path || "")}</small>
-            </span>
-            <span class="sli-badge ${skill.builtIn ? "builtin" : "custom"}">${skill.builtIn ? "Built-in" : "Installed"}</span>
-          </button>
-        `).join("")}
+    <section class="tabpanel" data-panel="skills">
+      <div class="pnl-head">
+        <div>
+          <h1>Skills</h1>
+          <p>Reusable instructions the agent invokes automatically. Click any skill to preview its SKILL.md.</p>
+        </div>
+        <button class="btn-up" data-action="openSkillUpload">${icon("arrowUp")}<span>Upload skill</span></button>
       </div>
-      <div class="config-note">Profile skills directory: ${escapeHtml(state.configPath.replace(/opencode\.json$/, "skills"))}</div>
+
+      <div class="toolbar">
+        <label class="searchbox">
+          ${icon("search")}
+          <input type="text" placeholder="Search skills…" value="${escapeHtml(state.skillsQuery || "")}" data-skills-search>
+        </label>
+        <div class="filters" role="tablist">
+          ${filterBtn("all", "All", builtIn.length + custom.length)}
+          ${filterBtn("installed", "Installed", custom.length)}
+          ${filterBtn("builtin", "Built-in", builtIn.length)}
+        </div>
+      </div>
+
+      ${installedGroup}
+      ${builtinGroup}
+
+      <div class="empty" id="skill-empty">
+        ${icon("search")}
+        <div class="e1">No skills found</div>
+        <div class="e2">Try a different search term.</div>
+      </div>
     </section>
   `
+}
+
+// Live-filter the Skills tab rows against state.skillsQuery / state.skillsFilter by toggling DOM
+// visibility — no re-render, so the search input keeps focus and caret. Mirrors the design's
+// runSearch(). Safe to call when the Skills tab isn't mounted (it just finds nothing).
+function filterSkillsDom() {
+  const query = (state.skillsQuery || "").trim().toLowerCase()
+  const filter = ["installed", "builtin"].includes(state.skillsFilter) ? state.skillsFilter : "all"
+  const groups = document.querySelectorAll('[data-panel="skills"] .grp')
+  let anyVisible = false
+  groups.forEach((group) => {
+    const hiddenByFilter = filter !== "all" && group.dataset.group !== filter
+    group.classList.toggle("hidden", hiddenByFilter)
+    if (hiddenByFilter) return
+    let shown = 0
+    group.querySelectorAll(".row").forEach((row) => {
+      const hit = !query || (row.dataset.name || "").includes(query)
+      row.style.display = hit ? "" : "none"
+      if (hit) shown++
+    })
+    group.style.display = shown ? "" : "none"
+    if (shown) anyVisible = true
+  })
+  const empty = document.getElementById("skill-empty")
+  if (empty) empty.style.display = anyVisible ? "none" : "block"
 }
 
 function mcpServerSubtitle(server) {
@@ -3214,33 +3361,31 @@ function renderMcpServerCard(server) {
   const error = errorText ? `<div class="mcp-card-error">${escapeHtml(errorText)}</div>` : ""
   // Local stdio servers retry the connect (no OAuth); remote servers run the auth/reconnect flow.
   const authBtn = action === "retry"
-    ? `<button class="secondary-btn" data-action="retryMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}Retry</button>`
+    ? `<button class="btn-ghost" data-action="retryMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}Retry</button>`
     : action
-      ? `<button class="secondary-btn" data-action="authenticateMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}${action === "reconnect" ? "Reconnect" : "Authenticate"}</button>`
+      ? `<button class="btn-ghost" data-action="authenticateMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("arrowUp")}${action === "reconnect" ? "Reconnect" : "Authenticate"}</button>`
       : ""
   // On a failed connect, offer a reset that clears any stale stored OAuth state before re-auth —
   // this recovers from a partial/dynamic registration left by an earlier attempt.
   const clearBtn = action === "reconnect"
-    ? `<button class="secondary-btn" data-action="clearMcpAuth" data-mcp-name="${escapeHtml(server.name)}" title="Clear stored credentials and authenticate again">${icon("trash")}Reset auth</button>`
+    ? `<button class="btn-ghost" data-action="clearMcpAuth" data-mcp-name="${escapeHtml(server.name)}" title="Clear stored credentials and authenticate again">${icon("trash")}Reset auth</button>`
     : ""
+  const transport = server.type === "remote" ? "http" : "stdio"
   return `
-    <div class="mcp-card">
-      <div class="mcp-card-main">
-        <span class="mcp-card-icon">${icon("server")}</span>
-        <span class="mcp-card-text">
-          <strong>${escapeHtml(server.name)}</strong>
-          <small>${escapeHtml(mcpServerSubtitle(server))}</small>
-        </span>
-        ${pill}
-      </div>
-      <div class="mcp-card-actions">
+    <div class="row">
+      <span class="row-ic">${icon("server")}</span>
+      <span class="row-main">
+        <span class="row-name"><span class="nm">${escapeHtml(server.name)}</span>${pill}</span>
+        <span class="srv-sub"><span class="xport">${transport}</span><span class="srv-path">${escapeHtml(mcpServerSubtitle(server))}</span></span>
+      </span>
+      <span class="row-meta">
         ${authBtn}
         ${clearBtn}
-        <button class="secondary-btn" data-action="editMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("edit")}Edit</button>
-        <span class="mcp-pill mcp-pill-type">${server.type === "remote" ? "Remote" : "Local"}</span>
-        <button class="switch ${server.enabled ? "on" : ""}" role="switch" aria-checked="${server.enabled ? "true" : "false"}" data-mcp-toggle="${escapeHtml(server.name)}" data-mcp-enabled="${server.enabled ? "1" : "0"}" title="${server.enabled ? "Disable" : "Enable"}"></button>
-        <button class="small-icon-btn mcp-delete" data-action="removeMcp" data-mcp-name="${escapeHtml(server.name)}" aria-label="Remove ${escapeHtml(server.name)}">${icon("trash")}</button>
-      </div>
+        <button class="btn-ghost" data-action="editMcp" data-mcp-name="${escapeHtml(server.name)}">${icon("edit")}Edit</button>
+        <span class="scope">${server.type === "remote" ? "Remote" : "Local"}</span>
+        <button class="tgl ${server.enabled ? "on" : ""}" role="switch" aria-checked="${server.enabled ? "true" : "false"}" data-mcp-toggle="${escapeHtml(server.name)}" data-mcp-enabled="${server.enabled ? "1" : "0"}" title="${server.enabled ? "Disable" : "Enable"}"><span class="knob"></span></button>
+        <button class="icon-del" data-action="removeMcp" data-mcp-name="${escapeHtml(server.name)}" aria-label="Remove ${escapeHtml(server.name)}" title="Remove">${icon("trash")}</button>
+      </span>
       ${error}
     </div>
   `
@@ -3251,19 +3396,52 @@ function renderMcpPresetCard(preset) {
   // Prefer a remote image when the preset ships an iconUrl (e.g. Slack, Backlog), otherwise
   // fall back to the inline SVG from the icon map.
   const iconHtml = preset.iconUrl
-    ? `<img class="mcp-card-img" src="${escapeHtml(preset.iconUrl)}" alt="${escapeHtml(preset.name)}" loading="lazy">`
+    ? `<img src="${escapeHtml(preset.iconUrl)}" alt="${escapeHtml(preset.name)}" loading="lazy">`
     : icon(preset.icon)
   return `
-    <div class="mcp-preset ${connected ? "connected" : ""}">
-      <div class="mcp-preset-head">
-        <span class="mcp-card-icon">${iconHtml}</span>
-        <strong>${escapeHtml(preset.name)}</strong>
-        ${preset.needsClientApp ? `<span class="mcp-pill mcp-pill-type">OAuth app</span>` : ""}
+    <div class="feat-card">
+      <div class="feat-top">
+        <span class="feat-logo">${iconHtml}</span>
+        <span class="feat-name">${escapeHtml(preset.name)}</span>
+        ${preset.needsClientApp ? `<span class="feat-badge">OAuth app</span>` : ""}
       </div>
-      <p class="mcp-preset-blurb">${escapeHtml(preset.blurb)}</p>
+      <div class="feat-desc">${escapeHtml(preset.blurb)}</div>
       ${connected
-        ? `<button class="secondary-btn" disabled>${icon("check")}Added</button>`
-        : `<button class="secondary-btn" data-action="connectPreset" data-preset-id="${escapeHtml(preset.id)}">${icon("plus")}Connect</button>`}
+        ? `<button class="feat-btn added" disabled>${icon("check")}Added</button>`
+        : `<button class="feat-btn add" data-action="connectPreset" data-preset-id="${escapeHtml(preset.id)}">${icon("plus")}Connect</button>`}
+    </div>
+  `
+}
+
+// Browser-use bridge card on the Extensions screen: guides the user through enabling the bundled Chrome
+// extension and installing the native host, with live status. Mutating browser actions are HITL-gated.
+function renderBrowserCard() {
+  const status = state.browserStatus || {}
+  const hostOk = !!status.hostInstalled
+  const chromeMissing = status.chromeInstalled === false
+  const pill = hostOk
+    ? `<span class="mcp-pill mcp-pill-ok">${icon("check")}Host installed</span>`
+    : `<span class="mcp-pill mcp-pill-type">Not set up</span>`
+  const error = state.browserError ? `<div class="mcp-card-error">${escapeHtml(state.browserError)}</div>` : ""
+  const busy = state.browserBusy
+  // Browser-use is a block card (not a single-line row) because it carries multi-line setup
+  // guidance under its action buttons.
+  return `
+    <div class="browser-card">
+      <div class="browser-top">
+        <span class="row-ic">${icon("server")}</span>
+        <span class="row-main">
+          <span class="row-name"><span class="nm">Browser (Chrome)</span>${pill}</span>
+          <span class="row-desc" style="white-space:normal">Let the agent drive your logged-in Chrome tab. Page-changing actions are confirmed before they run.</span>
+        </span>
+        <span class="browser-actions">
+          <button class="btn-ghost" data-action="openBrowserExtension"${busy ? " disabled" : ""}>${icon("blocks")}Load extension…</button>
+          <button class="btn-ghost" data-action="installBrowserHost"${busy ? " disabled" : ""}>${icon("arrowUp")}${busy ? "Installing…" : hostOk ? "Reinstall host" : "Install host"}</button>
+        </span>
+      </div>
+      ${chromeMissing ? `<div class="config-note">Google Chrome (stable) was not found in /Applications. Install it to use this feature.</div>` : ""}
+      <div class="config-note">After installing the host, open <code>chrome://extensions</code>, enable Developer mode, and use "Load unpacked" on the folder that opens.</div>
+      ${error}
     </div>
   `
 }
@@ -3271,17 +3449,32 @@ function renderMcpPresetCard(preset) {
 function renderMcpPanel() {
   const servers = state.mcpServers || []
   return `
-    <section class="admin-panel skills-panel">
-      <div class="panel-head"><div><h1>Extensions (MCP servers)</h1><p>Each extension is an MCP server that gives the agent extra tools. Pick a featured app or connect your own.</p></div><button class="primary-btn" data-action="openMcpModal">${icon("plus")}Add Custom App</button></div>
-
-      <div class="mcp-section-label">Featured</div>
-      <div class="mcp-preset-grid">
-        ${MCP_PRESETS.map(renderMcpPresetCard).join("")}
+    <section class="tabpanel" data-panel="extensions">
+      <div class="pnl-head">
+        <div>
+          <h1>Extensions</h1>
+          <p>Each extension is an MCP server that gives the agent extra tools. Pick a featured app or connect your own.</p>
+        </div>
+        <button class="btn-primary" data-action="openMcpModal">${icon("plus")}<span>Add custom app</span></button>
       </div>
 
-      <div class="mcp-section-label">Connected</div>
-      <div class="mcp-card-list">
-        ${servers.length ? servers.map(renderMcpServerCard).join("") : `<div class="config-note">No apps connected yet. Pick a featured app above or click "Add Custom App".</div>`}
+      <div class="grp">
+        <div class="grp-lbl">Featured</div>
+        <div class="ext-feat">
+          ${MCP_PRESETS.map(renderMcpPresetCard).join("")}
+        </div>
+      </div>
+
+      <div class="grp">
+        <div class="grp-lbl">Browser control</div>
+        ${renderBrowserCard()}
+      </div>
+
+      <div class="grp">
+        <div class="grp-lbl">Connected<span class="gc">${servers.length}</span></div>
+        ${servers.length
+          ? `<div class="card">${servers.map(renderMcpServerCard).join("")}</div>`
+          : `<div class="config-note">No apps connected yet. Pick a featured app above or click "Add custom app".</div>`}
       </div>
       ${state.mcpError && !state.mcpErrorTarget && !state.mcpModalOpen ? `<div class="config-note field-error">${escapeHtml(state.mcpError)}</div>` : ""}
     </section>
@@ -3893,6 +4086,8 @@ async function handleAction(event) {
       const url = event.currentTarget.dataset.docsUrl
       if (url) await window.openworking.mcp.openDocs(url)
     }
+    if (action === "installBrowserHost") await installBrowserHost()
+    if (action === "openBrowserExtension") await openBrowserExtension()
     if (action === "addMcpHeader") {
       state.mcpDraft.headers = [...(state.mcpDraft.headers || []), { key: "", value: "" }]
       render()
@@ -5151,8 +5346,12 @@ const DELEGATED_CLICK = [
   ["data-skills-tab", (e) => {
     state.skillsTab = e.currentTarget.dataset.skillsTab
     render()
-    if (state.skillsTab === "mcp") refreshMcpStatus()
+    if (state.skillsTab === "mcp") { refreshMcpStatus(); refreshBrowserStatus() }
     if (state.skillsTab === "memory") loadMemory()
+  }],
+  ["data-skills-filter", (e) => {
+    state.skillsFilter = e.currentTarget.dataset.skillsFilter
+    render()
   }],
   ["data-memory-save", (e) => saveMemory(e.currentTarget.dataset.memorySave)],
   ["data-mcp-type", (e) => {
@@ -5242,9 +5441,15 @@ const DELEGATED_INPUT = [
   }],
   ["data-field", (e) => updateConfigField(e.currentTarget.dataset.field, e.currentTarget.value)],
   ["data-model-modalities", (e) => updateModelModalities(e.currentTarget.dataset.modelId, e.currentTarget.dataset.modelModalities, e.currentTarget.value)],
+  ["data-skills-search", (e) => {
+    state.skillsQuery = e.currentTarget.value
+    filterSkillsDom()
+  }],
   ["data-memory-field", (e) => {
     if (!state.memoryDraft) return
     state.memoryDraft[e.currentTarget.dataset.memoryField] = e.currentTarget.value
+    // Light up the editor's "dirty" dot without re-rendering (keeps caret/focus).
+    e.currentTarget.closest(".editor")?.classList.add("dirty")
   }],
   ["data-mcp-header", (e) => {
     if (!state.mcpDraft) return

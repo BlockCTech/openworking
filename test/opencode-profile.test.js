@@ -5,7 +5,9 @@ const os = require("node:os")
 const path = require("node:path")
 const AdmZip = require("adm-zip")
 const {
+  BROWSER_MCP_NAME,
   BUILT_IN_SKILLS,
+  ensureBrowserMcpServer,
   ensureOpenworkingProfile,
   installCustomSkillArchive,
   listCustomSkills,
@@ -456,6 +458,71 @@ test("uninstall removes HITL tool gates but respects user overrides", () => {
   // The user-overridden key is preserved.
   assert.equal(config.permission.backlog_update_issue, "allow")
   assert.equal("gated-skill" in (config.permission.skill || {}), false)
+})
+
+test("bundled browser-use skill gates its mutating browser tools as HITL on bootstrap", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-browser-use-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  // Skill is part of the offline bundle.
+  assert.equal(BUILT_IN_SKILLS.some((skill) => skill.name === "browser-use"), true)
+  assert.equal(fs.existsSync(path.join(profile.skills.skillsDir, "browser-use", "SKILL.md")), true)
+
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(config.permission.skill["browser-use"], "allow")
+  // Mutating tools are gated; read/navigation tools are not.
+  assert.equal(config.permission.browser_click, "ask")
+  assert.equal(config.permission.browser_type, "ask")
+  assert.equal("browser_navigate" in config.permission, false)
+  assert.equal("browser_read" in config.permission, false)
+  assert.equal("browser_screenshot" in config.permission, false)
+})
+
+test("built-in HITL tool gates respect a user override across a rewrite", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-browser-use-override-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  // User deliberately allows a gated tool — that choice must survive ensureSkillPermissions reapplying.
+  const edited = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  edited.permission.browser_click = "allow"
+  writeProfileConfig(profile, edited)
+
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.equal(config.permission.browser_click, "allow")
+  // Other declared gates are still applied.
+  assert.equal(config.permission.browser_type, "ask")
+})
+
+test("ensureBrowserMcpServer declares a managed local MCP and is idempotent", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-browser-mcp-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+
+  const wrote = ensureBrowserMcpServer(profile, {
+    command: ["/A/Electron", "/A/browser-mcp/index.js"],
+    environment: { ELECTRON_RUN_AS_NODE: "1", OPENWORKING_BROWSER_HOST_DIR: "/A/host" }
+  })
+  assert.equal(wrote, true)
+
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  assert.deepEqual(config.mcp[BROWSER_MCP_NAME], {
+    type: "local",
+    command: ["/A/Electron", "/A/browser-mcp/index.js"],
+    enabled: true,
+    environment: { ELECTRON_RUN_AS_NODE: "1", OPENWORKING_BROWSER_HOST_DIR: "/A/host" }
+  })
+
+  // Re-declaring identical values must not rewrite the config.
+  const again = ensureBrowserMcpServer(profile, {
+    command: ["/A/Electron", "/A/browser-mcp/index.js"],
+    environment: { ELECTRON_RUN_AS_NODE: "1", OPENWORKING_BROWSER_HOST_DIR: "/A/host" }
+  })
+  assert.equal(again, false)
+})
+
+test("ensureBrowserMcpServer rejects an empty command", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-browser-mcp-bad-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  assert.throws(() => ensureBrowserMcpServer(profile, { command: [] }), /command/)
 })
 
 function readProfileConfigForTest(profile) {

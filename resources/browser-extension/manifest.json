@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "TechTusCoWork Browser Bridge",
+  "version": "1.0.0",
+  "description": "Lets the TechTusCoWork desktop app drive your active Chrome tab (navigate, read, click, type, screenshot) through a local native-messaging host. Actions that change a page are confirmed in the app before they run.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsrxNR7WHfcBCGwsLwT5ExUglC8w3HJNz+jWyg825NK99fVv+l6XKqo4mEkAq1Vta/wrfAjF9EabYVwDg+b8+baAYoIQF0va247vE0AuftVqW13UH4c0Ha1RdZOjrou85ZihUz/PKrsmgxW0I4EarndBdDQQCTd+bpUXC6TRsxqrNLdzg0UYrNzm08apArbYGij09SzdXOuODYC4TshCAoFDnI7MdVLBtJ8O6F7XrHMKGg7/cIeplSx43IVL6Yb7I0hB9EFPZ92STBnnMVxWalpqcEAPKfk6xhCpF0BVb2Kf1akCH+emzKjaf6bWFBlHaq5aZrtggwnjDV5LgTvNw7QIDAQAB",
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "TechTusCoWork Browser Bridge" },
+  "permissions": ["nativeMessaging", "activeTab", "scripting", "tabs", "alarms"],
+  "minimum_chrome_version": "116"
+}
