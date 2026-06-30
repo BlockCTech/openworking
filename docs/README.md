@@ -12,8 +12,9 @@ Tài liệu của `desktop-client/` được tổ chức theo **giai đoạn SDL
 | **Product / UX** | `00-product/` | [session-first-ux.md](00-product/session-first-ux.md) | Phase-1 session-first UX: required shell, workflow, diagnostics, production-data rule. |
 | | | [pin-chats-and-projects.md](00-product/pin-chats-and-projects.md) | ★ Ghim chat session & project lên đầu sidebar: store cục bộ (`PinRegistry` + cờ `pinned` trên project), IPC `pins:*` / `projects:setPinned`, UI nhóm "Pinned". |
 | **Architecture** | `01-architecture/` | [architecture-overview.md](01-architecture/architecture-overview.md) | ★ Bản đồ tổng thể: 3-process model, IPC surface, runtime lifecycle, security boundaries, module↔test map. **Đọc trước khi sửa code.** |
-| **Skills & Runtime** | `03-skills-runtime/` | [built-in-skills.md](03-skills-runtime/built-in-skills.md) | Bundle 14 skill offline, sync idempotent, slash commands, MCP/Extensions. |
+| **Skills & Runtime** | `03-skills-runtime/` | [built-in-skills.md](03-skills-runtime/built-in-skills.md) | Bundle 16 skill offline, sync idempotent, slash commands, MCP/Extensions. |
 | | | [attachments-office-context.md](03-skills-runtime/attachments-office-context.md) | ★ Attachment registry, trích ngữ cảnh XLSX/PPTX, artifact-path security boundary. |
+| | | [browser-use.md](03-skills-runtime/browser-use.md) | ★ As-built: điều khiển Chrome đã đăng nhập của user (mô hình Claude-for-Chrome) — extension + native-messaging host + browser MCP + app bridge (`browser:*` IPC, HITL-gated). |
 | **Release & Packaging** | `04-release-packaging/` | [local-run-verification.md](04-release-packaging/local-run-verification.md) | Verify MVP local: runtime contract + manual/automated checks. |
 | | | [version-check-update.md](04-release-packaging/version-check-update.md) | ★ Version check (soft/force) + download + auto-install DMG. |
 | | | [reduce-dmg-size.md](04-release-packaging/reduce-dmg-size.md) | Decision doc: phân tích & khuyến nghị giảm size `.dmg`. |
@@ -23,5 +24,6 @@ Tài liệu của `desktop-client/` được tổ chức theo **giai đoạn SDL
 
 ## Đọc theo thứ tự nào
 
-- **Kỹ sư mới / AI agent:** `01-architecture/architecture-overview.md` trước (có module↔test map) → rồi doc của miền đang chạm.
+- **Kỹ sư mới / AI agent:** [`01-architecture/architecture-overview.md`](01-architecture/architecture-overview.md)  trước (có module↔test map) → rồi doc của miền đang chạm.
+- **Làm về đăng nhập / LLM token:** [`02-auth/sso-login-and-llm-token.md`](02-auth/sso-login-and-llm-token.md) (hiện trạng đầy đủ cả login + token exchange).
 - **Làm về build/phát hành:** `04-release-packaging/` + mục "Releasing / Bumping Version" trong [`../README.md`](../README.md).

@@ -36,6 +36,11 @@ contextBridge.exposeInMainWorld("openworking", {
     clearAuth: (name) => ipcRenderer.invoke("mcp:clearAuth", name),
     openDocs: (url) => ipcRenderer.invoke("mcp:openDocs", url)
   },
+  browser: {
+    status: () => ipcRenderer.invoke("browser:status"),
+    installHost: () => ipcRenderer.invoke("browser:installHost"),
+    openExtensionPage: () => ipcRenderer.invoke("browser:openExtensionPage")
+  },
   memory: {
     get: () => ipcRenderer.invoke("memory:get"),
     save: (scope, content) => ipcRenderer.invoke("memory:save", { scope, content })

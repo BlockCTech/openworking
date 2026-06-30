@@ -3,7 +3,8 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { assertTranslationArtifact, assertProjectFile, listProjectDirectory, previewTranslationArtifact, readProjectFileContent } = require("./artifact-path")
 const { AttachmentRegistry } = require("./attachment-registry")
-const { ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, setActiveProjectMemory, writeEditableProfileConfig } = require("./opencode-profile")
+const { ensureBrowserMcpServer, ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, setActiveProjectMemory, writeEditableProfileConfig } = require("./opencode-profile")
+const browserBridge = require("./browser-bridge")
 const { SCOPES, ensureProjectMemory, readMemory, writeMemory } = require("./memory-store")
 const { ProjectRegistry } = require("./project-registry")
 const { PinRegistry } = require("./pin-registry")
@@ -20,6 +21,42 @@ function resolveAppBundlePath(exePath) {
     current = path.dirname(current)
   }
   return null
+}
+
+// Locate a bundled resource dir in both dev (repo resources/) and packaged (process.resourcesPath).
+function resolveBundledResource(...segments) {
+  const packaged = process.resourcesPath && path.join(process.resourcesPath, ...segments)
+  if (packaged && fs.existsSync(packaged)) return packaged
+  return path.join(__dirname, "..", "resources", ...segments)
+}
+
+// Shared dir where the browser native host and MCP rendezvous via token/port sidecars.
+// MUST live under userData, NOT in ~/Desktop, ~/Documents or ~/Downloads: macOS TCC blocks Chrome from
+// executing the native-host launcher inside those protected folders, so the host silently never starts
+// (connectNative still returns a port, so the extension popup misleadingly shows "connected"). userData
+// is also the local-first home for app-managed state. OPENWORKING_BROWSER_HOST_DIR overrides for dev.
+// NOTE: host.token is a loopback secret (written 0600).
+function browserHostDir() {
+  if (process.env.OPENWORKING_BROWSER_HOST_DIR) return process.env.OPENWORKING_BROWSER_HOST_DIR
+  return path.join(app.getPath("userData"), "browser-host")
+}
+
+// Declare the bundled browser MCP so opencode serve spawns it. Runs the MCP under the Electron binary in
+// node mode (always present in the .app; no system node required) and points it at the shared host dir.
+function ensureBrowserMcp() {
+  if (!opencodeProfile) return
+  try {
+    ensureBrowserMcpServer(opencodeProfile, {
+      command: [process.execPath, resolveBundledResource("browser-mcp", "index.js")],
+      environment: {
+        ELECTRON_RUN_AS_NODE: "1",
+        OPENWORKING_BROWSER_HOST_DIR: browserHostDir()
+      }
+    })
+  } catch (error) {
+    // Non-fatal: the browser feature stays unavailable, but the app must still boot.
+    console.error("browser MCP declaration failed:", error.message)
+  }
 }
 
 let mainWindow = null
@@ -264,6 +301,29 @@ function registerIpc() {
     await shell.openExternal(target)
     return true
   })
+
+  // Browser-use bridge: install the Chrome native-messaging host, report status, and open the
+  // chrome://extensions page so the user can load/enable the bundled extension. This is the single new
+  // guarded IPC group. The host manifest is pinned to our extension id; the loopback is 127.0.0.1 + token.
+  ipcMain.handle("browser:status", () => browserBridge.status({ hostDir: browserHostDir() }))
+  ipcMain.handle("browser:installHost", () => {
+    const result = browserBridge.installHost({
+      hostDir: browserHostDir(),
+      execPath: process.execPath,
+      hostScript: resolveBundledResource("browser-host", "host.js")
+    })
+    // Make sure the MCP entry exists too, so a fresh install is immediately usable.
+    ensureBrowserMcp()
+    return result
+  })
+  ipcMain.handle("browser:openExtensionPage", async () => {
+    // chrome://extensions cannot be opened cross-process; the renderer guides the user. We just reveal
+    // the bundled, load-unpacked extension folder so they can point Chrome at it.
+    const extensionDir = resolveBundledResource("browser-extension")
+    const error = await shell.openPath(extensionDir)
+    if (error) throw new Error(error)
+    return { extensionDir, extensionId: browserBridge.BROWSER_EXTENSION_ID }
+  })
   // Drive the OAuth flow ourselves: startMcpAuth returns the authorization URL (opencode also
   // stands up its loopback callback server), we open it in the browser, then authenticateMcp waits
   // for the callback to complete. Opening the URL from the main process is more reliable than
@@ -449,6 +509,7 @@ function registerIpc() {
   ipcMain.handle("runtime:get", () => runtimeManager.snapshot())
   ipcMain.handle("runtime:openProject", async (_event, { project }) => {
     opencodeProfile = ensureOpenworkingProfile({ userDataPath: app.getPath("userData") })
+    ensureBrowserMcp()
     runtimeManager.profile = opencodeProfile
     // Point cross-chat memory's `instructions` entry at this project before the runtime reads config.
     setActiveProjectMemory(opencodeProfile, project.id)
@@ -457,6 +518,7 @@ function registerIpc() {
   })
   ipcMain.handle("runtime:start", async (_event, { project }) => {
     opencodeProfile = ensureOpenworkingProfile({ userDataPath: app.getPath("userData") })
+    ensureBrowserMcp()
     runtimeManager.profile = opencodeProfile
     // Point cross-chat memory's `instructions` entry at this project before the runtime reads config.
     setActiveProjectMemory(opencodeProfile, project.id)

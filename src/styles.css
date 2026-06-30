@@ -1132,6 +1132,306 @@ input[readonly], label textarea[readonly] { color: var(--text-2); background: va
 .memory-editor::placeholder { color: var(--text-3); }
 .memory-editor:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .memory-editor:disabled { color: var(--text-3); background: var(--bg); cursor: not-allowed; }
+
+/* ============================================================
+   Skills screen — redesigned right panel (Claude Design:
+   "OpenWorking Skills.html"). All rules scoped to .skills-screen
+   so the generic class names (.card/.row/.tag/.seg/.empty/.editor)
+   cannot affect other screens.
+   ============================================================ */
+.skills-screen { flex: 1; overflow-y: auto; background: var(--bg); }
+.sk-wrap { max-width: 860px; margin: 0 auto; padding: 30px 40px 60px; }
+
+/* segmented tabs */
+.skills-screen .seg {
+  display: inline-flex; gap: 2px; padding: 3px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); margin-bottom: 30px;
+}
+.skills-screen .seg-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 14px; border-radius: 8px;
+  color: var(--text-3); font-size: 13px; font-weight: 550;
+  border: 1px solid transparent;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.skills-screen .seg-btn svg { width: 16px; height: 16px; color: var(--text-4); transition: color .12s; }
+.skills-screen .seg-btn:hover { color: var(--text-2); }
+.skills-screen .seg-btn:hover svg { color: var(--text-3); }
+.skills-screen .seg-btn.active {
+  background: var(--surface-2); color: var(--text);
+  border-color: var(--border-strong); box-shadow: var(--shadow-sm);
+}
+.skills-screen .seg-btn.active svg { color: var(--accent); }
+
+/* panel header */
+.skills-screen .pnl-head { display: flex; align-items: flex-start; gap: 20px; margin-bottom: 22px; }
+.skills-screen .pnl-head h1 { font-size: 22px; font-weight: 700; letter-spacing: -.025em; }
+.skills-screen .pnl-head p { font-size: 13px; color: var(--text-3); margin-top: 5px; max-width: 52ch; line-height: 1.5; }
+
+.skills-screen .btn-up {
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 9px;
+  height: 38px; padding: 0 16px; border-radius: var(--radius);
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border-strong); box-shadow: var(--shadow-sm);
+  font-size: 13px; font-weight: 600;
+  transition: background .12s, border-color .12s, transform .04s;
+}
+.skills-screen .btn-up svg { width: 16px; height: 16px; color: var(--text-2); }
+.skills-screen .btn-up:hover { background: var(--sidebar-hover); border-color: var(--text-4); }
+.skills-screen .btn-up:active { transform: translateY(1px); }
+
+.skills-screen .btn-primary {
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 8px;
+  height: 38px; padding: 0 16px; border-radius: var(--radius);
+  background: var(--accent); color: #fff;
+  font-size: 13px; font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14);
+  transition: background .12s, transform .04s;
+}
+.skills-screen .btn-primary svg { width: 16px; height: 16px; color: #fff; }
+.skills-screen .btn-primary:hover { background: var(--accent-hover); }
+.skills-screen .btn-primary:active { transform: translateY(1px); }
+
+/* toolbar: search + filters */
+.skills-screen .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+.skills-screen .searchbox {
+  flex: 1; display: flex; align-items: center; gap: 10px;
+  height: 38px; padding: 0 13px; border-radius: var(--radius);
+  background: var(--surface); border: 1px solid var(--border-strong);
+  transition: border-color .15s, box-shadow .15s;
+}
+.skills-screen .searchbox:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.skills-screen .searchbox svg { width: 16px; height: 16px; color: var(--text-3); flex-shrink: 0; }
+.skills-screen .searchbox input { flex: 1; border: none; outline: none; background: none; font-size: 13.5px; color: var(--text); }
+.skills-screen .searchbox input::placeholder { color: var(--text-3); }
+
+.skills-screen .filters { display: inline-flex; gap: 2px; padding: 3px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.skills-screen .filter {
+  height: 30px; padding: 0 13px; border-radius: 8px;
+  font-size: 12.5px; font-weight: 550; color: var(--text-3);
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: background .12s, color .12s;
+}
+.skills-screen .filter .fc { font-variant-numeric: tabular-nums; color: var(--text-4); font-size: 11.5px; }
+.skills-screen .filter:hover { color: var(--text-2); }
+.skills-screen .filter.active { background: var(--surface-2); color: var(--text); box-shadow: var(--shadow-sm); }
+.skills-screen .filter.active .fc { color: var(--text-3); }
+
+/* groups */
+.skills-screen .grp { margin-bottom: 26px; }
+.skills-screen .grp:last-child { margin-bottom: 0; }
+.skills-screen .grp-lbl {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 4px 9px; font-size: 11.5px; font-weight: 700;
+  letter-spacing: .07em; text-transform: uppercase; color: var(--text-3);
+}
+.skills-screen .grp-lbl .gc {
+  font-size: 11px; font-weight: 600; letter-spacing: .02em;
+  color: var(--text-4); background: var(--surface-2);
+  padding: 1px 7px; border-radius: 20px; text-transform: none;
+}
+
+/* card list */
+.skills-screen .card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); overflow: hidden;
+}
+.skills-screen .row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 14px;
+  padding: 13px 15px; width: 100%; text-align: left;
+  border-bottom: 1px solid var(--border);
+  transition: background .1s;
+}
+.skills-screen .row:last-child { border-bottom: none; }
+.skills-screen .row:hover { background: var(--surface-2); }
+
+.skills-screen .row-ic {
+  width: 38px; height: 38px; border-radius: 10px; flex-shrink: 0;
+  display: grid; place-items: center;
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  color: var(--text-2);
+}
+.skills-screen .row-ic svg { width: 19px; height: 19px; }
+.skills-screen .row:hover .row-ic { color: var(--text); }
+.skills-screen .row.custom .row-ic { background: var(--accent-soft); border-color: var(--accent-soft-2); color: var(--accent); }
+
+.skills-screen .row-main { flex: 1; min-width: 0; }
+.skills-screen .row-name {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 14px; font-weight: 600; color: var(--text); letter-spacing: -.01em;
+}
+.skills-screen .row-name .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skills-screen .row-desc {
+  font-size: 12.5px; color: var(--text-3); margin-top: 3px; line-height: 1.45;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.skills-screen .tag {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+  padding: 2px 8px; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text-3);
+}
+.skills-screen .tag.on {
+  background: var(--green-soft); border-color: transparent; color: #7fe0a6;
+  display: inline-flex; align-items: center; gap: 5px;
+}
+.skills-screen .tag.on .dt { width: 5px; height: 5px; border-radius: 50%; background: #7fe0a6; }
+
+.skills-screen .row-meta { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.skills-screen .row-act {
+  width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
+  display: grid; place-items: center; color: var(--text-4);
+  opacity: 0; transition: opacity .12s, background .12s, color .12s;
+}
+.skills-screen .row:hover .row-act { opacity: 1; }
+.skills-screen .row-act:hover { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
+
+/* empty state (search) */
+.skills-screen .empty { display: none; padding: 48px 20px; text-align: center; }
+.skills-screen .empty svg { width: 34px; height: 34px; color: var(--text-4); margin-bottom: 12px; }
+.skills-screen .empty .e1 { font-size: 14px; font-weight: 600; color: var(--text-2); }
+.skills-screen .empty .e2 { font-size: 13px; color: var(--text-4); margin-top: 4px; }
+
+/* Extensions tab */
+.skills-screen .ext-feat { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.skills-screen .feat-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 18px; display: flex; flex-direction: column;
+  transition: border-color .12s;
+}
+.skills-screen .feat-card:hover { border-color: var(--border-strong); }
+.skills-screen .feat-top { display: flex; align-items: center; gap: 12px; }
+.skills-screen .feat-logo {
+  width: 40px; height: 40px; border-radius: 11px; flex-shrink: 0;
+  display: grid; place-items: center; overflow: hidden;
+  background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text-2);
+}
+.skills-screen .feat-logo img { width: 22px; height: 22px; object-fit: contain; }
+.skills-screen .feat-logo svg { width: 20px; height: 20px; }
+.skills-screen .feat-name { flex: 1; font-size: 15px; font-weight: 700; letter-spacing: -.01em; }
+.skills-screen .feat-badge {
+  flex-shrink: 0; font-size: 10.5px; font-weight: 600;
+  padding: 2px 8px; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text-3);
+}
+.skills-screen .feat-desc { font-size: 12.5px; color: var(--text-3); line-height: 1.5; margin: 13px 0 16px; flex: 1; }
+.skills-screen .feat-btn {
+  align-self: flex-start; display: inline-flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 14px; border-radius: 8px;
+  font-size: 12.5px; font-weight: 600;
+  transition: background .12s, border-color .12s;
+}
+.skills-screen .feat-btn svg { width: 15px; height: 15px; }
+.skills-screen .feat-btn.added { background: transparent; border: 1px solid var(--border-strong); color: var(--text-3); cursor: default; }
+.skills-screen .feat-btn.added svg { color: var(--green); }
+.skills-screen .feat-btn.add { background: var(--accent-soft); border: 1px solid var(--accent-soft-2); color: var(--accent-text); }
+.skills-screen .feat-btn.add:hover { background: var(--accent-soft-2); }
+
+/* browser-use block card (multi-line guidance under the action buttons) */
+.skills-screen .browser-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 15px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.skills-screen .browser-top { display: flex; align-items: flex-start; gap: 14px; }
+.skills-screen .browser-top .row-ic { margin-top: 1px; }
+.skills-screen .browser-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.skills-screen .browser-card .config-note { font-size: 12px; line-height: 1.5; }
+.skills-screen .browser-card .config-note code { font-family: var(--mono); font-size: 11.5px; }
+
+/* connected server row */
+.skills-screen .srv-sub { display: flex; align-items: center; gap: 8px; margin-top: 4px; min-width: 0; }
+.skills-screen .xport {
+  flex-shrink: 0; font-size: 10px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+  color: var(--text-3); border: 1px solid var(--border-strong); background: transparent;
+  padding: 1px 6px; border-radius: 5px;
+}
+.skills-screen .srv-path {
+  flex: 1; min-width: 0; display: block;
+  font-family: var(--mono); font-size: 12px; color: var(--text-4);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.skills-screen .btn-ghost {
+  display: inline-flex; align-items: center; gap: 7px;
+  height: 32px; padding: 0 12px; border-radius: 8px;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  color: var(--text-2); font-size: 12.5px; font-weight: 550;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.skills-screen .btn-ghost svg { width: 15px; height: 15px; color: var(--text-3); }
+.skills-screen .btn-ghost:hover { background: var(--surface-2); color: var(--text); border-color: var(--text-4); }
+.skills-screen .btn-ghost:hover svg { color: var(--text-2); }
+
+.skills-screen .scope {
+  min-width: 64px; text-align: center;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+  padding: 4px 9px; border-radius: 6px;
+  background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--text-3);
+}
+
+.skills-screen .tgl {
+  width: 38px; height: 22px; border-radius: 20px; flex-shrink: 0;
+  background: var(--surface-2); border: 1px solid var(--border-strong);
+  position: relative; transition: background .15s, border-color .15s;
+}
+.skills-screen .tgl .knob {
+  position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+  border-radius: 50%; background: #fff; box-shadow: var(--shadow-sm);
+  transition: transform .16s cubic-bezier(.2,.8,.3,1.2);
+}
+.skills-screen .tgl.on { background: var(--accent); border-color: var(--accent); }
+.skills-screen .tgl.on .knob { transform: translateX(16px); }
+
+.skills-screen .icon-del {
+  width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+  display: grid; place-items: center; color: var(--text-4);
+  transition: background .12s, color .12s;
+}
+.skills-screen .icon-del svg { width: 17px; height: 17px; }
+.skills-screen .icon-del:hover { background: var(--red-soft); color: var(--red); }
+
+/* server-card auth/error extras carried over from the old design */
+.skills-screen .mcp-card-error { width: 100%; margin-top: 4px; color: var(--red); font-size: 12.5px; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 160px; overflow-y: auto; }
+
+/* Memory tab */
+.skills-screen .mem-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 22px; margin-bottom: 22px;
+}
+.skills-screen .mem-head { display: flex; align-items: flex-start; gap: 20px; margin-bottom: 16px; }
+.skills-screen .mem-head h2 { font-size: 17px; font-weight: 700; letter-spacing: -.02em; }
+.skills-screen .mem-head .mem-proj { font-weight: 500; color: var(--text-3); font-size: 13px; margin-left: 8px; }
+.skills-screen .mem-head p { font-size: 12.5px; color: var(--text-3); margin-top: 5px; line-height: 1.5; }
+.skills-screen .mem-save {
+  flex-shrink: 0; display: inline-flex; align-items: center; gap: 7px;
+  height: 34px; padding: 0 18px; border-radius: var(--radius);
+  background: var(--accent); color: #fff; font-size: 13px; font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.14);
+  transition: background .12s, transform .04s, opacity .12s;
+}
+.skills-screen .mem-save:hover { background: var(--accent-hover); }
+.skills-screen .mem-save:active { transform: translateY(1px); }
+.skills-screen .mem-save:disabled { background: var(--surface-2); color: var(--text-4); box-shadow: none; cursor: default; }
+
+.skills-screen .editor { border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; background: var(--bg); }
+.skills-screen .editor:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.skills-screen .editor-bar {
+  display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 13px;
+  border-bottom: 1px solid var(--border); background: var(--sidebar);
+}
+.skills-screen .editor-bar .ef { font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+.skills-screen .editor-bar .ed { width: 6px; height: 6px; border-radius: 50%; background: var(--text-4); margin-left: auto; transition: background .15s; }
+.skills-screen .editor.dirty .editor-bar .ed { background: var(--accent); }
+.skills-screen .editor textarea {
+  width: 100%; min-height: 150px; max-height: 360px; padding: 15px 16px;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.65; color: var(--text-2);
+  background: none; border: none; outline: none; resize: vertical; display: block;
+}
+.skills-screen .editor textarea::placeholder { color: var(--text-4); }
+.skills-screen .editor textarea:disabled { color: var(--text-4); cursor: not-allowed; }
+
+.skills-screen .hidden { display: none !important; }
 .empty-state { display: grid; flex: 1; place-content: center; justify-items: center; gap: 10px; text-align: center; }
 .empty-state h1 { font-size: 22px; }
 .empty-state p { color: var(--text-2); }

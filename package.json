@@ -67,7 +67,7 @@
     "marked": "18.0.3",
     "mermaid": "^11.15.0",
     "mime-types": "2.1.35",
-    "opencode-ai": "1.17.9"
+    "opencode-ai": "1.17.11"
   },
   "build": {
     "appId": "ai.openworking.desktop",
@@ -127,6 +127,18 @@
       {
         "from": "resources/opencode",
         "to": "opencode"
+      },
+      {
+        "from": "resources/browser-host",
+        "to": "browser-host"
+      },
+      {
+        "from": "resources/browser-mcp",
+        "to": "browser-mcp"
+      },
+      {
+        "from": "resources/browser-extension",
+        "to": "browser-extension"
       }
     ],
     "dmg": {

@@ -23,7 +23,8 @@ const BUILT_IN_SKILLS = [
   { name: "translate-document", description: "Translate PDF, DOCX and Markdown files into new structure-preserving document artifacts." },
   { name: "translate-office-document", description: "Translate PPTX and XLSX files; for XLSX, create a new translated workbook or add a translated sheet beside each original in place." },
   { name: "webapp-testing", description: "Test local web applications with the project's existing tools or Playwright." },
-  { name: "cross-chat-memory", description: "Remember durable facts, preferences and decisions so they carry across separate chats." }
+  { name: "cross-chat-memory", description: "Remember durable facts, preferences and decisions so they carry across separate chats." },
+  { name: "browser-use", description: "Drive the user's logged-in Chrome (navigate, read, click, type, screenshot) through the browser_* tools." }
 ]
 const BUILT_IN_TOOLS = ["translate_document.js", "remember.js"]
 const RESERVED_PERMISSION_KEYS = new Set(["__proto__", "prototype", ...Object.getOwnPropertyNames(Object.prototype)])
@@ -391,6 +392,10 @@ function listMcpServers(profile) {
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
+// Trim+stringify a flat string→string map. Despite the name, this MUST NOT lowercase keys: it is
+// reused for process environment maps (local MCP env at buildMcpServer, browser MCP env at
+// ensureBrowserMcpServer), where keys are case-sensitive — lowercasing would turn ELECTRON_RUN_AS_NODE
+// / OPENWORKING_BROWSER_HOST_DIR into names Electron/Node never read, silently breaking the feature.
 function normalizeHeaders(headers) {
   if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {}
   const result = {}
@@ -544,11 +549,29 @@ function syncBuiltInTools(profileDir, sourceDir = bundledOpencodeDir()) {
   return { sourceDir, toolsDir, runtimeDir, manifestPath, tools: BUILT_IN_TOOLS }
 }
 
+// Read the HITL tool gates a built-in skill declares via its `askToolPermissions` frontmatter line,
+// reading from the bundled source of truth so this holds even mid-sync. Guarded: a missing or
+// malformed SKILL.md must never break profile bootstrap, so failures yield an empty list.
+function builtInSkillAskTools(skillName, sourceDir = bundledSkillsDir()) {
+  try {
+    const skillPath = path.join(sourceDir, skillName, "SKILL.md")
+    return parseAskToolPermissions(parseSkillFrontmatter(fs.readFileSync(skillPath, "utf8")))
+  } catch {
+    return []
+  }
+}
+
 function ensureSkillPermissions(config) {
   config.permission ||= {}
   config.permission.skill ||= {}
   for (const skill of BUILT_IN_SKILLS) {
     if (!config.permission.skill[skill.name]) config.permission.skill[skill.name] = "allow"
+    // Human-in-the-loop: gate the mutating tools the skill declares so the runtime prompts the user
+    // (Allow / Reject) before running them — mirroring installCustomSkillArchive for bundled skills.
+    // Only set keys the user has not already configured, so a deliberate "allow"/"deny" survives.
+    for (const tool of builtInSkillAskTools(skill.name)) {
+      if (!Object.hasOwn(config.permission, tool)) config.permission[tool] = "ask"
+    }
   }
   return config
 }
@@ -615,9 +638,37 @@ function writeEditableProfileConfig(profile, edits) {
   return writeProfileConfig(profile, config)
 }
 
+// Name of the managed, app-owned browser MCP entry in opencode.json. The app fully owns this entry
+// (command + environment are recomputed each launch), unlike user-added MCP servers.
+const BROWSER_MCP_NAME = "browser"
+
+// Declare (or refresh) the bundled browser MCP so `opencode serve` spawns it as a local stdio child.
+// main.js supplies the resolved command (Electron-as-node + the bundled index.js) and the environment
+// (the shared host dir). Idempotent: only writes when the managed entry actually changed. Pass
+// enabled:false to keep the entry but disable it. Returns true when the config was written.
+function ensureBrowserMcpServer(profile, { command, environment = {}, enabled = true } = {}) {
+  if (!Array.isArray(command) || !command.length) throw new Error("browser MCP requires a command array")
+  const config = readProfileConfig(profile).config
+  config.mcp ||= {}
+  const next = {
+    type: "local",
+    command: command.map((part) => String(part)),
+    enabled: enabled !== false
+  }
+  const env = normalizeHeaders(environment)
+  if (Object.keys(env).length) next.environment = env
+  const current = config.mcp[BROWSER_MCP_NAME]
+  if (current && JSON.stringify(current) === JSON.stringify(next)) return false
+  config.mcp[BROWSER_MCP_NAME] = next
+  writeProfileConfig(profile, config)
+  return true
+}
+
 module.exports = {
+  BROWSER_MCP_NAME,
   BUILT_IN_SKILLS,
   BUILT_IN_TOOLS,
+  ensureBrowserMcpServer,
   bundledOpencodeDir,
   bundledSkillsDir,
   defaultProfileDir,
