@@ -8,6 +8,7 @@ const { fileURLToPath } = require("node:url")
 const { defaultConfigPath, readOpencodeConfig } = require("../opencode-config")
 const { runtimeXdgConfigHome } = require("../opencode-profile")
 const { officeAttachmentContext } = require("../office-attachment-context")
+const { ZIP_MIME, zipAttachmentContext } = require("../zip-attachment-context")
 
 // Document formats the model/gateway should translate through the bundled
 // translate_document tool by local path instead of ingesting as a raw `file` part.
@@ -77,7 +78,48 @@ function buildPromptParts({ prompt, attachments = [] }) {
   return [...fileParts, { type: "text", text }]
 }
 
+function synthesizeAttachment(attachment) {
+  const localPath = attachmentLocalPath(attachment)
+  const extension = path.extname(localPath || attachment.filename || "").toLowerCase()
+  const isZip = attachment.mime === ZIP_MIME || extension === ".zip"
+  if (!isZip) return attachment
+  const generated = zipAttachmentContext({
+    filePath: localPath,
+    filename: attachment.filename,
+    mime: attachment.mime
+  })
+  return {
+    ...attachment,
+    localPath: generated.filePath,
+    filename: generated.filename,
+    mime: generated.mime,
+    cleanupPaths: generated.cleanupPaths,
+    metadata: generated.metadata
+  }
+}
+
+function preparePromptAttachments(attachments = [], cleanupPaths = []) {
+  const preparedAttachments = []
+  for (const attachment of attachments) {
+    const prepared = synthesizeAttachment(attachment)
+    preparedAttachments.push(prepared)
+    for (const cleanupPath of prepared.cleanupPaths || []) {
+      if (cleanupPath && !cleanupPaths.includes(cleanupPath)) cleanupPaths.push(cleanupPath)
+    }
+  }
+  return preparedAttachments
+}
+
+function cleanupGeneratedAttachments(cleanupPaths = []) {
+  for (const cleanupPath of [...new Set(cleanupPaths)].sort((left, right) => right.length - left.length)) {
+    try {
+      fs.rmSync(cleanupPath, { recursive: true, force: true })
+    } catch {}
+  }
+}
+
 function attachmentLocalPath(attachment) {
+  if (typeof attachment.localPath === "string" && attachment.localPath) return attachment.localPath
   if (typeof attachment.url === "string" && attachment.url.startsWith("file:")) {
     return fileURLToPath(attachment.url)
   }
@@ -623,6 +665,7 @@ class RuntimeProcessManager {
     // throwing "Runtime is not running" during a restart. See waitUntilReady().
     this.lifecycle = null
     this.sessionStatuses = {}
+    this.sessionGeneratedAttachmentPaths = {}
     this.state = {
       status: "idle",
       activity: "idle",
@@ -843,6 +886,7 @@ class RuntimeProcessManager {
     })
     this.child.on("error", (error) => {
       this.failLaunch(error)
+      this.cleanupAllSessionGeneratedAttachments()
       this.child = null
       if (this.resolveExit) this.resolveExit()
       this.resolveExit = null
@@ -852,6 +896,7 @@ class RuntimeProcessManager {
       const wasStopping = this.state.status === "stopping"
       this.child = null
       this.stopEventStream()
+      this.cleanupAllSessionGeneratedAttachments()
       this.state.status = wasStopping ? "stopped" : code === 0 ? "stopped" : "error"
       this.state.activity = "idle"
       this.state.lastError = code === 0 || wasStopping
@@ -876,6 +921,7 @@ class RuntimeProcessManager {
   async stop() {
     this.stopEventStream()
     if (!this.child) {
+      this.cleanupAllSessionGeneratedAttachments()
       this.state.status = "stopped"
       this.state.activity = "idle"
       this.publish()
@@ -893,6 +939,7 @@ class RuntimeProcessManager {
     forceKill.unref()
     if (exitPromise) await exitPromise
     clearTimeout(forceKill)
+    this.cleanupAllSessionGeneratedAttachments()
     return this.snapshot()
   }
 
@@ -1115,11 +1162,7 @@ class RuntimeProcessManager {
     this.assertReady()
     if (!sessionId) throw new Error("Select or create a session before sending a prompt.")
     if (!String(prompt || "").trim()) throw new Error("Prompt is required.")
-    const body = {
-      parts: buildPromptParts({ prompt, attachments }),
-      ...(agent ? { agent } : {}),
-      ...(model?.providerID && model?.modelID ? { model } : {})
-    }
+    const cleanupPaths = []
     this.state.activeSessionId = sessionId
     this.state.activity = "running"
     this.sessionStatuses[sessionId] = { type: "busy" }
@@ -1127,7 +1170,14 @@ class RuntimeProcessManager {
     this.timeline("session.prompt.sent", { sessionId, agent, model, attachmentCount: attachments.length })
     const startTime = Date.now()
     this.log("info", `[Prompt] Sending prompt to runtime session ${sessionId} (${agent || "default agent"})...`)
+    let accepted = false
     try {
+      const preparedAttachments = preparePromptAttachments(attachments, cleanupPaths)
+      const body = {
+        parts: buildPromptParts({ prompt, attachments: preparedAttachments }),
+        ...(agent ? { agent } : {}),
+        ...(model?.providerID && model?.modelID ? { model } : {})
+      }
       const result = await requestJson({
         url: `${this.state.runtime.serverUrl}/session/${encodeURIComponent(sessionId)}/prompt_async`,
         method: "POST",
@@ -1135,6 +1185,8 @@ class RuntimeProcessManager {
         body
       })
       const duration = ((Date.now() - startTime) / 1000).toFixed(2)
+      this.rememberSessionGeneratedAttachments(sessionId, cleanupPaths)
+      accepted = true
       this.log("info", `[Prompt] Prompt accepted by session in ${duration}s.`)
       return result
     } catch (error) {
@@ -1145,6 +1197,8 @@ class RuntimeProcessManager {
       this.log("error", `[Prompt] Prompt failed after ${duration}s: ${error.message}`)
       this.timeline("session.prompt.error", { sessionId, error: error.message })
       throw error
+    } finally {
+      if (!accepted) cleanupGeneratedAttachments(cleanupPaths)
     }
   }
 
@@ -1199,6 +1253,7 @@ class RuntimeProcessManager {
       })
       this.sessionStatuses[sessionId] = { type: "idle" }
       if (sessionId === this.state.activeSessionId) this.state.activity = "idle"
+      this.releaseSessionGeneratedAttachments(sessionId)
       this.emitStream({ type: "session.aborted", sessionID: sessionId })
       this.timeline("session.abort.completed", { sessionId })
       this.publish()
@@ -1221,6 +1276,7 @@ class RuntimeProcessManager {
         auth: this.auth()
       })
       delete this.sessionStatuses[sessionId]
+      this.releaseSessionGeneratedAttachments(sessionId)
       if (sessionId === this.state.activeSessionId) {
         this.state.activeSessionId = null
         this.state.activity = "idle"
@@ -1457,6 +1513,7 @@ class RuntimeProcessManager {
     let publish = false
     if (event.type === "session.status" && properties.sessionID) {
       this.sessionStatuses[properties.sessionID] = properties.status || { type: "idle" }
+      if (properties.status?.type === "idle") this.releaseSessionGeneratedAttachments(properties.sessionID)
       if (properties.sessionID === this.state.activeSessionId) {
         this.state.activity = properties.status?.type === "idle" ? "idle" : "running"
         publish = true
@@ -1464,12 +1521,15 @@ class RuntimeProcessManager {
     }
     if (event.type === "session.idle" && properties.sessionID) {
       this.sessionStatuses[properties.sessionID] = { type: "idle" }
+      this.releaseSessionGeneratedAttachments(properties.sessionID)
       if (properties.sessionID === this.state.activeSessionId) {
         this.state.activity = "idle"
         publish = true
       }
     }
     if (event.type === "session.error") {
+      if (properties.sessionID) this.releaseSessionGeneratedAttachments(properties.sessionID)
+      else this.cleanupAllSessionGeneratedAttachments()
       if (properties.sessionID) this.sessionStatuses[properties.sessionID] = { type: "idle" }
       if (!properties.sessionID || properties.sessionID === this.state.activeSessionId) {
         this.state.activity = "idle"
@@ -1502,6 +1562,28 @@ class RuntimeProcessManager {
     this.log("error", error.message)
     this.timeline("runtime.error", { error: error.message })
     this.publish()
+  }
+
+  rememberSessionGeneratedAttachments(sessionId, cleanupPaths = []) {
+    if (!sessionId || !cleanupPaths.length) return
+    const known = this.sessionGeneratedAttachmentPaths[sessionId] || []
+    for (const cleanupPath of cleanupPaths) {
+      if (cleanupPath && !known.includes(cleanupPath)) known.push(cleanupPath)
+    }
+    this.sessionGeneratedAttachmentPaths[sessionId] = known
+  }
+
+  releaseSessionGeneratedAttachments(sessionId) {
+    if (!sessionId) return
+    const cleanupPaths = this.sessionGeneratedAttachmentPaths[sessionId]
+    delete this.sessionGeneratedAttachmentPaths[sessionId]
+    cleanupGeneratedAttachments(cleanupPaths)
+  }
+
+  cleanupAllSessionGeneratedAttachments() {
+    for (const sessionId of Object.keys(this.sessionGeneratedAttachmentPaths)) {
+      this.releaseSessionGeneratedAttachments(sessionId)
+    }
   }
 }
 

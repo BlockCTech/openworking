@@ -1,5 +1,6 @@
 const test = require("node:test")
 const assert = require("node:assert/strict")
+const { EventEmitter } = require("node:events")
 const fs = require("node:fs")
 const http = require("node:http")
 const os = require("node:os")
@@ -402,6 +403,255 @@ test("prompt parts route a markdown attachment as a local path instead of a mode
   assert.match(parts[0].text, /Dịch file này sang tiếng Việt/)
   assert.match(parts[0].text, /DOCX, Markdown, PDF, PPTX, or XLSX/)
   assert.match(parts[0].text, /- \/tmp\/template\.md/)
+})
+
+test("sendPrompt routes a zip attachment through extracted markdown without leaking cleanup metadata", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-prompt-zip-"))
+  const input = path.join(temp, "archive.zip")
+  const zip = new AdmZip()
+  zip.addFile("notes.txt", Buffer.from("zip attachment body"))
+  zip.writeZip(input)
+  const manager = new RuntimeProcessManager({ userDataPath: temp, profile: { profileDir: temp, configPath: path.join(temp, "opencode.json") }, emit() {} })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.runtime = {
+    serverUrl: "http://runtime.test",
+    auth: { username: "user", password: "pass" }
+  }
+  let capturedBody = null
+  const originalRequest = http.request
+  http.request = (options, callback) => {
+    const req = new EventEmitter()
+    let raw = ""
+    req.write = (chunk) => {
+      raw += chunk
+    }
+    req.end = () => {
+      capturedBody = JSON.parse(raw)
+      const res = new EventEmitter()
+      res.statusCode = 200
+      res.setEncoding = () => {}
+      callback(res)
+      process.nextTick(() => {
+        res.emit("data", JSON.stringify({ ok: true }))
+        res.emit("end")
+      })
+    }
+    return req
+  }
+
+  try {
+    await manager.sendPrompt({
+      sessionId: "sess_zip",
+      prompt: "Read this archive",
+      attachments: [{
+        url: pathToFileURL(input).href,
+        filename: "archive.zip",
+        mime: "application/zip"
+      }]
+    })
+  } finally {
+    http.request = originalRequest
+  }
+
+  assert.equal(capturedBody.parts.some((part) => part.type === "file" && part.filename === "archive.zip"), false)
+  assert.equal(capturedBody.parts.length, 1)
+  assert.deepEqual(Object.keys(capturedBody.parts[0]).sort(), ["text", "type"])
+  assert.match(capturedBody.parts[0].text, /Read this archive/)
+  assert.match(capturedBody.parts[0].text, /Attached document files are provided as local paths/)
+  const generatedFilePath = capturedBody.parts[0].text.match(/^- (.+archive\.extracted\.md)$/m)?.[1]
+  assert.ok(generatedFilePath)
+  assert.equal(fs.existsSync(generatedFilePath), true)
+  assert.deepEqual(manager.sessionGeneratedAttachmentPaths.sess_zip, [generatedFilePath, path.dirname(generatedFilePath)])
+  assert.equal("cleanupPaths" in capturedBody.parts[0], false)
+  assert.equal("metadata" in capturedBody.parts[0], false)
+  manager.handleRuntimeEvent({ type: "session.idle", properties: { sessionID: "sess_zip" } })
+  assert.equal(fs.existsSync(generatedFilePath), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(manager.sessionGeneratedAttachmentPaths, "sess_zip"), false)
+})
+
+test("session.error without a session id cleans up session-owned zip prompt files", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-prompt-zip-error-no-session-"))
+  const input = path.join(temp, "archive.zip")
+  const zip = new AdmZip()
+  zip.addFile("notes.txt", Buffer.from("zip attachment body"))
+  zip.writeZip(input)
+  const manager = new RuntimeProcessManager({ userDataPath: temp, profile: { profileDir: temp, configPath: path.join(temp, "opencode.json") }, emit() {} })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.activeSessionId = "sess_zip"
+  manager.state.runtime = {
+    serverUrl: "http://runtime.test",
+    auth: { username: "user", password: "pass" }
+  }
+  const originalRequest = http.request
+  let generatedFilePath = null
+  http.request = (options, callback) => {
+    const req = new EventEmitter()
+    let raw = ""
+    req.write = (chunk) => {
+      raw += chunk
+    }
+    req.end = () => {
+      const body = JSON.parse(raw)
+      generatedFilePath = body.parts[0].text.match(/^- (.+archive\.extracted\.md)$/m)?.[1]
+      const res = new EventEmitter()
+      res.statusCode = 200
+      res.setEncoding = () => {}
+      callback(res)
+      process.nextTick(() => {
+        res.emit("data", JSON.stringify({ ok: true }))
+        res.emit("end")
+      })
+    }
+    return req
+  }
+
+  try {
+    await manager.sendPrompt({
+      sessionId: "sess_zip",
+      prompt: "Read this archive",
+      attachments: [{ url: pathToFileURL(input).href, filename: "archive.zip", mime: "application/zip" }]
+    })
+  } finally {
+    http.request = originalRequest
+  }
+
+  assert.ok(generatedFilePath)
+  assert.equal(fs.existsSync(generatedFilePath), true)
+  manager.handleRuntimeEvent({ type: "session.error", properties: { error: { data: { message: "Provider failed" } } } })
+  assert.equal(fs.existsSync(generatedFilePath), false)
+  assert.deepEqual(manager.sessionGeneratedAttachmentPaths, {})
+})
+
+test("sendPrompt cleans up already-generated zip temp paths when a later zip synthesis throws", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-prompt-zip-partial-"))
+  const input = path.join(temp, "archive.zip")
+  const zip = new AdmZip()
+  zip.addFile("notes.txt", Buffer.from("zip attachment body"))
+  zip.writeZip(input)
+  const missing = path.join(temp, "missing.zip")
+  const manager = new RuntimeProcessManager({ userDataPath: temp, profile: { profileDir: temp, configPath: path.join(temp, "opencode.json") }, emit() {} })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.runtime = {
+    serverUrl: "http://runtime.test",
+    auth: { username: "user", password: "pass" }
+  }
+  const removedPaths = []
+  const originalRmSync = fs.rmSync
+  fs.rmSync = (target, options) => {
+    removedPaths.push(target)
+    return originalRmSync(target, options)
+  }
+
+  try {
+    await assert.rejects(
+      manager.sendPrompt({
+        sessionId: "sess_zip",
+        prompt: "Read these archives",
+        attachments: [
+          { url: pathToFileURL(input).href, filename: "archive.zip", mime: "application/zip" },
+          { url: pathToFileURL(missing).href, filename: "missing.zip", mime: "application/zip" }
+        ]
+      }),
+      /ENOENT|no such file|Invalid filename/i
+    )
+  } finally {
+    fs.rmSync = originalRmSync
+  }
+
+  assert.equal(removedPaths.some((target) => String(target).includes("openworking-zip-")), true)
+})
+
+test("sendPrompt swallows zip cleanup errors after a successful send", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-prompt-zip-cleanup-success-"))
+  const input = path.join(temp, "archive.zip")
+  const zip = new AdmZip()
+  zip.addFile("notes.txt", Buffer.from("zip attachment body"))
+  zip.writeZip(input)
+  const manager = new RuntimeProcessManager({ userDataPath: temp, profile: { profileDir: temp, configPath: path.join(temp, "opencode.json") }, emit() {} })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.runtime = {
+    serverUrl: "http://runtime.test",
+    auth: { username: "user", password: "pass" }
+  }
+  const originalRequest = http.request
+  const originalRmSync = fs.rmSync
+  http.request = (options, callback) => {
+    const req = new EventEmitter()
+    req.write = () => {}
+    req.end = () => {
+      const res = new EventEmitter()
+      res.statusCode = 200
+      res.setEncoding = () => {}
+      callback(res)
+      process.nextTick(() => {
+        res.emit("data", JSON.stringify({ ok: true }))
+        res.emit("end")
+      })
+    }
+    return req
+  }
+  fs.rmSync = () => {
+    throw new Error("cleanup boom")
+  }
+
+  try {
+    await assert.doesNotReject(() => manager.sendPrompt({
+      sessionId: "sess_zip",
+      prompt: "Read this archive",
+      attachments: [{ url: pathToFileURL(input).href, filename: "archive.zip", mime: "application/zip" }]
+    }))
+  } finally {
+    http.request = originalRequest
+    fs.rmSync = originalRmSync
+  }
+})
+
+test("sendPrompt preserves the original runtime error when zip cleanup also fails", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-prompt-zip-cleanup-error-"))
+  const input = path.join(temp, "archive.zip")
+  const zip = new AdmZip()
+  zip.addFile("notes.txt", Buffer.from("zip attachment body"))
+  zip.writeZip(input)
+  const manager = new RuntimeProcessManager({ userDataPath: temp, profile: { profileDir: temp, configPath: path.join(temp, "opencode.json") }, emit() {} })
+  manager.child = {}
+  manager.state.status = "running"
+  manager.state.runtime = {
+    serverUrl: "http://runtime.test",
+    auth: { username: "user", password: "pass" }
+  }
+  const originalRequest = http.request
+  const originalRmSync = fs.rmSync
+  http.request = () => {
+    const req = new EventEmitter()
+    req.write = () => {}
+    req.end = () => {
+      process.nextTick(() => {
+        req.emit("error", new Error("runtime failed"))
+      })
+    }
+    return req
+  }
+  fs.rmSync = () => {
+    throw new Error("cleanup boom")
+  }
+
+  try {
+    await assert.rejects(
+      manager.sendPrompt({
+        sessionId: "sess_zip",
+        prompt: "Read this archive",
+        attachments: [{ url: pathToFileURL(input).href, filename: "archive.zip", mime: "application/zip" }]
+      }),
+      /runtime failed/
+    )
+  } finally {
+    http.request = originalRequest
+    fs.rmSync = originalRmSync
+  }
 })
 
 test("prompt parts downgrade application/octet-stream attachments to local path text", () => {

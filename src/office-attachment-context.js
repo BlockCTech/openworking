@@ -1,6 +1,7 @@
 const path = require("node:path")
 const AdmZip = require("adm-zip")
 
+const DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 const PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
@@ -232,6 +233,37 @@ function renderSlide(zip, slidePath) {
   return limitBlock(lines.join("\n"))
 }
 
+function renderDocxPart(zip, partPath) {
+  const texts = textNodes(entryText(zip, partPath), "t")
+  const lines = [
+    `### Part: ${partPath}`,
+    ...(texts.length ? texts.map((text) => `- ${text}`) : ["- [No text found]"])
+  ]
+  return limitBlock(lines.join("\n"))
+}
+
+function extractDocxContext(filePath, filename) {
+  const zip = new AdmZip(filePath)
+  const parts = entryNames(zip)
+    .filter((name) => /^word\/(?:document|header\d+|footer\d+|footnotes|endnotes|comments)\.xml$/.test(name))
+    .sort()
+  const state = { chars: 0, truncated: false }
+  const lines = [
+    `## DOCX attachment: ${filename || path.basename(filePath)}`,
+    `Path: ${filePath}`,
+    `Parts: ${parts.length}${parts.length > MAX_ITEMS ? ` (showing first ${MAX_ITEMS})` : ""}`
+  ]
+  state.chars = lines.join("\n").length
+  for (const part of parts.slice(0, MAX_ITEMS)) {
+    const rendered = renderDocxPart(zip, part)
+    if (rendered.truncated) state.truncated = true
+    if (!appendBounded(lines, rendered.text, state, MAX_FILE_CHARS)) break
+  }
+  if (parts.length > MAX_ITEMS) lines.push(`[Truncated: only first ${MAX_ITEMS} parts are included.]`)
+  if (state.truncated) lines.push("[Some document content was truncated before sending to the model.]")
+  return lines.join("\n\n")
+}
+
 function extractPptxContext(filePath, filename) {
   const zip = new AdmZip(filePath)
   const slides = entryNames(zip).filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name)).sort((a, b) => slideNumber(a) - slideNumber(b))
@@ -254,6 +286,7 @@ function extractPptxContext(filePath, filename) {
 
 function officeAttachmentContext({ filePath, filename, mime }) {
   try {
+    if (mime === DOCX_MIME || path.extname(filePath).toLowerCase() === ".docx") return extractDocxContext(filePath, filename)
     if (mime === XLSX_MIME || path.extname(filePath).toLowerCase() === ".xlsx") return extractXlsxContext(filePath, filename)
     if (mime === PPTX_MIME || path.extname(filePath).toLowerCase() === ".pptx") return extractPptxContext(filePath, filename)
   } catch (error) {
