@@ -1190,6 +1190,11 @@ test("assistant message actions render copy and fork on the left while user acti
     role: "assistant",
     parts: [{ type: "text", text: "Done" }]
   })
+  const assistantToolOnlyHtml = renderMessageActions({
+    id: "msg_ai_tool",
+    role: "assistant",
+    parts: [{ type: "tool", tool: "write", state: { status: "completed" } }]
+  })
   const userHtml = renderMessageActions({
     id: "msg_user",
     role: "user",
@@ -1200,6 +1205,7 @@ test("assistant message actions render copy and fork on the left while user acti
   assert.match(assistantHtml, /data-copy-message="msg_ai"/)
   assert.match(assistantHtml, /data-fork-message="msg_ai"/)
   assert.ok(assistantHtml.indexOf("data-copy-message") < assistantHtml.indexOf("data-fork-message"))
+  assert.equal(assistantToolOnlyHtml, "")
   assert.doesNotMatch(userHtml, /message-actions-left/)
   assert.match(userHtml, /data-copy-message="msg_user"/)
   assert.doesNotMatch(userHtml, /data-fork-message/)

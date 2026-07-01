@@ -2355,8 +2355,8 @@ async function openFileTreeFile(filePath) {
 function renderMessageActions(message) {
   const copyText = messageCopyText(message)
   if (message.role === "assistant") {
-    const copyButton = copyText ? `<button class="message-action" data-copy-message="${escapeHtml(message.id)}" title="Copy message" aria-label="Copy message">${icon("copy")}</button>` : ""
-    return `<div class="message-actions message-actions-left">${copyButton}<button class="message-action" data-fork-message="${escapeHtml(message.id)}" title="Fork chat" aria-label="Fork chat">${icon("fork")}</button></div>`
+    if (!copyText) return ""
+    return `<div class="message-actions message-actions-left"><button class="message-action" data-copy-message="${escapeHtml(message.id)}" title="Copy message" aria-label="Copy message">${icon("copy")}</button><button class="message-action" data-fork-message="${escapeHtml(message.id)}" title="Fork chat" aria-label="Fork chat">${icon("fork")}</button></div>`
   }
   if (!copyText) return ""
   return `<div class="message-actions"><button class="message-action" data-copy-message="${escapeHtml(message.id)}" title="Copy message" aria-label="Copy message">${icon("copy")}</button></div>`
