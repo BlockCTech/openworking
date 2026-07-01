@@ -286,7 +286,27 @@
     return rendered
   }
 
+  function selectedSkillPromptText(message, projectFiles = []) {
+    const selectedSkill = message?.selectedSkill
+    if (message?.role !== "user" || !selectedSkill?.raw) return null
+    const fileRefs = userMessageFileRefs(message, projectFiles)
+    const args = renderUserText(selectedSkill.args, fileRefs).trim()
+    return [selectedSkill.raw, args].filter(Boolean).join(" ").trim()
+  }
+
+  function selectedCommandPromptText(message, projectFiles = []) {
+    const selectedCommand = message?.selectedCommand
+    if (message?.role !== "user" || !selectedCommand?.raw) return null
+    const fileRefs = userMessageFileRefs(message, projectFiles)
+    const args = renderUserText(selectedCommand.args, fileRefs).trim()
+    return [selectedCommand.raw, args].filter(Boolean).join(" ").trim()
+  }
+
   function messageText(message, projectFiles = []) {
+    const selectedSkillText = selectedSkillPromptText(message, projectFiles)
+    if (selectedSkillText !== null) return selectedSkillText
+    const selectedCommandText = selectedCommandPromptText(message, projectFiles)
+    if (selectedCommandText !== null) return selectedCommandText
     const fileRefs = userMessageFileRefs(message, projectFiles)
     return message.parts
       .filter((part) => part.type === "text")
@@ -416,17 +436,89 @@
   function findMatchingOptimisticMessage(messages, message) {
     if (message?.role !== "user") return null
     const signature = messageSignature(message)
-    return messages.find((item) => item.optimistic && item.role === "user" && messageSignature(item) === signature) || null
+    return messages.find((item) => (
+      item.optimistic &&
+      item.role === "user" &&
+      (
+        messageSignature(item) === signature ||
+        optimisticSelectedSkillMatchesMessage(item, message) ||
+        optimisticSelectedCommandMatchesMessage(item, message)
+      )
+    )) || null
   }
 
-  function mergeOptimisticFileRefs(message, optimistic) {
+  function normalizedTextLines(text) {
+    return String(text || "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+  }
+
+  function realExpandedSelectedSkillMarkers(selectedSkill) {
+    if (!selectedSkill?.label) return null
+    const args = String(selectedSkill?.args || "").trim()
+    const markers = {
+      header: `# /${selectedSkill.label}`,
+      instructionsHeader: "## Instructions"
+    }
+    if (args) markers.argsPrefix = `If \`${args}\` contains a path`
+    return markers
+  }
+
+  function optimisticSelectedSkillMatchesText(selectedSkill, text) {
+    const markers = realExpandedSelectedSkillMarkers(selectedSkill)
+    if (!markers) return false
+    const candidate = String(text || "").trim()
+    const normalizedLines = normalizedTextLines(candidate)
+    if (normalizedLines[0] !== markers.header) return false
+    if (!normalizedLines.includes(markers.instructionsHeader)) return false
+    if (!markers.argsPrefix) return true
+    return normalizedLines.some((line) => line.startsWith(markers.argsPrefix))
+  }
+
+  function optimisticSelectedSkillMatchesMessage(optimistic, message) {
+    if (!optimistic?.selectedSkill || message?.role !== "user") return false
+    return optimisticSelectedSkillMatchesText(optimistic.selectedSkill, messageSignatureText(message))
+  }
+
+  function realExpandedSelectedCommandMarkers(selectedCommand) {
+    if (!selectedCommand?.label) return null
+    return {
+      header: `# /${selectedCommand.label}`,
+      instructionsHeader: "## Instructions",
+      args: String(selectedCommand?.args || "").trim()
+    }
+  }
+
+  function optimisticSelectedCommandMatchesText(selectedCommand, text) {
+    const markers = realExpandedSelectedCommandMarkers(selectedCommand)
+    if (!markers) return false
+    const candidate = String(text || "").trim()
+    const normalizedLines = normalizedTextLines(candidate)
+    if (normalizedLines[0] !== markers.header) return false
+    if (!normalizedLines.includes(markers.instructionsHeader)) return false
+    if (!markers.args) return true
+    return candidate.includes(markers.args) || candidate.includes(`\`${markers.args}\``)
+  }
+
+  function optimisticSelectedCommandMatchesMessage(optimistic, message) {
+    if (!optimistic?.selectedCommand || message?.role !== "user") return false
+    return optimisticSelectedCommandMatchesText(optimistic.selectedCommand, messageSignatureText(message))
+  }
+
+  function mergeOptimisticUserMetadata(message, optimistic) {
     if (!message || !optimistic) return message
     const fileRefs = optimistic.parts.filter((part) => part.type === "file-ref")
-    if (!fileRefs.length) return message
+    const merged = {
+      ...message,
+      signatureText: optimistic.signatureText || message.signatureText || messageSignatureText(message),
+      ...(optimistic.selectedSkill ? { selectedSkill: optimistic.selectedSkill } : {}),
+      ...(optimistic.selectedCommand ? { selectedCommand: optimistic.selectedCommand } : {})
+    }
+    if (!fileRefs.length) return merged
 
     return {
-      ...message,
-      signatureText: message.signatureText || messageSignatureText(message),
+      ...merged,
       parts: [
         ...fileRefs.map((part, index) => ({
           ...part,
@@ -447,7 +539,16 @@
         item.mime === part.mime
       ))
     }
-    if (part.type === "text") return messageText(message) === (officeAttachmentPromptText(part) ?? part.text)
+    if (part.type === "text") {
+      const partText = officeAttachmentPromptText(part) ?? part.text
+      return messageText(message) === partText || (
+        Boolean(message.selectedSkill) &&
+        optimisticSelectedSkillMatchesText(message.selectedSkill, partText)
+      ) || (
+        Boolean(message.selectedCommand) &&
+        optimisticSelectedCommandMatchesText(message.selectedCommand, partText)
+      )
+    }
     return false
   }
 
@@ -507,7 +608,7 @@
       ? messages
         .map(normalizeMessage)
         .filter(Boolean)
-        .map((message) => mergeOptimisticFileRefs(message, sameSession ? findMatchingOptimisticMessage(previousMessages, message) : null))
+        .map((message) => mergeOptimisticUserMetadata(message, sameSession ? findMatchingOptimisticMessage(previousMessages, message) : null))
       : []
 
     thread.sessionId = sessionId
@@ -545,6 +646,8 @@
       role: "user",
       optimistic: true,
       ...(options.signatureText ? { signatureText: options.signatureText } : {}),
+      ...(options.selectedSkill ? { selectedSkill: options.selectedSkill } : {}),
+      ...(options.selectedCommand ? { selectedCommand: options.selectedCommand } : {}),
       parts: [
         ...attachments.map((attachment, index) => ({
           id: `${id}_file_${index}`,

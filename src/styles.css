@@ -547,35 +547,24 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow); }
 .ta-wrap { position: relative; padding: 16px 18px 4px; }
-.prompt-overlay {
-  position: absolute; inset: 16px 18px 4px;
-  overflow: hidden; pointer-events: none;
-}
-.prompt-overlay-text {
-  min-height: 48px; max-height: 200px;
-  font-size: 14.5px; line-height: 1.55;
-  color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
-}
-.composer textarea {
-  width: 100%; border: none; outline: none; resize: none;
-  position: relative; z-index: 1;
-  font-size: 14.5px; line-height: 1.55; color: transparent; caret-color: var(--text);
-  background: none; min-height: 48px; max-height: 200px;
-}
-.composer textarea::placeholder { color: var(--text-3); }
-.prompt-overlay-text .file-mention-token {
-  display: inline;
-  padding: 0;
-  border-width: 0;
-  margin: 0;
-  font-size: 14.5px;
-  line-height: 1.55;
-  vertical-align: baseline;
-  border-radius: 0;
+.prompt-editor {
+  width: 100%;
+  min-height: 48px;
+  max-height: 200px;
+  overflow-y: auto;
+  outline: none;
   background: none;
   color: var(--text);
+  font-size: 14.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
-.prompt-overlay-text .file-mention-token > span { overflow: visible; text-overflow: clip; white-space: pre-wrap; }
+.prompt-editor:empty::before { content: attr(data-placeholder); color: var(--text-3); }
+.prompt-editor .file-mention-token {
+  vertical-align: baseline;
+  margin: 0 2px;
+}
 
 .composer-attachments, .message-attachments { display: flex; flex-wrap: wrap; gap: 7px; }
 .composer-attachments { padding: 0 14px 4px; }
@@ -588,13 +577,15 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 .composer-file-mentions { padding: 10px 14px 0; }
 .file-mention-chip, .file-mention-token {
   display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 6px;
-  padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 999px;
+  padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 9px;
   background: var(--surface-2); color: var(--text-2); font-size: 12px; line-height: 1.2;
 }
 .file-mention-chip > span, .file-mention-token > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-mention-chip svg, .file-mention-token svg { width: 14px; height: 14px; flex-shrink: 0; }
 .file-mention-chip button { display: grid; width: 16px; height: 16px; flex-shrink: 0; place-items: center; border-radius: 4px; color: var(--text-3); }
 .file-mention-chip button:hover { background: var(--border-strong); color: var(--text); }
+.skill-token { border-style: dashed; }
+.command-token { border-color: var(--accent); color: var(--accent); }
 
 .composer-bar { display: flex; min-width: 0; align-items: center; gap: 8px; padding: 9px 12px 11px; }
 .icon-btn { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 11px; color: var(--text-2); transition: background .12s, color .12s; }
@@ -905,7 +896,7 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-lineca
 
 .composer-dock { padding: 8px clamp(32px, 3vw, 48px) 20px; }
 .composer-dock .composer { max-width: 1440px; margin: 0 auto; }
-.composer-dock .composer textarea { min-height: 58px; }
+.composer-dock .prompt-editor { min-height: 58px; }
 
 /* ============================================================
    Diagnostics popover

@@ -170,6 +170,247 @@ test("thread stream keeps optimistic file-ref chips while deduping against the e
   assert.equal(thread.messages[0].parts.find((part) => part.type === "text")?.text, "Hãy đọc cho tôi file `src/api.py`")
 })
 
+test("thread stream preserves selected skill metadata on optimistic user messages", () => {
+  const thread = createThreadStream("sess_one")
+  const selectedSkill = {
+    kind: "skill",
+    label: "use-backlog",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md",
+    raw: "[use-backlog](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md)",
+    args: "for this ticket"
+  }
+
+  addOptimisticUser(thread, `${selectedSkill.raw} ${selectedSkill.args}`, [], {
+    signatureText: `${selectedSkill.raw} ${selectedSkill.args}`,
+    selectedSkill
+  })
+
+  assert.deepEqual(thread.messages[0].selectedSkill, selectedSkill)
+  assert.equal(thread.messages[0].signatureText, `${selectedSkill.raw} ${selectedSkill.args}`)
+})
+
+test("thread stream preserves selected command metadata on optimistic user messages", () => {
+  const thread = createThreadStream("sess_one")
+  const selectedCommand = {
+    kind: "command",
+    label: "review",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review",
+    raw: "[review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review)",
+    args: "for this diff"
+  }
+
+  addOptimisticUser(thread, `${selectedCommand.raw} ${selectedCommand.args}`, [], {
+    signatureText: `${selectedCommand.raw} ${selectedCommand.args}`,
+    selectedCommand
+  })
+
+  assert.deepEqual(thread.messages[0].selectedCommand, selectedCommand)
+  assert.equal(thread.messages[0].signatureText, `${selectedCommand.raw} ${selectedCommand.args}`)
+})
+
+test("thread stream collapses an expanded selected-skill runtime prompt into one user bubble", () => {
+  const thread = createThreadStream("sess_one")
+  const selectedSkill = {
+    kind: "skill",
+    label: "understand-dashboard",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md",
+    raw: "[understand-dashboard](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md)",
+    args: "đọc `src/api.py` rồi giải thích"
+  }
+
+  addOptimisticUser(thread, `${selectedSkill.raw} ${selectedSkill.args}`, [], {
+    signatureText: `${selectedSkill.raw} ${selectedSkill.args}`,
+    selectedSkill,
+    fileRefs: [{ token: "@api.py", path: "src/api.py", name: "api.py" }]
+  })
+
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_user", role: "user" },
+    parts: [{
+      id: "part_text",
+      messageID: "msg_user",
+      type: "text",
+      text: [
+        `# /${selectedSkill.label}`,
+        "",
+        "Start the Understand Anything dashboard for the current project.",
+        "",
+        "## Instructions",
+        "",
+        `If \`${selectedSkill.args}\` contains a path, file, or code symbol, open the dashboard for that target instead of the whole project.`
+      ].join("\n")
+    }]
+  }])
+
+  assert.equal(thread.messages.filter((message) => message.role === "user").length, 1)
+  assert.equal(thread.messages[0].id, "msg_user")
+  assert.equal(messageText(thread.messages[0]), `${selectedSkill.raw} đọc @api.py rồi giải thích`)
+  assert.equal(messageCopyText(thread.messages[0]), `${selectedSkill.raw} đọc @api.py rồi giải thích`)
+  assert.deepEqual(thread.messages[0].selectedSkill, selectedSkill)
+  assert.deepEqual(
+    thread.messages[0].parts.filter((part) => part.type === "file-ref"),
+    [{ id: "msg_user_ref_0", messageID: "msg_user", type: "file-ref", token: "@api.py", path: "src/api.py", name: "api.py" }]
+  )
+  assert.equal(
+    thread.messages[0].parts.find((part) => part.type === "text")?.text,
+    [
+      `# /${selectedSkill.label}`,
+      "",
+      "Start the Understand Anything dashboard for the current project.",
+      "",
+      "## Instructions",
+      "",
+      `If \`${selectedSkill.args}\` contains a path, file, or code symbol, open the dashboard for that target instead of the whole project.`
+    ].join("\n")
+  )
+})
+
+test("thread stream collapses expanded selected-command runtime context into one user bubble", () => {
+  const thread = createThreadStream("sess_one")
+  const selectedCommand = {
+    kind: "command",
+    label: "review",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review",
+    raw: "[review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review)",
+    args: "for this diff"
+  }
+
+  addOptimisticUser(thread, `${selectedCommand.raw} ${selectedCommand.args}`, [], {
+    signatureText: `${selectedCommand.raw} ${selectedCommand.args}`,
+    selectedCommand
+  })
+
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_user", role: "user" },
+    parts: [{
+      id: "part_text",
+      messageID: "msg_user",
+      type: "text",
+      text: [
+        `# /${selectedCommand.label}`,
+        "",
+        "Review the current changes in the project.",
+        "",
+        "## Instructions",
+        "",
+        `Use \`${selectedCommand.args}\` as the review focus for this run.`
+      ].join("\n")
+    }]
+  }])
+
+  assert.equal(thread.messages.filter((message) => message.role === "user").length, 1)
+  assert.equal(thread.messages[0].id, "msg_user")
+  assert.equal(messageText(thread.messages[0]), `${selectedCommand.raw} ${selectedCommand.args}`)
+  assert.equal(messageCopyText(thread.messages[0]), `${selectedCommand.raw} ${selectedCommand.args}`)
+  assert.deepEqual(thread.messages[0].selectedCommand, selectedCommand)
+})
+
+test("thread stream collapses a bare selected skill without args into one user bubble", () => {
+  const thread = createThreadStream("sess_one")
+  const selectedSkill = {
+    kind: "skill",
+    label: "use-backlog",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md",
+    raw: "[use-backlog](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md)",
+    args: ""
+  }
+
+  addOptimisticUser(thread, selectedSkill.raw, [], {
+    signatureText: selectedSkill.raw,
+    selectedSkill
+  })
+
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_user", role: "user" },
+    parts: [{
+      id: "part_text",
+      messageID: "msg_user",
+      type: "text",
+      text: [
+        `# /${selectedSkill.label}`,
+        "",
+        "## Instructions",
+        "",
+        "Use the backlog workflow for the current task."
+      ].join("\n")
+    }]
+  }])
+
+  assert.equal(thread.messages.filter((message) => message.role === "user").length, 1)
+  assert.equal(thread.messages[0].id, "msg_user")
+  assert.equal(messageText(thread.messages[0]), selectedSkill.raw)
+  assert.equal(messageCopyText(thread.messages[0]), selectedSkill.raw)
+  assert.deepEqual(thread.messages[0].selectedSkill, selectedSkill)
+})
+
+test("thread stream does not collapse arbitrary user text that merely mentions a selected skill", () => {
+  const thread = createThreadStream("sess_one")
+  const selectedSkill = {
+    kind: "skill",
+    label: "understand-dashboard",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md",
+    raw: "[understand-dashboard](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md)",
+    args: "skill này tác dụng gì?"
+  }
+
+  addOptimisticUser(thread, `${selectedSkill.raw} ${selectedSkill.args}`, [], {
+    signatureText: `${selectedSkill.raw} ${selectedSkill.args}`,
+    selectedSkill
+  })
+
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_user", role: "user" },
+    parts: [{
+      id: "part_text",
+      messageID: "msg_user",
+      type: "text",
+      text: `Tôi vừa gõ /${selectedSkill.label} và hỏi: ${selectedSkill.args}`
+    }]
+  }])
+
+  assert.equal(thread.messages.filter((message) => message.role === "user").length, 2)
+  assert.equal(thread.messages[0].optimistic, true)
+  assert.equal(thread.messages[1].id, "msg_user")
+})
+
+test("thread stream does not collapse a near-miss hash-skill prompt without internal template markers", () => {
+  const thread = createThreadStream("sess_one")
+  const selectedSkill = {
+    kind: "skill",
+    label: "understand-dashboard",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md",
+    raw: "[understand-dashboard](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md)",
+    args: "đọc `src/api.py` rồi giải thích"
+  }
+
+  addOptimisticUser(thread, `${selectedSkill.raw} ${selectedSkill.args}`, [], {
+    signatureText: `${selectedSkill.raw} ${selectedSkill.args}`,
+    selectedSkill
+  })
+
+  hydrateThread(thread, "sess_one", [{
+    info: { id: "msg_user", role: "user" },
+    parts: [{
+      id: "part_text",
+      messageID: "msg_user",
+      type: "text",
+      text: [
+        `# /${selectedSkill.label}`,
+        "",
+        "## Instructions",
+        "",
+        selectedSkill.args,
+        "",
+        "Skill summary: dashboard notes for later."
+      ].join("\n")
+    }]
+  }])
+
+  assert.equal(thread.messages.filter((message) => message.role === "user").length, 2)
+  assert.equal(thread.messages[0].optimistic, true)
+  assert.equal(thread.messages[1].id, "msg_user")
+})
+
 test("messageText derives @file display tokens from backtick paths when file-ref parts are missing", () => {
   const thread = createThreadStream("sess_one")
   thread.messages.push({

@@ -9,6 +9,7 @@ const { defaultConfigPath, readOpencodeConfig } = require("../opencode-config")
 const { runtimeXdgConfigHome } = require("../opencode-profile")
 const { officeAttachmentContext } = require("../office-attachment-context")
 const { ZIP_MIME, zipAttachmentContext } = require("../zip-attachment-context")
+const { ensureRuntimeDbSchema } = require("./db-schema")
 
 // Document formats the model/gateway should translate through the bundled
 // translate_document tool by local path instead of ingesting as a raw `file` part.
@@ -200,6 +201,149 @@ function requestJson({ url, method = "GET", body, auth }) {
     if (payload) req.write(payload)
     req.end()
   })
+}
+
+function catalogItems(payload) {
+  if (Array.isArray(payload)) return payload
+  if (payload && typeof payload === "object" && Array.isArray(payload.data)) return payload.data
+  return []
+}
+
+function execFileText(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { encoding: "utf8", ...options }, (error, stdout, stderr) => {
+      if (error) {
+        const detail = String(stderr || stdout || error.message || "").trim()
+        reject(new Error(detail || error.message))
+        return
+      }
+      resolve(String(stdout || ""))
+    })
+  })
+}
+
+function isManagedCommandName(name) {
+  return typeof name === "string" && /^[\w-]+$/.test(name)
+}
+
+function managedCommandPath(profileDir, name) {
+  const safeName = isManagedCommandName(name) ? name : ""
+  if (!profileDir || !safeName) return ""
+  return path.join(profileDir, "commands", safeName)
+}
+
+function managedCommandBody(command) {
+  const lines = [`/${command.name}`]
+  if (command.description) lines.push("", command.description)
+  if (command.agent) lines.push("", `agent: ${command.agent}`)
+  if (command.model) lines.push(`model: ${command.model}`)
+  if (Array.isArray(command.hints) && command.hints.length) lines.push("", `hints: ${command.hints.join(", ")}`)
+  return `${lines.join("\n")}\n`
+}
+
+function syncManagedCommandFile(profileDir, command) {
+  const filePath = managedCommandPath(profileDir, command?.name)
+  if (!filePath || command?.source !== "command") return ""
+  fs.mkdirSync(path.dirname(filePath), { recursive: true })
+  const body = managedCommandBody(command)
+  if (!fs.existsSync(filePath) || fs.readFileSync(filePath, "utf8") !== body) {
+    fs.writeFileSync(filePath, body)
+  }
+  return filePath
+}
+
+function syncManagedCommandFiles(profileDir, commands = []) {
+  const fileMap = new Map()
+  if (!profileDir) return fileMap
+  const commandsDir = path.join(profileDir, "commands")
+  fs.mkdirSync(commandsDir, { recursive: true })
+  for (const command of commands) {
+    const filePath = syncManagedCommandFile(profileDir, command)
+    if (filePath) fileMap.set(command.name, filePath)
+  }
+  for (const entry of fs.readdirSync(commandsDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !isManagedCommandName(entry.name) || fileMap.has(entry.name)) continue
+    fs.rmSync(path.join(commandsDir, entry.name), { force: true })
+  }
+  return fileMap
+}
+
+const SKILL_PATH_FAMILIES = [
+  { family: "repo_agents", relativePrefix: ".agents/skills/", homeSegments: [".agents", "skills"] },
+  { family: "repo_opencode", relativePrefix: ".opencode/skills/", homeSegments: [".opencode", "skills"] },
+  { family: "repo_config_opencode", relativePrefix: ".config/opencode/skills/", homeSegments: [".config", "opencode", "skills"] }
+]
+
+function normalizePathLike(value) {
+  return String(value || "").trim().replace(/\\/g, "/")
+}
+
+function realPathOrResolved(value) {
+  try {
+    return fs.realpathSync(value)
+  } catch {
+    return path.resolve(value)
+  }
+}
+
+function homeSkillPrefix(homeSegments) {
+  return normalizePathLike(path.join(os.homedir(), ...homeSegments)) + "/"
+}
+
+function repoSkillPrefix(runtimeCwd, relativePrefix) {
+  if (!runtimeCwd) return ""
+  return normalizePathLike(path.resolve(realPathOrResolved(runtimeCwd), relativePrefix))
+}
+
+function classifySkillPath(rawPath, runtimeCwd = "", profileDir = "") {
+  const value = typeof rawPath === "string" ? rawPath.trim() : ""
+  if (!value) {
+    return {
+      family: profileDir ? "managed_profile" : "unknown",
+      path: profileDir ? path.join(profileDir, "skills") : ""
+    }
+  }
+  const normalized = normalizePathLike(value)
+  const normalizedResolved = path.isAbsolute(value) ? normalizePathLike(realPathOrResolved(value)) : normalized
+  if (profileDir) {
+    const managedPrefix = normalizePathLike(path.join(profileDir, "skills")) + "/"
+    if (normalized.startsWith(managedPrefix) || normalizedResolved.startsWith(managedPrefix)) {
+      return { family: "managed_profile", path: value }
+    }
+  }
+  for (const candidate of SKILL_PATH_FAMILIES) {
+    if (normalized.startsWith(candidate.relativePrefix)) {
+      return {
+        family: candidate.family,
+        path: runtimeCwd ? path.resolve(runtimeCwd, value) : value
+      }
+    }
+    const homePrefix = homeSkillPrefix(candidate.homeSegments)
+    if (path.isAbsolute(value) && (normalized.startsWith(homePrefix) || normalizedResolved.startsWith(homePrefix))) {
+      return {
+        family: candidate.family.replace(/^repo_/, "home_"),
+        path: value
+      }
+    }
+    const repoPrefix = repoSkillPrefix(runtimeCwd, candidate.relativePrefix)
+    if (repoPrefix && path.isAbsolute(value) && (normalized.startsWith(repoPrefix) || normalizedResolved.startsWith(repoPrefix))) {
+      return {
+        family: candidate.family,
+        path: value
+      }
+    }
+  }
+  return { family: "unknown", path: value }
+}
+
+function skillCommandInfo(command, profileDir, runtimeCwd = "") {
+  const rawPath = typeof command?.path === "string" ? command.path.trim() : ""
+  if (rawPath) return classifySkillPath(rawPath, runtimeCwd, profileDir)
+  if (!profileDir) return { family: "unknown", path: "" }
+  return {
+    family: "managed_profile",
+    path: path.join(profileDir, "skills", command.name, "SKILL.md")
+  }
 }
 
 function findFreePort(hostname = "127.0.0.1") {
@@ -664,6 +808,7 @@ class RuntimeProcessManager {
     // Tracks an in-flight start/stop so reads can wait for the server to settle instead of
     // throwing "Runtime is not running" during a restart. See waitUntilReady().
     this.lifecycle = null
+    this.createSessionInFlight = null
     this.sessionStatuses = {}
     this.sessionGeneratedAttachmentPaths = {}
     this.state = {
@@ -747,8 +892,15 @@ class RuntimeProcessManager {
   async reload() {
     const project = this.state.project
     if (!this.child || !project) return this.snapshot()
-    await this.stop()
-    return this.openProject({ project })
+    if (this.lifecycle) return this.lifecycle.then(() => this.snapshot())
+    const op = (async () => {
+      await this.stop()
+      return this._openProject({ project })
+    })()
+    const marker = op.then(() => {}, () => {})
+    this.lifecycle = marker
+    marker.finally(() => { if (this.lifecycle === marker) this.lifecycle = null })
+    return op
   }
 
   // Public entry. Records the start as the active lifecycle op so concurrent reads
@@ -860,6 +1012,11 @@ class RuntimeProcessManager {
       OPENWORKING_PROJECT_PATH: project.path,
       ...translationGatewayEnv(configPath, process.env)
     }
+    try {
+      await ensureRuntimeDbSchema({ runtimeBin, env })
+    } catch (error) {
+      this.log("warn", `Runtime DB schema repair skipped: ${error.message}`)
+    }
 
     try {
       this.child = spawn(runtimeBin, runtimeArgs, {
@@ -969,19 +1126,65 @@ class RuntimeProcessManager {
 
   async listCommands() {
     await this.waitUntilReady()
-    const commands = await requestJson({
+    const commands = catalogItems(await requestJson({
       url: `${this.state.runtime.serverUrl}/command`,
       auth: this.auth()
-    })
-    if (!Array.isArray(commands)) return []
-    return commands.map((command) => ({
-      name: command.name,
-      description: command.description,
-      source: command.source,
-      agent: command.agent,
-      model: command.model,
-      hints: Array.isArray(command.hints) ? command.hints : []
     }))
+    const skillCatalogByName = new Map()
+    try {
+      const skills = catalogItems(await requestJson({
+        url: `${this.state.runtime.serverUrl}/skill`,
+        auth: this.auth()
+      }))
+      for (const skill of skills) {
+        if (!skill || typeof skill.name !== "string" || !skill.name) continue
+        skillCatalogByName.set(skill.name, skill)
+      }
+    } catch (error) {
+      this.log("warn", `Skill catalog fetch failed: ${error.message}`)
+    }
+    const profileDir = this.profile?.profileDir || ""
+    const commandFilePaths = syncManagedCommandFiles(
+      profileDir,
+      commands.filter((command) => command?.source === "command")
+    )
+    const projected = commands.flatMap((command) => {
+      if (command?.source === "command") {
+        const commandPath = commandFilePaths.get(command.name)
+        if (!commandPath) return []
+        return [{
+          name: command.name,
+          description: command.description,
+          source: command.source,
+          agent: command.agent,
+          model: command.model,
+          hints: Array.isArray(command.hints) ? command.hints : [],
+          path: commandPath,
+          extra: command,
+        }]
+      }
+      const catalogSkill = command?.source === "skill" ? skillCatalogByName.get(command.name) : null
+      const skillInfo = command?.source === "skill"
+        ? (
+          typeof catalogSkill?.location === "string" && catalogSkill.location.trim()
+            ? classifySkillPath(catalogSkill.location, this.state.runtime.cwd, profileDir)
+            : skillCommandInfo(command, profileDir, this.state.runtime.cwd)
+        )
+        : null
+      return [{
+        name: command.name,
+        description: typeof catalogSkill?.description === "string" && catalogSkill.description.trim()
+          ? catalogSkill.description
+          : command.description,
+        source: command.source,
+        agent: command.agent,
+        model: command.model,
+        hints: Array.isArray(command.hints) ? command.hints : [],
+        ...(skillInfo?.path ? { path: skillInfo.path, locationFamily: skillInfo.family } : {}),
+        extra: command,
+      }]
+    })
+    return projected
   }
 
   async listMcpStatus() {
@@ -1110,15 +1313,21 @@ class RuntimeProcessManager {
 
   async createSession({ title } = {}) {
     this.assertReady()
-    const session = await requestJson({
-      url: `${this.state.runtime.serverUrl}/session`,
-      method: "POST",
-      auth: this.auth(),
-      body: title ? { title } : {}
-    })
-    this.state.activeSessionId = session?.id || null
-    this.timeline("session.created", { sessionId: this.state.activeSessionId })
-    return session
+    if (!this.createSessionInFlight) {
+      this.createSessionInFlight = requestJson({
+        url: `${this.state.runtime.serverUrl}/session`,
+        method: "POST",
+        auth: this.auth(),
+        body: title ? { title } : {}
+      }).then((session) => {
+        this.state.activeSessionId = session?.id || null
+        this.timeline("session.created", { sessionId: this.state.activeSessionId })
+        return session
+      }).finally(() => {
+        this.createSessionInFlight = null
+      })
+    }
+    return this.createSessionInFlight
   }
 
   async renameSession({ sessionId, title }) {

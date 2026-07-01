@@ -19,6 +19,12 @@ const BUILT_IN_SKILLS = [
   { name: "browser-use", description: "Drive the user's logged-in Chrome through the browser_* tools." }
 ]
 
+const TOKEN_KINDS = {
+  "skill": "sparkle",
+  "file": "doc",
+  "command": "bolt",
+}
+
 const icons = {
   plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
   folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
@@ -29,7 +35,7 @@ const icons = {
   attach: '<svg viewBox="0 0 24 24"><path d="M19 11.5 12.5 18a4 4 0 0 1-5.7-5.7l7-7a2.7 2.7 0 0 1 3.8 3.8l-7 7a1.3 1.3 0 0 1-1.9-1.9l6.3-6.3"/></svg>',
   agent: '<svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M9 12h.01M15 12h.01M9 16h6"/></svg>',
   ask: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.5 9.5a2.5 2.5 0 0 1 4.5 1.5c0 1.5-2 1.8-2 3M12 16.5h.01"/></svg>',
-  sparkle: '<svg viewBox="0 0 24 24"><path d="M12 3l1.6 5.4L19 10l-5.4 1.6L12 17l-1.6-5.4L5 10l5.4-1.6z"/></svg>',
+  sparkle: '<svg viewBox="0 0 24 24"><path d="M12 5l1.6 5.4L19 12l-5.4 1.6L12 19l-1.6-5.4L5 12l5.4-1.6z"></path></svg>',
   blocks: '<svg viewBox="0 0 24 24"><path d="M10 22V7a1 1 0 0 0-1-1H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5a1 1 0 0 0-1-1H2"/><rect x="14" y="2" width="8" height="8" rx="1"/></svg>',
   arrowUp: '<svg viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
   book: '<svg viewBox="0 0 24 24"><path d="M5 4h11a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2z"/><path d="M5 18a2 2 0 0 1 2-2h11"/></svg>',
@@ -55,7 +61,6 @@ const icons = {
   server: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>',
   search: '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>',
   brain: '<svg viewBox="0 0 24 24"><path d="M9.5 3A2.5 2.5 0 0 0 7 5.5v.5a3 3 0 0 0-2 5.6V13a3 3 0 0 0 3 3v1.5A2.5 2.5 0 0 0 12 20m0-17a2.5 2.5 0 0 1 2.5 2.5v.5a3 3 0 0 1 2 5.6V13a3 3 0 0 1-3 3v1.5A2.5 2.5 0 0 1 12 20m0-17v17"/></svg>',
-  plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'
 }
 
 const modes = [
@@ -187,6 +192,7 @@ const state = {
   planProposal: null,
   selectedModelKey: "",
   promptDraft: "",
+  promptComposing: false,
   firstSendInFlight: false,
   pendingAttachments: [],
   pendingFileMentions: [],
@@ -2019,7 +2025,7 @@ function renderThreadMessage(message) {
     const attachments = message.parts.filter((part) => part.type === "file")
     const fileMentions = userMessageFileRefs(message, projectFiles)
     return text || attachments.length || fileMentions.length
-      ? `<div class="msg-user"><div class="message-stack user-message"><div class="message-card bubble">${text ? `<div>${renderTextWithFileMentions(text, fileMentions)}</div>` : ""}${renderAttachmentChips(attachments)}</div>${actions}</div></div>`
+      ? `<div class="msg-user"><div class="message-stack user-message"><div class="message-card bubble">${text ? `<div>${renderPromptTokensHtml(text, fileMentions)}</div>` : ""}${renderAttachmentChips(attachments)}</div>${actions}</div></div>`
       : ""
   }
   const parts = message.parts.map(renderAssistantPart).join("")
@@ -2433,6 +2439,86 @@ function renderInlineFileMention(fileMention) {
   return `<span class="file-mention-token" title="${escapeHtml(fileMention.path)}"><span>${escapeHtml(label)}</span></span>`
 }
 
+function canonicalToken(label, path) {
+  return `[${String(label || "")}](${String(path || "")})`
+}
+
+function normalizeComparablePath(value) {
+  return String(value || "").trim().replace(/\\/g, "/")
+}
+
+function skillFamilySuffix(family, label) {
+  const trimmedLabel = String(label || "").trim()
+  if (family === "managed_profile") return `/opencode-profile/skills/${trimmedLabel}/SKILL.md`
+  if (family === "repo_agents" || family === "home_agents") return `/.agents/skills/${trimmedLabel}/SKILL.md`
+  if (family === "repo_opencode" || family === "home_opencode") return `/.opencode/skills/${trimmedLabel}/SKILL.md`
+  if (family === "repo_config_opencode" || family === "home_config_opencode") return `/.config/opencode/skills/${trimmedLabel}/SKILL.md`
+  return ""
+}
+
+function isKnownSkillTokenPath(normalizedPath, label, command) {
+  const commandPath = normalizeComparablePath(command?.path || "")
+  if (!commandPath) return false
+  if (normalizedPath !== commandPath) return false
+  const commandFamily = String(command?.locationFamily || "")
+  if (commandFamily) return commandPath.endsWith(skillFamilySuffix(commandFamily, label))
+  return [
+    "managed_profile",
+    "repo_agents",
+    "repo_opencode",
+    "repo_config_opencode"
+  ].some((family) => commandPath.endsWith(skillFamilySuffix(family, label)))
+}
+
+function tokenKindForPath(path, label = "") {
+  const value = String(path || "").trim()
+  const normalized = normalizeComparablePath(value)
+  const command = findCommand(label)
+  if (!value) return null
+  if (/^commands\/[\w-]+$/.test(value)) return null
+  if (/(^|\/)opencode-profile\/commands\/[^/]+$/i.test(normalized)) {
+    const commandPath = normalizeComparablePath(command?.path || "")
+    return command?.source === "command" && commandPath === normalized ? "command" : null
+  }
+  if (command?.source === "skill") {
+    if (isKnownSkillTokenPath(normalized, label, command)) return "skill"
+  }
+  const base = filename(value)
+  if (/^(?!https?:\/\/)(?!mailto:)(?!#).+/.test(value) && base && base === String(label || "").trim()) {
+    return "file"
+  }
+  return null
+}
+
+function parsePromptTokens(text) {
+  const input = String(text || "")
+  const tokens = []
+  const pattern = /\[([^\]\n]+)\]\(([^)\n]+)\)/g
+  let cursor = 0
+  let match = null
+
+  while ((match = pattern.exec(input))) {
+    if (match.index > cursor) tokens.push({ type: "text", text: input.slice(cursor, match.index) })
+    const [, label, path] = match
+    const kind = tokenKindForPath(path, label)
+    if (kind) tokens.push({ type: "token", kind, label, path, raw: match[0] })
+    else tokens.push({ type: "text", text: match[0] })
+    cursor = match.index + match[0].length
+  }
+  if (cursor < input.length) tokens.push({ type: "text", text: input.slice(cursor) })
+  return tokens
+}
+
+function promptTitleText(promptText) {
+  return parsePromptTokens(promptText).map((part) => (part.type === "token" ? part.label : part.text).trim()).join(" ").trim()
+}
+
+function renderCanonicalToken(token) {
+  const modifier = token.kind === "skill" || token.kind === "command" ? ` ${token.kind}-token` : ""
+  const iconName = TOKEN_KINDS[token.kind] || ""
+  return `<span class="file-mention-token${modifier}" contenteditable="false" title="${escapeHtml(token.path)}" data-token-kind="${escapeHtml(token.kind)}" data-token-raw="${escapeHtml(token.raw)}">${icon(iconName)}<span>${escapeHtml(token.label)}</span></span>`
+}
+
 function findFileMentionMatches(text, fileMentions) {
   const prompt = String(text || "")
   const matches = []
@@ -2468,11 +2554,282 @@ function renderTextWithFileMentions(text, fileMentions) {
   return html
 }
 
-function renderPromptOverlayHtml(promptText, fileMentions = []) {
-  const prompt = String(promptText || "")
+function renderPromptTokensHtml(text, fileMentions = []) {
+  const prompt = String(text || "")
+  const parts = parsePromptTokens(prompt)
   const liveMentions = livePendingFileMentions(prompt, fileMentions)
-  if (!liveMentions.length) return escapeHtml(prompt).replaceAll("\n", "<br>")
-  return renderTextWithFileMentions(prompt, liveMentions)
+  if (parts.some((part) => part.type === "token")) {
+    return parts.map((part) => {
+      if (part.type === "text") return renderTextWithFileMentions(part.text, liveMentions)
+      return renderCanonicalToken(part)
+    }).join("")
+  }
+  if (liveMentions.length) return renderTextWithFileMentions(prompt, liveMentions)
+  return escapeHtml(prompt).replaceAll("\n", "<br>")
+}
+
+function renderPromptOverlayHtml(promptText, fileMentions = []) {
+  return renderPromptTokensHtml(promptText, fileMentions)
+}
+
+function replaceComposerQuery({ text, caret, trigger, label, path, source }) {
+  const value = String(text || "")
+  const beforeCaret = value.slice(0, caret)
+  const pattern = trigger === "file"
+    ? /(^|\s)@([^\s@]*)$/
+    : /(^|\s)\/([\w-]*)$/
+  const replacement = trigger === "file"
+    ? canonicalToken(label, path)
+    : canonicalToken(label, path)
+  const replaced = beforeCaret.replace(pattern, `$1${replacement}`)
+  return {
+    text: `${replaced}${value.slice(caret)}`,
+    caret: replaced.length
+  }
+}
+
+function commandTokenPath(command) {
+  if (!command) return ""
+  if (command.source === "skill" || command.source === "command") return String(command.path || "").trim()
+  return ""
+}
+
+function leadingCommandToken(promptText) {
+  const prompt = String(promptText || "").trim()
+  if (!prompt) return null
+  const commandMatch = prompt.match(/^\/([\w-]+)(?:\s+([\s\S]*))?$/)
+  const slashCommand = commandMatch ? findCommand(commandMatch[1]) : null
+  if (commandMatch && slashCommand) {
+    return {
+      command: slashCommand.name,
+      args: commandMatch[2] || "",
+      entry: slashCommand
+    }
+  }
+  const parts = parsePromptTokens(prompt)
+  if (!parts.length || parts[0].type !== "token") return null
+  if (parts[0].kind !== "skill" && parts[0].kind !== "command") return null
+  const tokenCommand = findCommand(parts[0].label)
+  if (!tokenCommand) return null
+  const args = parts.slice(1).map((part) => part.type === "token" ? part.raw : part.text).join("").trimStart()
+  if (parts[0].kind === "skill") {
+    return {
+      command: null,
+      args,
+      entry: tokenCommand,
+      selectedSkill: {
+        kind: "skill",
+        label: tokenCommand.name,
+        path: commandTokenPath(tokenCommand),
+        raw: parts[0].raw,
+        args
+      }
+    }
+  }
+    return {
+      command: tokenCommand.name,
+      args,
+      entry: tokenCommand,
+      selectedCommand: {
+        kind: "command",
+        label: tokenCommand.name,
+        path: commandTokenPath(tokenCommand),
+        raw: parts[0].raw,
+        args
+      }
+  }
+}
+
+function tokenRangeAtCaret(text, caret, direction) {
+  let offset = 0
+  for (const token of parsePromptTokens(text)) {
+    const raw = token.type === "token" ? token.raw : token.text
+    const start = offset
+    const end = offset + raw.length
+    offset = end
+    if (token.type !== "token") continue
+    if (direction === "backward" && caret === end) return { start, end }
+    if (direction === "forward" && caret === start) return { start, end }
+  }
+  return null
+}
+
+function removeComposerTokenBoundary({ text, caret, direction }) {
+  const range = tokenRangeAtCaret(String(text || ""), Number(caret || 0), direction)
+  if (!range) return { text, caret }
+  return {
+    text: `${text.slice(0, range.start)}${text.slice(range.end)}`,
+    caret: range.start
+  }
+}
+
+function promptEditorText(editor) {
+  if (!editor) return ""
+  const chunks = []
+  const visit = (node) => {
+    if (!node) return
+    if (node.nodeType === Node.TEXT_NODE) {
+      chunks.push(node.textContent || "")
+      return
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return
+    if (node.dataset?.tokenRaw) {
+      chunks.push(node.dataset.tokenRaw)
+      return
+    }
+    if (node.tagName === "BR") {
+      chunks.push("\n")
+      return
+    }
+    for (const child of node.childNodes) visit(child)
+  }
+  for (const child of editor.childNodes) visit(child)
+  return chunks.join("").replace(/\u00a0/g, " ")
+}
+
+function promptEditorNodeLength(node) {
+  if (!node) return 0
+  if (node.nodeType === Node.TEXT_NODE) return (node.textContent || "").length
+  if (node.nodeType !== Node.ELEMENT_NODE) return 0
+  if (node.dataset?.tokenRaw) return node.dataset.tokenRaw.length
+  if (node.tagName === "BR") return 1
+  let total = 0
+  for (const child of node.childNodes) total += promptEditorNodeLength(child)
+  return total
+}
+
+function promptEditorTokenAncestor(editor, node) {
+  let current = node && node.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement
+  while (current && current !== editor) {
+    if (current.dataset?.tokenRaw) return current
+    current = current.parentElement
+  }
+  return null
+}
+
+function promptEditorCaret(editor) {
+  if (!editor) return 0
+  const selection = window.getSelection?.()
+  if (!selection?.rangeCount) return promptEditorText(editor).length
+  const { anchorNode, anchorOffset } = selection
+  if (!anchorNode || !editor.contains(anchorNode)) return promptEditorText(editor).length
+  const tokenNode = promptEditorTokenAncestor(editor, anchorNode)
+  if (tokenNode) {
+    const tokenStart = promptEditorOffsetForNode(editor, tokenNode)
+    return anchorOffset > 0 ? tokenStart + promptEditorNodeLength(tokenNode) : tokenStart
+  }
+  return promptEditorOffsetWithin(editor, anchorNode, anchorOffset)
+}
+
+function promptEditorOffsetWithin(root, targetNode, targetOffset) {
+  if (targetNode === root) {
+    let total = 0
+    for (let index = 0; index < targetOffset; index += 1) total += promptEditorNodeLength(root.childNodes[index])
+    return total
+  }
+  let total = 0
+  const walk = (node) => {
+    if (!node) return false
+    if (node === targetNode) {
+      if (node.nodeType === Node.TEXT_NODE) total += Math.min(targetOffset, (node.textContent || "").length)
+      else {
+        for (let index = 0; index < targetOffset; index += 1) total += promptEditorNodeLength(node.childNodes[index])
+      }
+      return true
+    }
+    if (node.nodeType === Node.TEXT_NODE) {
+      total += (node.textContent || "").length
+      return false
+    }
+    if (node.nodeType === Node.ELEMENT_NODE && node.dataset?.tokenRaw) {
+      total += node.dataset.tokenRaw.length
+      return false
+    }
+    if (node.nodeType === Node.ELEMENT_NODE && node.tagName === "BR") {
+      total += 1
+      return false
+    }
+    for (const child of node.childNodes) {
+      if (walk(child)) return true
+    }
+    return false
+  }
+  walk(root)
+  return total
+}
+
+function promptEditorOffsetForNode(editor, targetNode) {
+  let total = 0
+  for (const child of editor.childNodes) {
+    if (child === targetNode) return total
+    total += promptEditorNodeLength(child)
+  }
+  return total
+}
+
+function setPromptSelection(editor, rangeBuilder) {
+  const selection = window.getSelection?.()
+  if (!selection) return
+  const range = document.createRange()
+  rangeBuilder(range)
+  range.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
+function placeCaretAtTextOffset(editor, offset) {
+  if (!editor) return
+  let remaining = Math.max(0, Math.min(offset, promptEditorText(editor).length))
+  for (const child of editor.childNodes) {
+    const length = promptEditorNodeLength(child)
+    if (remaining > length) {
+      remaining -= length
+      continue
+    }
+    if (child.nodeType === Node.TEXT_NODE) {
+      setPromptSelection(editor, (range) => range.setStart(child, remaining))
+      return
+    }
+    if (child.nodeType === Node.ELEMENT_NODE && child.dataset?.tokenRaw) {
+      setPromptSelection(editor, (range) => {
+        if (remaining <= 0) range.setStartBefore(child)
+        else range.setStartAfter(child)
+      })
+      return
+    }
+    if (child.nodeType === Node.ELEMENT_NODE && child.tagName === "BR") {
+      setPromptSelection(editor, (range) => range.setStartAfter(child))
+      return
+    }
+    remaining -= length
+  }
+  setPromptSelection(editor, (range) => range.setStart(editor, editor.childNodes.length))
+}
+
+function autosizePromptEditor(editor) {
+  if (!editor) return
+  editor.style.height = "auto"
+  editor.style.height = `${Math.min(editor.scrollHeight, 200)}px`
+}
+
+function syncPromptEditor(editor, caret = null) {
+  if (!editor) return
+  editor.innerHTML = renderPromptTokensHtml(state.promptDraft)
+  autosizePromptEditor(editor)
+  if (caret !== null) placeCaretAtTextOffset(editor, caret)
+}
+
+function insertPlainTextAtSelection(editor, text) {
+  const selection = window.getSelection?.()
+  if (!editor || !selection?.rangeCount) return
+  const range = selection.getRangeAt(0)
+  range.deleteContents()
+  const node = document.createTextNode(text)
+  range.insertNode(node)
+  range.setStart(node, node.textContent.length)
+  range.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(range)
 }
 
 function escapeRegex(text) {
@@ -2532,10 +2889,28 @@ function collectLiveFileMentions(promptText, overrides = {}) {
   return [...byToken.values()]
 }
 
+function canonicalFileMentions(promptText) {
+  return parsePromptTokens(promptText)
+    .filter((part) => part.type === "token" && part.kind === "file")
+    .map((part) => ({ token: part.raw, path: part.path, name: part.label }))
+}
+
 async function fileMentionsForSubmit(prompt, command) {
-  if (command) return []
   if (String(prompt || "").includes("@")) await ensureProjectFileCandidates()
-  return collectLiveFileMentions(prompt)
+  const byToken = new Map()
+  for (const fileMention of [
+    ...canonicalFileMentions(prompt),
+    ...collectLiveFileMentions(prompt)
+  ]) {
+    if (!fileMention?.token) continue
+    byToken.set(fileMention.token, fileMention)
+  }
+  return [...byToken.values()]
+}
+
+function fileMentionNeedsAttachment(fileMention) {
+  const filePath = String(fileMention?.path || "")
+  return /\.zip$/i.test(filePath)
 }
 
 function syncPendingFileMentions(promptText, { rerender = false, promptInput = null } = {}) {
@@ -2543,16 +2918,11 @@ function syncPendingFileMentions(promptText, { rerender = false, promptInput = n
   if (live.length === state.pendingFileMentions.length) return live
   state.pendingFileMentions = live
   if (rerender) {
-    const selectionStart = promptInput?.selectionStart ?? null
-    const selectionEnd = promptInput?.selectionEnd ?? selectionStart
     render()
     const freshInput = document.getElementById("promptInput")
-    if (freshInput && selectionStart !== null && selectionEnd !== null) {
+    if (freshInput) {
       freshInput.focus()
-      freshInput.setSelectionRange(selectionStart, selectionEnd)
-      freshInput.style.height = "auto"
-      freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
-      syncPromptOverlay(freshInput)
+      syncPromptEditor(freshInput)
     }
   }
   return live
@@ -3049,15 +3419,13 @@ function renderComposer(project, dock = false) {
   const planOn = state.mode === "plan"
   const model = selectedModel()
   const abortable = threadAbortable()
+  const placeholder = `${dock ? "Reply to" : "Describe a task for"} ${project.name}...`
   return `
     <div class="composer">
       <div class="ta-wrap">
         ${renderCommandMenu()}
         ${renderFileMentionMenu()}
-        <div class="prompt-overlay" aria-hidden="true">
-          <div id="promptOverlay" class="prompt-overlay-text">${renderPromptOverlayHtml(state.promptDraft, state.pendingFileMentions)}</div>
-        </div>
-        <textarea id="promptInput" rows="1" placeholder="${dock ? "Reply to" : "Describe a task for"} ${escapeHtml(project.name)}...">${escapeHtml(state.promptDraft)}</textarea>
+        <div id="promptInput" class="prompt-editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="${escapeHtml(placeholder)}">${renderPromptTokensHtml(state.promptDraft, state.pendingFileMentions)}</div>
       </div>
       ${renderAttachmentChips(state.pendingAttachments, { removable: true })}
       <div class="composer-bar">
@@ -3747,7 +4115,7 @@ async function replyPermission(requestID, decision, sessionId = state.activeSess
 // All click/input/keydown/mousedown wiring now lives in the delegated #root listeners
 // (installDelegatedListeners). bindEvents() keeps only the imperative, per-element bits that
 // must run AFTER each render() rebuilds #root: focus/select of a freshly-rendered rename input,
-// restoring focus to a session kebab after a rename, and sizing the prompt textarea + overlay.
+// restoring focus to a session kebab after a rename, and sizing the prompt editor.
 function bindEvents() {
   if (state.sessionRenameTarget && state.sessionRenameAutoFocus) {
     const input = document.querySelector("[data-session-rename-input]")
@@ -3772,9 +4140,7 @@ function bindEvents() {
   }
   const promptInput = document.getElementById("promptInput")
   if (promptInput) {
-    promptInput.style.height = "auto"
-    promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
-    syncPromptOverlay(promptInput)
+    autosizePromptEditor(promptInput)
   }
 }
 
@@ -3794,17 +4160,9 @@ function paintPromptAssistMenu() {
   // data-command / data-file-mention mousedown is handled by the delegated #root listener.
 }
 
-function syncPromptOverlay(promptInput) {
-  const overlay = document.getElementById("promptOverlay")
-  const overlayFrame = overlay?.parentElement
-  if (!overlay || !overlayFrame || !promptInput) return
-  overlay.innerHTML = renderPromptOverlayHtml(promptInput.value, state.pendingFileMentions)
-  overlayFrame.scrollTop = promptInput.scrollTop
-}
-
 function syncPromptAssist(promptInput) {
-  const caret = promptInput.selectionStart ?? promptInput.value.length
-  const beforeCaret = promptInput.value.slice(0, caret)
+  const caret = promptEditorCaret(promptInput)
+  const beforeCaret = state.promptDraft.slice(0, caret)
   const commandMatch = beforeCaret.match(/(?:^|\s)\/([\w-]*)$/)
   if (commandMatch) {
     state.commandMenu = { open: true, query: commandMatch[1], index: 0 }
@@ -3848,21 +4206,21 @@ function selectCommand(name) {
     closeCommandMenu()
     return
   }
-  const value = promptInput.value
-  const caret = promptInput.selectionStart ?? value.length
-  const before = value.slice(0, caret).replace(/(^|\s)\/([\w-]*)$/, `$1/${command.name} `)
-  const next = `${before}${value.slice(caret)}`
-  state.promptDraft = next
+  const next = replaceComposerQuery({
+    text: state.promptDraft,
+    caret: promptEditorCaret(promptInput),
+    trigger: "slash",
+    label: command.name,
+    path: commandTokenPath(command),
+    source: command.source
+  })
+  state.promptDraft = next.text
   state.commandMenu = { open: false, query: "", index: 0 }
   state.fileMentionMenu.open = false
-  promptInput.value = next
   promptInput.focus()
-  promptInput.setSelectionRange(before.length, before.length)
-  promptInput.style.height = "auto"
-  promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`
-  syncPromptOverlay(promptInput)
+  syncPromptEditor(promptInput, next.caret)
   const send = document.querySelector(".send")
-  if (send) send.classList.toggle("disabled", !threadAbortable() && !next.trim())
+  if (send) send.classList.toggle("disabled", !threadAbortable() && !next.text.trim())
   paintPromptAssistMenu()
 }
 
@@ -3872,28 +4230,25 @@ async function selectFileMention(filePath) {
     closeFileMentionMenu()
     return
   }
-  const token = fileMentionTokenForPath(filePath)
-  const value = promptInput.value
-  const caret = promptInput.selectionStart ?? value.length
-  const before = value.slice(0, caret).replace(/(^|\s)@([^\s@]*)$/, `$1${token}`)
-  const after = value.slice(caret)
+  const caret = promptEditorCaret(promptInput)
+  const currentValue = state.promptDraft
+  const after = currentValue.slice(caret)
+  const next = replaceComposerQuery({
+    text: currentValue,
+    caret,
+    trigger: "file",
+    label: filename(filePath),
+    path: filePath
+  })
   const spacer = after && /^\s/.test(after) ? "" : " "
-  const next = `${before}${spacer}${after}`
-  state.promptDraft = next
-  state.pendingFileMentions = [
-    ...state.pendingFileMentions.filter((fileMention) => fileMention.token !== token),
-    { token, path: filePath, name: filename(filePath) }
-  ]
+  state.promptDraft = spacer ? `${next.text}${spacer}` : next.text
   closeFileMentionMenu()
   render()
   const freshInput = document.getElementById("promptInput")
   if (freshInput) {
     freshInput.focus()
-    const selection = before.length + spacer.length
-    freshInput.setSelectionRange(selection, selection)
-    freshInput.style.height = "auto"
-    freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
-    syncPromptOverlay(freshInput)
+    placeCaretAtTextOffset(freshInput, next.caret + spacer.length)
+    autosizePromptEditor(freshInput)
   }
 }
 
@@ -4074,7 +4429,7 @@ async function handleAction(event) {
     if (action === "rejectPlan") await rejectPlan()
     if (action === "revisePlan") document.getElementById("promptInput")?.focus()
     if (action === "openPlanText") openInlinePlan(latestPlanText())
-    if (action === "sendPrompt") await sendPrompt(document.getElementById("promptInput")?.value)
+    if (action === "sendPrompt") await sendPrompt(state.promptDraft)
     if (action === "abortSession") await abortSession()
     if (action === "saveConfig") await saveConfig()
     if (action === "addSuperpowers") addSuperpowers()
@@ -4222,8 +4577,7 @@ async function removeAttachment(id) {
 
 function removeFileMention(token) {
   if (!token) return
-  const promptInput = document.getElementById("promptInput")
-  const currentValue = promptInput?.value ?? state.promptDraft
+  const currentValue = state.promptDraft
   const next = currentValue.replace(token, "").replace(/\s{2,}/g, " ")
   state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => fileMention.token !== token)
   state.promptDraft = next
@@ -4232,10 +4586,7 @@ function removeFileMention(token) {
   if (freshInput) {
     freshInput.focus()
     const caret = next.length
-    freshInput.setSelectionRange(caret, caret)
-    freshInput.style.height = "auto"
-    freshInput.style.height = `${Math.min(freshInput.scrollHeight, 200)}px`
-    syncPromptOverlay(freshInput)
+    syncPromptEditor(freshInput, caret)
   }
 }
 
@@ -4605,16 +4956,29 @@ async function sendPrompt(rawPrompt) {
   const prompt = String(rawPrompt || "").trim()
   const project = selectedProject()
   if (!prompt || !project) return
-  const commandMatch = prompt.match(/^\/([\w-]+)(?:\s+([\s\S]*))?$/)
-  const command = commandMatch && findCommand(commandMatch[1]) ? commandMatch[1] : null
-  const commandArgs = command ? (commandMatch[2] || "") : ""
-  const fileMentions = command ? [] : await fileMentionsForSubmit(prompt, command)
+  const leadingCommand = leadingCommandToken(prompt)
+  const command = leadingCommand?.command || null
+  const commandArgs = leadingCommand?.args || ""
+  const fileMentionSource = command ? commandArgs : prompt
+  const fileMentions = await fileMentionsForSubmit(fileMentionSource, command)
+  const attachmentFileMentions = fileMentions.filter(fileMentionNeedsAttachment)
+  const textFileMentions = fileMentions.filter((fileMention) => !fileMentionNeedsAttachment(fileMention))
+  const materializedMentionAttachments = []
+  for (const fileMention of attachmentFileMentions) {
+    const attachment = await window.openworking.attachments.addProjectFile(fileMention.path)
+    if (attachment) materializedMentionAttachments.push(attachment)
+  }
   const attachments = computePromptAttachments({
     command,
     pendingAttachments: state.pendingAttachments,
-    fileMentions
+    fileMentions: textFileMentions
   })
-  const effectivePrompt = command ? prompt : applyPendingFileMentions(prompt, fileMentions)
+  attachments.push(...materializedMentionAttachments)
+  const effectivePrompt = command ? prompt : applyPendingFileMentions(prompt, textFileMentions)
+  const effectiveCommandArgs = command ? applyPendingFileMentions(commandArgs, textFileMentions) : commandArgs
+  const selectedSkillToken = leadingCommand?.selectedSkill || null
+  const selectedCommandToken = leadingCommand?.selectedCommand || null
+  if (selectedSkillToken && !command) selectedSkillToken.args = applyPendingFileMentions(selectedSkillToken.args, textFileMentions)
   const mode = modes.find((item) => item.id === state.mode) || modes[0]
   let thread = null
   let optimisticId = null
@@ -4627,7 +4991,8 @@ async function sendPrompt(rawPrompt) {
       if (state.firstSendInFlight) return
       state.firstSendInFlight = true
       ownsFirstSendGuard = true
-      const title = prompt.length > 54 ? `${prompt.slice(0, 53).trim()}...` : prompt
+      const titleText = promptTitleText(prompt) || prompt
+      const title = titleText.length > 54 ? `${titleText.slice(0, 53).trim()}...` : titleText
       const session = await window.openworking.runtime.createSession({ title })
       state.activeSessionId = session.id
       setProjectSessions(project.id, [session, ...projectSessions(project.id)], "active")
@@ -4639,7 +5004,9 @@ async function sendPrompt(rawPrompt) {
     thread = activeThread()
     optimisticId = addOptimisticUser(thread, prompt, attachments, {
       fileRefs: fileMentions,
-      signatureText: command ? undefined : effectivePrompt
+      signatureText: command ? prompt : effectivePrompt,
+      selectedSkill: selectedSkillToken || undefined,
+      selectedCommand: selectedCommandToken || undefined
     })
     if (mode.id === "plan") {
       const afterMessageIndex = thread.messages.findIndex((message) => message.id === optimisticId)
@@ -4655,17 +5022,17 @@ async function sendPrompt(rawPrompt) {
     const sentAttachmentIds = new Set(attachments.map((attachment) => attachment.id))
     thread.status = { type: "busy" }
     state.promptDraft = ""
-    if (!command && sentAttachmentIds.size) {
+    if (sentAttachmentIds.size) {
       state.pendingAttachments = state.pendingAttachments.filter((attachment) => !sentAttachmentIds.has(attachment.id))
     }
-    if (!command) state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => !fileMentions.some((sent) => sent.token === fileMention.token))
+    state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => !fileMentions.some((sent) => sent.token === fileMention.token))
     render({ threadScroll: "latest" })
     const model = selectedModel()
     if (command) {
       await window.openworking.runtime.sendCommand({
         sessionId: state.activeSessionId,
         command,
-        arguments: commandArgs,
+        arguments: effectiveCommandArgs,
         agent: mode.agent,
         model: model ? { providerID: model.providerID, modelID: model.modelID } : undefined
       })
@@ -5204,6 +5571,7 @@ async function reloadConfig() {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     applyPendingFileMentions,
+    canonicalToken,
     chooseSessionAfterRuntimeReconnect,
     collectLiveFileMentions,
     computePromptAttachments,
@@ -5213,11 +5581,15 @@ if (typeof module !== "undefined" && module.exports) {
     filterPromptAttachments,
     livePendingFileMentions,
     loadAllSessions,
+    parsePromptTokens,
+    removeComposerTokenBoundary,
+    renderPromptTokensHtml,
     sessionsForProjectPath,
     loadStoredExpanded,
     persistExpanded,
     renderPromptOverlayHtml,
     renderTextWithFileMentions,
+    replaceComposerQuery,
     resolveFileMentionsFromPrompt,
     setProjectSessions,
     sessionRowKey,
@@ -5242,6 +5614,9 @@ if (typeof module !== "undefined" && module.exports) {
       renderSidebarInto,
       splitStreamDeltaSegments,
       streamPacer,
+      handleAction,
+      handlePromptInput,
+      handlePromptKeydown,
       // DELEGATED_CLICK is a `const` (TDZ) at exports-eval time, so expose it via a getter.
       getDelegatedClick: () => DELEGATED_CLICK
     }
@@ -5565,21 +5940,19 @@ function handleRenameKeydown(event, element) {
   }
 }
 
-// The prompt textarea owns its own input/scroll/keydown logic (command + file-mention menus,
+// The prompt editor owns its own input/keydown logic (command + file-mention menus,
 // height auto-size, Enter-to-send). Delegated off #root by matching #promptInput.
 function handlePromptInput(promptInput) {
-  state.promptDraft = promptInput.value
-  syncPendingFileMentions(promptInput.value, { rerender: true, promptInput })
-  const liveInput = document.getElementById("promptInput") || promptInput
+  state.promptDraft = promptEditorText(promptInput)
+  syncPendingFileMentions(state.promptDraft, { rerender: false, promptInput })
   const send = document.querySelector(".send")
-  if (send) send.classList.toggle("disabled", !threadAbortable() && !liveInput.value.trim())
-  liveInput.style.height = "auto"
-  liveInput.style.height = `${Math.min(liveInput.scrollHeight, 200)}px`
-  syncPromptOverlay(liveInput)
-  syncPromptAssist(liveInput)
+  if (send) send.classList.toggle("disabled", !threadAbortable() && !state.promptDraft.trim())
+  autosizePromptEditor(promptInput)
+  syncPromptAssist(promptInput)
 }
 
 function handlePromptKeydown(event, promptInput) {
+  if (event.isComposing || state.promptComposing) return
   if (state.commandMenu.open) {
     const candidates = commandCandidates(state.commandMenu.query)
     if (event.key === "ArrowDown") {
@@ -5634,9 +6007,31 @@ function handlePromptKeydown(event, promptInput) {
       return
     }
   }
+  if (event.key === "Backspace" || event.key === "Delete") {
+    const next = removeComposerTokenBoundary({
+      text: state.promptDraft,
+      caret: promptEditorCaret(promptInput),
+      direction: event.key === "Backspace" ? "backward" : "forward"
+    })
+    if (next.text !== state.promptDraft) {
+      event.preventDefault()
+      state.promptDraft = next.text
+      syncPromptEditor(promptInput, next.caret)
+      const send = document.querySelector(".send")
+      if (send) send.classList.toggle("disabled", !threadAbortable() && !state.promptDraft.trim())
+      syncPendingFileMentions(state.promptDraft)
+      return
+    }
+  }
+  if (event.key === "Enter" && event.shiftKey) {
+    event.preventDefault()
+    insertPlainTextAtSelection(promptInput, "\n")
+    handlePromptInput(promptInput)
+    return
+  }
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault()
-    sendPrompt(promptInput.value)
+    sendPrompt(state.promptDraft)
   }
 }
 
@@ -5711,10 +6106,6 @@ function installDelegatedListeners() {
     dispatchDelegated(event, DELEGATED_INPUT)
   })
 
-  root.addEventListener("scroll", (event) => {
-    if (event.target.id === "promptInput") syncPromptOverlay(event.target)
-  }, true)
-
   root.addEventListener("keydown", (event) => {
     if (event.target.id === "promptInput") {
       handlePromptKeydown(event, event.target)
@@ -5722,6 +6113,24 @@ function installDelegatedListeners() {
     }
     const renameInput = event.target.closest?.("[data-session-rename-input],[data-project-rename-input]")
     if (renameInput) handleRenameKeydown(event, renameInput)
+  })
+
+  root.addEventListener("paste", (event) => {
+    if (event.target.id !== "promptInput") return
+    event.preventDefault()
+    insertPlainTextAtSelection(event.target, event.clipboardData?.getData("text/plain") || "")
+    handlePromptInput(event.target)
+    syncPromptEditor(event.target, promptEditorCaret(event.target))
+  })
+
+  root.addEventListener("compositionstart", (event) => {
+    if (event.target.id === "promptInput") state.promptComposing = true
+  })
+
+  root.addEventListener("compositionend", (event) => {
+    if (event.target.id !== "promptInput") return
+    state.promptComposing = false
+    handlePromptInput(event.target)
   })
 
   // Cmd/Ctrl+B toggles the sidebar from anywhere (mirrors the divider tooltip

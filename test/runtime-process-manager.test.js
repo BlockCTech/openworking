@@ -744,6 +744,435 @@ test("runtime binary falls back to packaged platform opencode dependency", () =>
   }
 })
 
+test("runtime manager repairs legacy replacement_seq schema before starting the runtime", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-schema-"))
+  const projectPath = fs.mkdtempSync(path.join(temp, "project-"))
+  const configPath = path.join(temp, "opencode.json")
+  fs.writeFileSync(configPath, JSON.stringify({
+    provider: {
+      managed: {
+        options: { baseURL: "http://127.0.0.1:49152/api/v1", apiKey: "{env:TECHTUS_LOCAL_PROXY_TOKEN}" },
+        models: { "gemma/model": {} }
+      }
+    }
+  }))
+  const capturePath = path.join(temp, "capture.json")
+  const fakeRuntimePath = path.join(temp, "fake-opencode-schema.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+const fs = require("node:fs")
+const http = require("node:http")
+const args = process.argv.slice(2)
+const capturePath = ${JSON.stringify(capturePath)}
+let capture = { columns: ["session_id", "baseline", "agent", "snapshot", "baseline_seq", "revision"], dbQueries: [] }
+if (fs.existsSync(capturePath)) {
+  try { capture = JSON.parse(fs.readFileSync(capturePath, "utf8")) } catch {}
+}
+function save() { fs.writeFileSync(capturePath, JSON.stringify(capture)) }
+
+if (args[0] === "db") {
+  const query = args[1] || ""
+  capture.dbQueries.push(query)
+  if (query.includes("PRAGMA table_info(session_context_epoch)")) {
+    save()
+    process.stdout.write(JSON.stringify(capture.columns.map((name, index) => ({ cid: index, name }))))
+    process.exit(0)
+  }
+  if (query.includes("ALTER TABLE session_context_epoch ADD COLUMN replacement_seq")) {
+    if (!capture.columns.includes("replacement_seq")) capture.columns.splice(5, 0, "replacement_seq")
+    capture.altered = true
+    save()
+    process.exit(0)
+  }
+  if (query.includes("UPDATE session_context_epoch SET replacement_seq = baseline_seq")) {
+    capture.backfilled = true
+    save()
+    process.exit(0)
+  }
+  save()
+  process.stdout.write("[]")
+  process.exit(0)
+}
+
+if (args[0] !== "serve") process.exit(0)
+const port = Number(args[args.indexOf("--port") + 1])
+capture.started = true
+save()
+if (process.argv[2] === "db") {
+  const query = process.argv[3] || ""
+  if (query.includes("PRAGMA table_info(session_context_epoch)")) {
+    process.stdout.write(JSON.stringify([
+      { cid: 0, name: "session_id" },
+      { cid: 1, name: "baseline" },
+      { cid: 2, name: "agent" },
+      { cid: 3, name: "snapshot" },
+      { cid: 4, name: "baseline_seq" },
+      { cid: 5, name: "replacement_seq" },
+      { cid: 6, name: "revision" }
+    ]))
+    process.exit(0)
+  }
+  process.stdout.write("[]")
+  process.exit(0)
+}
+const server = http.createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json")
+  if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
+  if (req.url === "/session") return res.end(JSON.stringify([]))
+  if (req.url === "/command") return res.end(JSON.stringify([]))
+  if (req.url === "/event") {
+    res.setHeader("Content-Type", "text/event-stream")
+    return res.writeHead(200)
+  }
+  res.writeHead(404)
+  res.end()
+})
+server.listen(port, "127.0.0.1")
+process.on("SIGTERM", () => process.exit(0))
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  const previousConfigPath = process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  process.env.OPENWORKING_OPENCODE_CONFIG_PATH = configPath
+
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath },
+    emit() {},
+    getManagedSecretEnv: () => ({ TECHTUS_LOCAL_PROXY_TOKEN: "runtime-secret" })
+  })
+
+  try {
+    const snapshot = await manager.openProject({
+      project: { id: "proj_schema", name: "Schema Project", path: projectPath }
+    })
+    const captured = JSON.parse(fs.readFileSync(capturePath, "utf8"))
+
+    assert.equal(snapshot.status, "running")
+    assert.equal(captured.started, true)
+    assert.equal(captured.altered, true)
+    assert.equal(captured.backfilled, true)
+    assert.ok(captured.columns.includes("replacement_seq"))
+    assert.deepEqual(captured.dbQueries, [
+      "PRAGMA table_info(session_context_epoch)",
+      "ALTER TABLE session_context_epoch ADD COLUMN replacement_seq INTEGER",
+      "UPDATE session_context_epoch SET replacement_seq = baseline_seq WHERE replacement_seq IS NULL"
+    ])
+  } finally {
+    await manager.stop()
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+    if (previousConfigPath === undefined) delete process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+    else process.env.OPENWORKING_OPENCODE_CONFIG_PATH = previousConfigPath
+  }
+})
+
+test("runtime manager skips ALTER when replacement_seq already exists but still runs backfill", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-schema-current-"))
+  const projectPath = fs.mkdtempSync(path.join(temp, "project-"))
+  const configPath = path.join(temp, "opencode.json")
+  fs.writeFileSync(configPath, JSON.stringify({
+    provider: {
+      managed: {
+        options: { baseURL: "http://127.0.0.1:49152/api/v1", apiKey: "{env:TECHTUS_LOCAL_PROXY_TOKEN}" },
+        models: { "gemma/model": {} }
+      }
+    }
+  }))
+  const capturePath = path.join(temp, "capture.json")
+  const fakeRuntimePath = path.join(temp, "fake-opencode-schema-current.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+const fs = require("node:fs")
+const http = require("node:http")
+const args = process.argv.slice(2)
+const capturePath = ${JSON.stringify(capturePath)}
+  let capture = { dbQueries: [] }
+if (fs.existsSync(capturePath)) {
+  try { capture = JSON.parse(fs.readFileSync(capturePath, "utf8")) } catch {}
+}
+function save() { fs.writeFileSync(capturePath, JSON.stringify(capture)) }
+
+if (args[0] === "db") {
+  const query = args[1] || ""
+  capture.dbQueries.push(query)
+  save()
+  if (query.includes("PRAGMA table_info(session_context_epoch)")) {
+    process.stdout.write(JSON.stringify([
+      { cid: 0, name: "session_id" },
+      { cid: 1, name: "baseline" },
+      { cid: 2, name: "agent" },
+      { cid: 3, name: "snapshot" },
+      { cid: 4, name: "baseline_seq" },
+      { cid: 5, name: "replacement_seq" },
+      { cid: 6, name: "revision" }
+    ]))
+    process.exit(0)
+  }
+  if (query.includes("ALTER TABLE session_context_epoch ADD COLUMN replacement_seq")) {
+    capture.unexpectedMutation = query
+    save()
+    process.exit(0)
+  }
+  if (query.includes("UPDATE session_context_epoch SET replacement_seq = baseline_seq")) {
+    capture.backfilled = true
+    save()
+    process.exit(0)
+  }
+  save()
+  process.exit(0)
+}
+
+const port = Number(args[args.indexOf("--port") + 1])
+capture.started = true
+save()
+const server = http.createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json")
+  if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
+  if (req.url === "/session") return res.end(JSON.stringify([]))
+  if (req.url === "/command") return res.end(JSON.stringify([]))
+  if (req.url === "/event") {
+    res.setHeader("Content-Type", "text/event-stream")
+    return res.writeHead(200)
+  }
+  res.writeHead(404)
+  res.end()
+})
+server.listen(port, "127.0.0.1")
+process.on("SIGTERM", () => process.exit(0))
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  const previousConfigPath = process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  process.env.OPENWORKING_OPENCODE_CONFIG_PATH = configPath
+
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath },
+    emit() {},
+    getManagedSecretEnv: () => ({ TECHTUS_LOCAL_PROXY_TOKEN: "runtime-secret" })
+  })
+
+  try {
+    const snapshot = await manager.openProject({
+      project: { id: "proj_schema_current", name: "Schema Current", path: projectPath }
+    })
+    const captured = JSON.parse(fs.readFileSync(capturePath, "utf8"))
+
+    assert.equal(snapshot.status, "running")
+    assert.equal(captured.started, true)
+    assert.deepEqual(captured.dbQueries, [
+      "PRAGMA table_info(session_context_epoch)",
+      "UPDATE session_context_epoch SET replacement_seq = baseline_seq WHERE replacement_seq IS NULL"
+    ])
+    assert.equal(captured.backfilled, true)
+    assert.equal(captured.unexpectedMutation, undefined)
+  } finally {
+    await manager.stop()
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+    if (previousConfigPath === undefined) delete process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+    else process.env.OPENWORKING_OPENCODE_CONFIG_PATH = previousConfigPath
+  }
+})
+
+test("runtime manager keeps starting when runtime db repair preflight fails", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-schema-fallback-"))
+  const projectPath = fs.mkdtempSync(path.join(temp, "project-"))
+  const configPath = path.join(temp, "opencode.json")
+  fs.writeFileSync(configPath, JSON.stringify({
+    provider: {
+      managed: {
+        options: { baseURL: "http://127.0.0.1:49152/api/v1", apiKey: "{env:TECHTUS_LOCAL_PROXY_TOKEN}" },
+        models: { "gemma/model": {} }
+      }
+    }
+  }))
+  const capturePath = path.join(temp, "capture.json")
+  const fakeRuntimePath = path.join(temp, "fake-opencode-schema-fallback.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+const fs = require("node:fs")
+const http = require("node:http")
+const args = process.argv.slice(2)
+const capturePath = ${JSON.stringify(capturePath)}
+let capture = { dbQueries: [] }
+if (fs.existsSync(capturePath)) {
+  try { capture = JSON.parse(fs.readFileSync(capturePath, "utf8")) } catch {}
+}
+function save() { fs.writeFileSync(capturePath, JSON.stringify(capture)) }
+
+if (args[0] === "db") {
+  capture.dbQueries.push(args[1] || "")
+  save()
+  console.error("db preflight failed")
+  process.exit(1)
+}
+
+const port = Number(args[args.indexOf("--port") + 1])
+capture.started = true
+save()
+const server = http.createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json")
+  if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
+  if (req.url === "/session") return res.end(JSON.stringify([]))
+  if (req.url === "/command") return res.end(JSON.stringify([]))
+  if (req.url === "/event") {
+    res.setHeader("Content-Type", "text/event-stream")
+    return res.writeHead(200)
+  }
+  res.writeHead(404)
+  res.end()
+})
+server.listen(port, "127.0.0.1")
+process.on("SIGTERM", () => process.exit(0))
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  const previousConfigPath = process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  process.env.OPENWORKING_OPENCODE_CONFIG_PATH = configPath
+
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath },
+    emit() {},
+    getManagedSecretEnv: () => ({ TECHTUS_LOCAL_PROXY_TOKEN: "runtime-secret" })
+  })
+
+  try {
+    const snapshot = await manager.openProject({
+      project: { id: "proj_schema_fallback", name: "Schema Fallback", path: projectPath }
+    })
+    const captured = JSON.parse(fs.readFileSync(capturePath, "utf8"))
+
+    assert.equal(snapshot.status, "running")
+    assert.equal(captured.started, true)
+    assert.deepEqual(captured.dbQueries, ["PRAGMA table_info(session_context_epoch)"])
+    assert.ok(manager.snapshot().logs.some((entry) => String(entry.message || "").includes("Runtime DB schema repair skipped: db preflight failed")))
+  } finally {
+    await manager.stop()
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+    if (previousConfigPath === undefined) delete process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+    else process.env.OPENWORKING_OPENCODE_CONFIG_PATH = previousConfigPath
+  }
+})
+
+test("runtime manager retries replacement_seq backfill after a prior partial migration", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-schema-retry-"))
+  const projectPath = fs.mkdtempSync(path.join(temp, "project-"))
+  const configPath = path.join(temp, "opencode.json")
+  fs.writeFileSync(configPath, JSON.stringify({
+    provider: {
+      managed: {
+        options: { baseURL: "http://127.0.0.1:49152/api/v1", apiKey: "{env:TECHTUS_LOCAL_PROXY_TOKEN}" },
+        models: { "gemma/model": {} }
+      }
+    }
+  }))
+  const capturePath = path.join(temp, "capture.json")
+  const fakeRuntimePath = path.join(temp, "fake-opencode-schema-retry.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+const fs = require("node:fs")
+const http = require("node:http")
+const args = process.argv.slice(2)
+const capturePath = ${JSON.stringify(capturePath)}
+let capture = { dbQueries: [], backfillAttempts: 0 }
+if (fs.existsSync(capturePath)) {
+  try { capture = JSON.parse(fs.readFileSync(capturePath, "utf8")) } catch {}
+}
+function save() { fs.writeFileSync(capturePath, JSON.stringify(capture)) }
+
+if (args[0] === "db") {
+  const query = args[1] || ""
+  capture.dbQueries.push(query)
+  if (query.includes("PRAGMA table_info(session_context_epoch)")) {
+    save()
+    process.stdout.write(JSON.stringify([
+      { cid: 0, name: "session_id" },
+      { cid: 1, name: "baseline" },
+      { cid: 2, name: "agent" },
+      { cid: 3, name: "snapshot" },
+      { cid: 4, name: "baseline_seq" },
+      { cid: 5, name: "replacement_seq" },
+      { cid: 6, name: "revision" }
+    ]))
+    process.exit(0)
+  }
+  if (query.includes("UPDATE session_context_epoch SET replacement_seq = baseline_seq")) {
+    capture.backfillAttempts += 1
+    save()
+    if (capture.backfillAttempts === 1) {
+      console.error("backfill failed once")
+      process.exit(1)
+    }
+    process.exit(0)
+  }
+  save()
+  process.exit(0)
+}
+
+const port = Number(args[args.indexOf("--port") + 1])
+capture.started = true
+save()
+const server = http.createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json")
+  if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
+  if (req.url === "/session") return res.end(JSON.stringify([]))
+  if (req.url === "/command") return res.end(JSON.stringify([]))
+  if (req.url === "/event") {
+    res.setHeader("Content-Type", "text/event-stream")
+    return res.writeHead(200)
+  }
+  res.writeHead(404)
+  res.end()
+})
+server.listen(port, "127.0.0.1")
+process.on("SIGTERM", () => process.exit(0))
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  const previousConfigPath = process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  process.env.OPENWORKING_OPENCODE_CONFIG_PATH = configPath
+
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath },
+    emit() {},
+    getManagedSecretEnv: () => ({ TECHTUS_LOCAL_PROXY_TOKEN: "runtime-secret" })
+  })
+
+  try {
+    await manager.openProject({
+      project: { id: "proj_schema_retry_1", name: "Schema Retry 1", path: projectPath }
+    })
+    await manager.stop()
+    await manager.openProject({
+      project: { id: "proj_schema_retry_2", name: "Schema Retry 2", path: projectPath }
+    })
+    const captured = JSON.parse(fs.readFileSync(capturePath, "utf8"))
+
+    assert.equal(captured.started, true)
+    assert.equal(captured.backfillAttempts, 2)
+    assert.deepEqual(captured.dbQueries.filter((query) => query.includes("UPDATE session_context_epoch SET replacement_seq")), [
+      "UPDATE session_context_epoch SET replacement_seq = baseline_seq WHERE replacement_seq IS NULL",
+      "UPDATE session_context_epoch SET replacement_seq = baseline_seq WHERE replacement_seq IS NULL"
+    ])
+    assert.ok(manager.snapshot().logs.some((entry) => String(entry.message || "").includes("Runtime DB schema repair skipped: backfill failed once")))
+  } finally {
+    await manager.stop()
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+    if (previousConfigPath === undefined) delete process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+    else process.env.OPENWORKING_OPENCODE_CONFIG_PATH = previousConfigPath
+  }
+})
+
 test("runtime manager opens a project and exposes explicit session APIs", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-"))
   const projectPath = path.join(temp, "project")
@@ -761,9 +1190,30 @@ test("runtime manager opens a project and exposes explicit session APIs", async 
   }))
   const capturePath = path.join(temp, "capture.json")
   const fakeRuntimePath = path.join(temp, "fake-opencode.js")
+  const commandsDir = path.join(temp, "profile", "commands")
+  fs.mkdirSync(commandsDir, { recursive: true })
+  fs.writeFileSync(path.join(commandsDir, "stale-command"), "/stale-command\n")
   fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
 const fs = require("node:fs")
 const http = require("node:http")
+const path = require("node:path")
+if (process.argv[2] === "db") {
+  const query = process.argv[3] || ""
+  if (query.includes("PRAGMA table_info(session_context_epoch)")) {
+    process.stdout.write(JSON.stringify([
+      { cid: 0, name: "session_id" },
+      { cid: 1, name: "baseline" },
+      { cid: 2, name: "agent" },
+      { cid: 3, name: "snapshot" },
+      { cid: 4, name: "baseline_seq" },
+      { cid: 5, name: "replacement_seq" },
+      { cid: 6, name: "revision" }
+    ]))
+    process.exit(0)
+  }
+  process.stdout.write("[]")
+  process.exit(0)
+}
 const port = Number(process.argv[process.argv.indexOf("--port") + 1])
 const capturePath = ${JSON.stringify(capturePath)}
 const capture = {
@@ -786,6 +1236,13 @@ const sessions = [
   { id: "sess_existing", title: "Existing session", directory: process.cwd() },
   { id: "sess_other", title: "Other project", directory: "/tmp/other-project" }
 ]
+const skillCatalog = [
+  { name: "find-bugs", description: "Inspect code for likely defects.", location: path.join(process.env.OPENCODE_CONFIG_DIR, "skills", "find-bugs", "SKILL.md"), slash: true, content: "---\\nname: find-bugs\\n" },
+  { name: "repo-review", description: "Inspect repo-local agents skill.", location: path.join(process.cwd(), ".agents", "skills", "repo-review", "SKILL.md"), slash: true, content: "---\\nname: repo-review\\n" },
+  { name: "home-review", description: "Inspect home agents skill.", location: path.join(process.env.HOME, ".agents", "skills", "home-review", "SKILL.md"), slash: true, content: "---\\nname: home-review\\n" },
+  { name: "repo-opencode", description: "Inspect repo-local opencode skill.", location: path.join(process.cwd(), ".opencode", "skills", "repo-opencode", "SKILL.md"), slash: true, content: "---\\nname: repo-opencode\\n" },
+  { name: "home-config-opencode", description: "Inspect home config opencode skill.", location: path.join(process.env.HOME, ".config", "opencode", "skills", "home-config-opencode", "SKILL.md"), slash: true, content: "---\\nname: home-config-opencode\\n" }
+]
 function save() { fs.writeFileSync(capturePath, JSON.stringify(capture)) }
 function body(req, done) {
   let raw = ""
@@ -798,9 +1255,15 @@ const server = http.createServer((req, res) => {
   if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
   if (req.url === "/command" && req.method === "GET") return res.end(JSON.stringify([
     { name: "init", description: "guided AGENTS.md setup", source: "command", template: "Create or update AGENTS.md $ARGUMENTS", hints: ["$ARGUMENTS"] },
-    { name: "find-bugs", description: "Inspect code for likely defects.", source: "skill", template: "long skill template body", agent: "build", model: "gemma/model", hints: [] },
+    { name: "bad/name", description: "unsafe command name", source: "command", template: "broken", hints: [] },
+    { name: "find-bugs", description: "stale command description", source: "skill", template: "long skill template body", agent: "build", model: "gemma/model", hints: [] },
+    { name: "repo-review", description: "stale repo command description", source: "skill", template: "repo-local skill template", hints: [] },
+    { name: "home-review", description: "stale home command description", source: "skill", template: "home agents skill template", hints: [] },
+    { name: "repo-opencode", description: "stale repo opencode description", source: "skill", template: "repo opencode skill template", hints: [] },
+    { name: "home-config-opencode", description: "stale home config opencode description", source: "skill", template: "home config opencode skill template", hints: [] },
     { name: "mcp-thing", description: "from an MCP server", source: "mcp", template: "x", hints: [] }
   ]))
+  if (req.url === "/skill" && req.method === "GET") return res.end(JSON.stringify(skillCatalog))
   if (req.url === "/session/sess_new/command" && req.method === "POST") return body(req, data => {
     capture.command = data
     save()
@@ -934,11 +1397,87 @@ process.on("SIGTERM", () => process.exit(0))
       model: { providerID: "gateway", modelID: "gpt-4o-mini" }
     })
 
-    assert.deepEqual(await manager.listCommands(), [
-      { name: "init", description: "guided AGENTS.md setup", source: "command", agent: undefined, model: undefined, hints: ["$ARGUMENTS"] },
-      { name: "find-bugs", description: "Inspect code for likely defects.", source: "skill", agent: "build", model: "gemma/model", hints: [] },
-      { name: "mcp-thing", description: "from an MCP server", source: "mcp", agent: undefined, model: undefined, hints: [] }
+    const commands = await manager.listCommands()
+    assert.deepEqual(commands.slice(0, 2), [
+      {
+        name: "init",
+        description: "guided AGENTS.md setup",
+        source: "command",
+        agent: undefined,
+        model: undefined,
+        hints: ["$ARGUMENTS"],
+        path: path.join(temp, "profile", "commands", "init"),
+        extra: { name: "init", description: "guided AGENTS.md setup", source: "command", template: "Create or update AGENTS.md $ARGUMENTS", hints: ["$ARGUMENTS"] }
+      },
+      {
+        name: "find-bugs",
+        description: "Inspect code for likely defects.",
+        source: "skill",
+        agent: "build",
+        model: "gemma/model",
+        hints: [],
+        path: path.join(temp, "profile", "skills", "find-bugs", "SKILL.md"),
+        locationFamily: "managed_profile",
+        extra: { name: "find-bugs", description: "stale command description", source: "skill", template: "long skill template body", agent: "build", model: "gemma/model", hints: [] }
+      }
     ])
+    assert.deepEqual(commands[2], {
+      name: "repo-review",
+      description: "Inspect repo-local agents skill.",
+      source: "skill",
+      agent: undefined,
+      model: undefined,
+      hints: [],
+      path: commands[2].path,
+      locationFamily: "repo_agents",
+      extra: { name: "repo-review", description: "stale repo command description", source: "skill", template: "repo-local skill template", hints: [] }
+    })
+    assert.match(commands[2].path, /\/\.agents\/skills\/repo-review\/SKILL\.md$/)
+    assert.deepEqual(commands[3], {
+      name: "home-review",
+      description: "Inspect home agents skill.",
+      source: "skill",
+      agent: undefined,
+      model: undefined,
+      hints: [],
+      path: path.join(os.homedir(), ".agents", "skills", "home-review", "SKILL.md"),
+      locationFamily: "home_agents",
+      extra: { name: "home-review", description: "stale home command description", source: "skill", template: "home agents skill template", hints: [] }
+    })
+    assert.deepEqual(commands[4], {
+      name: "repo-opencode",
+      description: "Inspect repo-local opencode skill.",
+      source: "skill",
+      agent: undefined,
+      model: undefined,
+      hints: [],
+      path: commands[4].path,
+      locationFamily: "repo_opencode",
+      extra: { name: "repo-opencode", description: "stale repo opencode description", source: "skill", template: "repo opencode skill template", hints: [] }
+    })
+    assert.match(commands[4].path, /\/\.opencode\/skills\/repo-opencode\/SKILL\.md$/)
+    assert.deepEqual(commands[5], {
+      name: "home-config-opencode",
+      description: "Inspect home config opencode skill.",
+      source: "skill",
+      agent: undefined,
+      model: undefined,
+      hints: [],
+      path: path.join(os.homedir(), ".config", "opencode", "skills", "home-config-opencode", "SKILL.md"),
+      locationFamily: "home_config_opencode",
+      extra: { name: "home-config-opencode", description: "stale home config opencode description", source: "skill", template: "home config opencode skill template", hints: [] }
+    })
+    assert.deepEqual(commands[6], {
+      name: "mcp-thing",
+      description: "from an MCP server",
+      source: "mcp",
+      agent: undefined,
+      model: undefined,
+      hints: [],
+      extra: { name: "mcp-thing", description: "from an MCP server", source: "mcp", template: "x", hints: [] }
+    })
+    assert.equal(fs.existsSync(path.join(temp, "profile", "commands", "init")), true)
+    assert.equal(fs.existsSync(path.join(temp, "profile", "commands", "stale-command")), false)
     await manager.sendCommand({
       sessionId: "sess_new",
       command: "init",
@@ -973,6 +1512,175 @@ process.on("SIGTERM", () => process.exit(0))
     assert.equal(switched.status, "running")
     assert.equal(switched.runtime.cwd, secondProjectPath)
     assert.notEqual(switched.runtime.pid, firstPid)
+  } finally {
+    await manager.stop()
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+    if (previousConfigPath === undefined) delete process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+    else process.env.OPENWORKING_OPENCODE_CONFIG_PATH = previousConfigPath
+  }
+})
+
+test("runtime manager merges skill catalog wrapper responses into slash entries", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-skill-wrapper-"))
+  const projectPath = path.join(temp, "project")
+  fs.mkdirSync(projectPath)
+  const configPath = path.join(temp, "opencode.json")
+  fs.writeFileSync(configPath, JSON.stringify({ provider: {} }))
+  const fakeRuntimePath = path.join(temp, "fake-opencode-skill-wrapper.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+const http = require("node:http")
+const path = require("node:path")
+if (process.argv[2] === "db") {
+  process.stdout.write(JSON.stringify([{ cid: 0, name: "replacement_seq" }]))
+  process.exit(0)
+}
+const port = Number(process.argv[process.argv.indexOf("--port") + 1])
+const server = http.createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json")
+  if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
+  if (req.url === "/session") return res.end(JSON.stringify([]))
+  if (req.url === "/command" && req.method === "GET") {
+    return res.end(JSON.stringify({
+      location: { directory: process.cwd(), project: { id: "proj_wrapper", directory: process.cwd() } },
+      data: [
+        { name: "wrapper-skill", description: "stale wrapper description", source: "skill", template: "wrapper template", hints: [] },
+        { name: "fallback-skill", description: "fallback command description", source: "skill", template: "fallback template", hints: [] }
+      ]
+    }))
+  }
+  if (req.url === "/skill" && req.method === "GET") {
+    return res.end(JSON.stringify({
+      location: { directory: process.cwd(), project: { id: "proj_wrapper", directory: process.cwd() } },
+      data: [
+        { name: "wrapper-skill", description: "wrapper description", slash: true, location: path.join(process.env.HOME, ".opencode", "skills", "wrapper-skill", "SKILL.md"), content: "---\\nname: wrapper-skill\\n" }
+      ]
+    }))
+  }
+  if (req.url === "/event") {
+    res.setHeader("Content-Type", "text/event-stream")
+    return res.writeHead(200)
+  }
+  res.writeHead(404)
+  res.end()
+})
+server.listen(port, "127.0.0.1")
+process.on("SIGTERM", () => process.exit(0))
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  const previousConfigPath = process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  process.env.OPENWORKING_OPENCODE_CONFIG_PATH = configPath
+
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath },
+    emit() {},
+    getManagedSecretEnv: () => ({})
+  })
+
+  try {
+    await manager.openProject({ project: { id: "proj_wrapper", name: "Wrapper Project", path: projectPath } })
+    const commands = await manager.listCommands()
+    assert.deepEqual(commands[0], {
+      name: "wrapper-skill",
+      description: "wrapper description",
+      source: "skill",
+      agent: undefined,
+      model: undefined,
+      hints: [],
+      path: path.join(os.homedir(), ".opencode", "skills", "wrapper-skill", "SKILL.md"),
+      locationFamily: "home_opencode",
+      extra: { name: "wrapper-skill", description: "stale wrapper description", source: "skill", template: "wrapper template", hints: [] }
+    })
+    assert.deepEqual(commands[1], {
+      name: "fallback-skill",
+      description: "fallback command description",
+      source: "skill",
+      agent: undefined,
+      model: undefined,
+      hints: [],
+      path: path.join(temp, "profile", "skills", "fallback-skill", "SKILL.md"),
+      locationFamily: "managed_profile",
+      extra: { name: "fallback-skill", description: "fallback command description", source: "skill", template: "fallback template", hints: [] }
+    })
+  } finally {
+    await manager.stop()
+    if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
+    else process.env.OPENWORKING_RUNTIME_BIN = previousRuntimeBin
+    if (previousConfigPath === undefined) delete process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+    else process.env.OPENWORKING_OPENCODE_CONFIG_PATH = previousConfigPath
+  }
+})
+
+test("runtime manager keeps command catalog working when skill catalog fetch fails", async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-skill-fail-"))
+  const projectPath = path.join(temp, "project")
+  fs.mkdirSync(projectPath)
+  const configPath = path.join(temp, "opencode.json")
+  fs.writeFileSync(configPath, JSON.stringify({ provider: {} }))
+  const fakeRuntimePath = path.join(temp, "fake-opencode-skill-fail.js")
+  fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+const http = require("node:http")
+if (process.argv[2] === "db") {
+  process.stdout.write(JSON.stringify([{ cid: 0, name: "replacement_seq" }]))
+  process.exit(0)
+}
+const port = Number(process.argv[process.argv.indexOf("--port") + 1])
+const server = http.createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json")
+  if (req.url === "/global/health") return res.end(JSON.stringify({ ok: true }))
+  if (req.url === "/session") return res.end(JSON.stringify([]))
+  if (req.url === "/command" && req.method === "GET") {
+    return res.end(JSON.stringify([
+      { name: "fallback-skill", description: "fallback command description", source: "skill", template: "fallback template", hints: [] }
+    ]))
+  }
+  if (req.url === "/skill" && req.method === "GET") {
+    res.writeHead(500)
+    return res.end(JSON.stringify({ error: "skill catalog unavailable" }))
+  }
+  if (req.url === "/event") {
+    res.setHeader("Content-Type", "text/event-stream")
+    return res.writeHead(200)
+  }
+  res.writeHead(404)
+  res.end()
+})
+server.listen(port, "127.0.0.1")
+process.on("SIGTERM", () => process.exit(0))
+`)
+  fs.chmodSync(fakeRuntimePath, 0o755)
+
+  const previousRuntimeBin = process.env.OPENWORKING_RUNTIME_BIN
+  const previousConfigPath = process.env.OPENWORKING_OPENCODE_CONFIG_PATH
+  process.env.OPENWORKING_RUNTIME_BIN = fakeRuntimePath
+  process.env.OPENWORKING_OPENCODE_CONFIG_PATH = configPath
+
+  const manager = new RuntimeProcessManager({
+    userDataPath: path.join(temp, "user-data"),
+    profile: { profileDir: path.join(temp, "profile"), configPath },
+    emit() {},
+    getManagedSecretEnv: () => ({})
+  })
+
+  try {
+    await manager.openProject({ project: { id: "proj_fallback", name: "Fallback Project", path: projectPath } })
+    const commands = await manager.listCommands()
+    assert.deepEqual(commands, [{
+      name: "fallback-skill",
+      description: "fallback command description",
+      source: "skill",
+      agent: undefined,
+      model: undefined,
+      hints: [],
+      path: path.join(temp, "profile", "skills", "fallback-skill", "SKILL.md"),
+      locationFamily: "managed_profile",
+      extra: { name: "fallback-skill", description: "fallback command description", source: "skill", template: "fallback template", hints: [] }
+    }])
+    assert.ok(manager.snapshot().logs.some((entry) => String(entry.message || "").includes("Skill catalog fetch failed: HTTP 500")))
   } finally {
     await manager.stop()
     if (previousRuntimeBin === undefined) delete process.env.OPENWORKING_RUNTIME_BIN
@@ -1301,6 +2009,23 @@ test("reload respawns the running project so updated credentials take effect", a
   fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
 const fs = require("node:fs")
 const http = require("node:http")
+if (process.argv[2] === "db") {
+  const query = process.argv[3] || ""
+  if (query.includes("PRAGMA table_info(session_context_epoch)")) {
+    process.stdout.write(JSON.stringify([
+      { cid: 0, name: "session_id" },
+      { cid: 1, name: "baseline" },
+      { cid: 2, name: "agent" },
+      { cid: 3, name: "snapshot" },
+      { cid: 4, name: "baseline_seq" },
+      { cid: 5, name: "replacement_seq" },
+      { cid: 6, name: "revision" }
+    ]))
+    process.exit(0)
+  }
+  process.stdout.write("[]")
+  process.exit(0)
+}
 const port = Number(process.argv[process.argv.indexOf("--port") + 1])
 fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({ apiKey: process.env.OPENWORKING_TRANSLATION_API_KEY }))
 const server = http.createServer((req, res) => {
@@ -1419,12 +2144,83 @@ test("concurrent openProject calls retry serially after a failed start", async (
   assert.equal(thirdSnapshot.status, "running")
 })
 
+test("concurrent createSession calls share one request and clear the guard after settle", async () => {
+  let createCalls = 0
+  let shouldFail = false
+  const originalRequest = http.request
+  http.request = (options, callback) => {
+    const req = new EventEmitter()
+    let rawBody = ""
+    req.write = (chunk) => { rawBody += chunk }
+    req.end = () => {
+      createCalls += 1
+      const response = new EventEmitter()
+      response.statusCode = shouldFail ? 500 : 200
+      response.setEncoding = () => {}
+      setTimeout(() => {
+        callback(response)
+        response.emit("data", shouldFail
+          ? JSON.stringify({ error: "create failed" })
+          : JSON.stringify({ id: `sess_${createCalls}`, title: JSON.parse(rawBody || "{}").title || "New session" }))
+        response.emit("end")
+      }, 25)
+    }
+    req.destroy = () => {}
+    assert.equal(options.path, "/session")
+    assert.equal(options.method, "POST")
+    return req
+  }
+  const manager = readyManager("http://127.0.0.1:43123")
+
+  try {
+    const [first, second] = await Promise.all([
+      manager.createSession({ title: "New session" }),
+      manager.createSession({ title: "Ignored duplicate title" })
+    ])
+    assert.equal(createCalls, 1)
+    assert.strictEqual(first, second)
+    assert.equal(first.id, "sess_1")
+    assert.equal(manager.createSessionInFlight, null)
+
+    shouldFail = true
+    await assert.rejects(Promise.all([
+      manager.createSession({ title: "Will fail" }),
+      manager.createSession({ title: "Will also fail" })
+    ]), /create failed/)
+    assert.equal(createCalls, 2)
+    assert.equal(manager.createSessionInFlight, null)
+
+    shouldFail = false
+    assert.equal((await manager.createSession({ title: "Retry works" })).id, "sess_3")
+    assert.equal(createCalls, 3)
+  } finally {
+    http.request = originalRequest
+  }
+})
+
 test("runtime startup failures include recent child stderr", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-runtime-startup-fail-"))
   const projectPath = path.join(temp, "project")
   fs.mkdirSync(projectPath)
   const fakeRuntimePath = path.join(temp, "fake-opencode.js")
   fs.writeFileSync(fakeRuntimePath, `#!/usr/bin/env node
+if (process.argv[2] === "db") {
+  const query = process.argv[3] || ""
+  if (query.includes("PRAGMA table_info(session_context_epoch)")) {
+    process.stdout.write(JSON.stringify([
+      { cid: 0, name: "session_id" },
+      { cid: 1, name: "baseline" },
+      { cid: 2, name: "agent" },
+      { cid: 3, name: "snapshot" },
+      { cid: 4, name: "baseline_seq" },
+      { cid: 5, name: "replacement_seq" },
+      { cid: 6, name: "revision" }
+    ]))
+    process.exit(0)
+  }
+  process.stdout.write("[]")
+  process.exit(0)
+}
 console.error("fatal startup detail")
 process.exit(2)
 `)
@@ -1690,6 +2486,72 @@ test("reads wait for an in-flight restart instead of throwing 'Runtime is not ru
     assert.equal(served, 1)
   } finally {
     await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test("reads wait during an actual reload stop-to-start lifecycle", async () => {
+  const manager = readyManager("http://127.0.0.1:43123")
+  manager.state.project = { id: "proj_1", path: "/tmp/project" }
+  const originalRequest = http.request
+
+  let stopCalls = 0
+  let openCalls = 0
+  let releaseStop
+  let requestCount = 0
+  manager.stop = async () => {
+    stopCalls += 1
+    manager.child = null
+    manager.state.status = "stopping"
+    await new Promise((resolve) => { releaseStop = resolve })
+    manager.state.status = "stopped"
+    return manager.snapshot()
+  }
+  manager._openProject = async ({ project }) => {
+    openCalls += 1
+    manager.state.project = project
+    manager.state.status = "running"
+    manager.child = {}
+    manager.state.runtime = {
+      ...manager.state.runtime,
+      cwd: project.path
+    }
+    return manager.snapshot()
+  }
+
+  http.request = (options, callback) => {
+    requestCount += 1
+    const req = new EventEmitter()
+    req.write = () => {}
+    req.end = () => {
+      const response = new EventEmitter()
+      response.statusCode = 200
+      response.setEncoding = () => {}
+      setTimeout(() => {
+        callback(response)
+        response.emit("data", JSON.stringify([]))
+        response.emit("end")
+      }, 0)
+    }
+    req.destroy = () => {}
+    return req
+  }
+
+  try {
+    const reloaded = manager.reload()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(stopCalls, 1)
+    assert.equal(openCalls, 0)
+    const read = manager.listMessages({ sessionId: "sess_x" })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    assert.equal(requestCount, 0)
+
+    releaseStop()
+    await Promise.all([reloaded, read])
+    assert.equal(openCalls, 1)
+    assert.equal(requestCount, 1)
+    assert.equal(manager.lifecycle, null)
+  } finally {
+    http.request = originalRequest
   }
 })
 

@@ -14,3 +14,5 @@ playwright/.cache/
 /build/*
 /design/*
 /tmp/*
+
+.codegraph

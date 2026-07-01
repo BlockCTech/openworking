@@ -1,11 +1,26 @@
 const test = require("node:test")
 const assert = require("node:assert/strict")
 
+const optimisticUserCalls = []
+let optimisticUserId = 0
+
 global.window = {
   addEventListener() {},
   removeEventListener() {},
   OpenWorkingThreadStream: {
-    addOptimisticUser() {},
+    addOptimisticUser(thread, text, attachments = [], options = {}) {
+      optimisticUserCalls.push({ thread, text, attachments, options })
+      const id = `local_${++optimisticUserId}`
+      if (Array.isArray(thread?.messages)) {
+        thread.messages.push({
+          id,
+          role: "user",
+          optimistic: true,
+          parts: [{ type: "text", text }]
+        })
+      }
+      return id
+    },
     applyThreadEvent() {},
     clearPendingPermission(thread, requestID) {
       if (!Array.isArray(thread?.pendingPermissions)) return false
@@ -53,21 +68,28 @@ global.localStorage = {
   removeItem() {}
 }
 
+function resetOptimisticUserCalls() {
+  optimisticUserCalls.length = 0
+}
+
 const {
   applyPendingFileMentions,
   chooseSessionAfterRuntimeReconnect,
   collectLiveFileMentions,
   computePromptAttachments,
+  canonicalToken,
   fileMentionTokenForPath,
   fileMentionTokenPattern,
   filterPromptAttachments,
   livePendingFileMentions,
   loadAllSessions,
+  parsePromptTokens,
+  removeComposerTokenBoundary,
+  renderPromptTokensHtml,
   sessionsForProjectPath,
   loadStoredExpanded,
   persistExpanded,
-  renderPromptOverlayHtml,
-  renderTextWithFileMentions,
+  replaceComposerQuery,
   resolveFileMentionsFromPrompt,
   setProjectSessions,
   sessionRowKey,
@@ -653,24 +675,277 @@ test("renderer submit attachments become text-only only when non-command file me
   )
 })
 
-test("prompt overlay highlights live file mention tokens inline", () => {
-  const mentions = [{ token: "@README.md", path: "app/models/api_v2/README.md", name: "README.md" }]
-  const html = renderPromptOverlayHtml("đọc @README.md giúp tôi", mentions)
+test("canonical file tokens parse into static chip html", () => {
+  const html = renderPromptTokensHtml("Read [README.md](app/models/api_v2/README.md)")
   assert.match(html, /file-mention-token/)
-  assert.match(html, /@README\.md/)
+  assert.match(html, /README\.md/)
 })
 
-test("prompt overlay does not highlight invalidated tokens", () => {
-  const mentions = [{ token: "@README.md", path: "app/models/api_v2/README.md", name: "README.md" }]
-  const html = renderPromptOverlayHtml("đọc @README.md. giúp tôi", mentions)
-  assert.doesNotMatch(html, /file-mention-token/)
+test("canonical skill tokens parse into static chip html", () => {
+  const previousCommands = __test.state.commands
+  try {
+    __test.state.commands = [{
+      name: "explain-project",
+      source: "skill",
+      description: "Explain project",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/explain-project/SKILL.md"
+    }]
+    const html = renderPromptTokensHtml("Use [explain-project](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/explain-project/SKILL.md)")
+    assert.match(html, /file-mention-token/)
+    assert.match(html, /skill-token/)
+    assert.match(html, /explain-project/)
+  } finally {
+    __test.state.commands = previousCommands
+  }
 })
 
-test("user message rendering does not highlight basename substrings inside invalid tokens", () => {
-  const mentions = [{ token: "@README.md", path: "app/models/api_v2/README.md", name: "README.md" }]
-  const html = renderTextWithFileMentions("đọc @README.mdx giúp tôi", mentions)
+test("repo-local .agents skill tokens parse into static chip html", () => {
+  const previousCommands = __test.state.commands
+  try {
+    __test.state.commands = [{
+      name: "review-skill",
+      source: "skill",
+      description: "Review from repo-local agents skill",
+      path: "/Users/me/workspace/project/.agents/skills/review-skill/SKILL.md"
+    }]
+    const html = renderPromptTokensHtml("Use [review-skill](/Users/me/workspace/project/.agents/skills/review-skill/SKILL.md)")
+    assert.match(html, /file-mention-token/)
+    assert.match(html, /skill-token/)
+    assert.match(html, /review-skill/)
+  } finally {
+    __test.state.commands = previousCommands
+  }
+})
+
+test("home .agents skill tokens parse into static chip html", () => {
+  const previousCommands = __test.state.commands
+  try {
+    __test.state.commands = [{
+      name: "home-review",
+      source: "skill",
+      description: "Review from home agents skill",
+      path: "/Users/me/.agents/skills/home-review/SKILL.md",
+      locationFamily: "home_agents"
+    }]
+    const html = renderPromptTokensHtml("Use [home-review](/Users/me/.agents/skills/home-review/SKILL.md)")
+    assert.match(html, /file-mention-token/)
+    assert.match(html, /skill-token/)
+    assert.match(html, /home-review/)
+  } finally {
+    __test.state.commands = previousCommands
+  }
+})
+
+test("repo-local .opencode skill tokens parse into static chip html", () => {
+  const previousCommands = __test.state.commands
+  try {
+    __test.state.commands = [{
+      name: "repo-opencode",
+      source: "skill",
+      description: "Review from repo-local opencode skill",
+      path: "/Users/me/workspace/project/.opencode/skills/repo-opencode/SKILL.md",
+      locationFamily: "repo_opencode"
+    }]
+    const html = renderPromptTokensHtml("Use [repo-opencode](/Users/me/workspace/project/.opencode/skills/repo-opencode/SKILL.md)")
+    assert.match(html, /file-mention-token/)
+    assert.match(html, /skill-token/)
+    assert.match(html, /repo-opencode/)
+  } finally {
+    __test.state.commands = previousCommands
+  }
+})
+
+test("canonical command tokens parse into static chip html", () => {
+  const previousCommands = __test.state.commands
+  try {
+    __test.state.commands = [{
+      name: "review",
+      source: "command",
+      description: "Review changes",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review"
+    }]
+    const html = renderPromptTokensHtml("Run [review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review)")
+    assert.match(html, /file-mention-token/)
+    assert.match(html, /command-token/)
+    assert.match(html, /review/)
+  } finally {
+    __test.state.commands = previousCommands
+  }
+})
+
+test("mixed skill chip and @file mention both render as chips", () => {
+  const previousCommands = __test.state.commands
+  try {
+    __test.state.commands = [{
+      name: "explain-project",
+      source: "skill",
+      description: "Explain project",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/explain-project/SKILL.md"
+    }]
+    const html = renderPromptTokensHtml(
+      "Use [explain-project](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/explain-project/SKILL.md) with @README.md",
+      [{ token: "@README.md", path: "docs/README.md", name: "README.md" }]
+    )
+    assert.match(html, /skill-token/)
+    assert.match(html, /@README\.md/)
+    assert.match(html, /title="docs\/README\.md"/)
+  } finally {
+    __test.state.commands = previousCommands
+  }
+})
+
+test("non-managed skill paths stay plain text", () => {
+  const previousCommands = __test.state.commands
+  try {
+    __test.state.commands = [{
+      name: "explain-project",
+      source: "skill",
+      description: "Explain project",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/explain-project/SKILL.md"
+    }]
+    const html = renderPromptTokensHtml("Use [explain-project](resources/opencode/skills/explain-project/SKILL.md)")
+    assert.doesNotMatch(html, /skill-token/)
+    assert.match(html, /\[explain-project\]\(resources\/opencode\/skills\/explain-project\/SKILL\.md\)/)
+  } finally {
+    __test.state.commands = previousCommands
+  }
+})
+
+test("unknown command tokens stay plain text in the renderer", () => {
+  const previousCommands = __test.state.commands
+  try {
+    __test.state.commands = [{
+      name: "review",
+      source: "command",
+      description: "Review changes",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review"
+    }]
+    const html = renderPromptTokensHtml("Run [unknown](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/unknown)")
+    assert.doesNotMatch(html, /command-token/)
+    assert.match(html, /\[unknown\]\(\/Users\/me\/Library\/Application Support\/TechTusCoWork\/opencode-profile\/commands\/unknown\)/)
+  } finally {
+    __test.state.commands = previousCommands
+  }
+})
+
+test("non-supported markdown links stay plain text", () => {
+  const html = renderPromptTokensHtml("Read [docs](https://example.com)")
   assert.doesNotMatch(html, /file-mention-token/)
-  assert.match(html, /@README\.mdx/)
+  assert.match(html, /\[docs\]\(https:\/\/example\.com\)/)
+})
+
+test("parsePromptTokens leaves unsupported links as text parts", () => {
+  assert.deepEqual(parsePromptTokens("Read [docs](https://example.com)"), [
+    { type: "text", text: "Read " },
+    { type: "text", text: "[docs](https://example.com)" }
+  ])
+})
+
+test("local markdown links with descriptive labels stay plain text", () => {
+  const html = renderPromptTokensHtml("Read [docs](notes/guide.md)")
+  assert.doesNotMatch(html, /file-mention-token/)
+  assert.match(html, /\[docs\]\(notes\/guide\.md\)/)
+})
+
+test("file suggestion selection replaces @query with canonical file token", () => {
+  const next = replaceComposerQuery({
+    text: "read @README.md now",
+    caret: 15,
+    trigger: "file",
+    label: "README.md",
+    path: "app/models/api_v2/README.md"
+  })
+  assert.equal(next.text, "read [README.md](app/models/api_v2/README.md) now")
+  assert.equal(next.caret, "read [README.md](app/models/api_v2/README.md)".length)
+})
+
+test("slash skill selection replaces /query with a canonical skill token", () => {
+  const next = replaceComposerQuery({
+    text: "use /understand-dashboard",
+    caret: 25,
+    trigger: "slash",
+    label: "understand-dashboard",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md",
+    source: "skill"
+  })
+  assert.equal(
+    next.text,
+    "use [understand-dashboard](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md)"
+  )
+  assert.equal(next.caret, "use [understand-dashboard](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/understand-dashboard/SKILL.md)".length)
+})
+
+test("slash skill selection keeps a repo-local .agents skill path", () => {
+  const next = replaceComposerQuery({
+    text: "use /review-skill",
+    caret: 17,
+    trigger: "slash",
+    label: "review-skill",
+    path: "/Users/me/workspace/project/.agents/skills/review-skill/SKILL.md",
+    source: "skill"
+  })
+  assert.equal(
+    next.text,
+    "use [review-skill](/Users/me/workspace/project/.agents/skills/review-skill/SKILL.md)"
+  )
+  assert.equal(next.caret, "use [review-skill](/Users/me/workspace/project/.agents/skills/review-skill/SKILL.md)".length)
+})
+
+test("slash skill selection keeps a home .config/opencode skill path", () => {
+  const next = replaceComposerQuery({
+    text: "use /home-config-opencode",
+    caret: 26,
+    trigger: "slash",
+    label: "home-config-opencode",
+    path: "/Users/me/.config/opencode/skills/home-config-opencode/SKILL.md",
+    source: "skill"
+  })
+  assert.equal(
+    next.text,
+    "use [home-config-opencode](/Users/me/.config/opencode/skills/home-config-opencode/SKILL.md)"
+  )
+  assert.equal(next.caret, "use [home-config-opencode](/Users/me/.config/opencode/skills/home-config-opencode/SKILL.md)".length)
+})
+
+test("slash command selection replaces /query with a canonical command token", () => {
+  const next = replaceComposerQuery({
+    text: "run /review",
+    caret: 11,
+    trigger: "slash",
+    label: "review",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review",
+    source: "command"
+  })
+  assert.equal(next.text, "run [review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review)")
+  assert.equal(next.caret, "run [review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review)".length)
+})
+
+test("slash command selection preserves suffix text after inserting a command token", () => {
+  const next = replaceComposerQuery({
+    text: "run /review please",
+    caret: 11,
+    trigger: "slash",
+    label: "review",
+    path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review",
+    source: "command"
+  })
+  assert.equal(next.text, "run [review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review) please")
+  assert.equal(next.caret, "run [review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review)".length)
+})
+
+test("canonicalToken formats label and path", () => {
+  assert.equal(canonicalToken("README.md", "app/models/api_v2/README.md"), "[README.md](app/models/api_v2/README.md)")
+})
+
+test("backspace after canonical token removes the whole token", () => {
+  const text = "read [README.md](app/models/api_v2/README.md) now"
+  const next = removeComposerTokenBoundary({
+    text,
+    caret: "read [README.md](app/models/api_v2/README.md)".length,
+    direction: "backward"
+  })
+  assert.equal(next.text, "read  now")
+  assert.equal(next.caret, "read ".length)
 })
 
 test("typed @file tokens resolve from project files without menu selection", () => {
@@ -905,6 +1180,7 @@ test("sendPrompt ignores concurrent first-send submits while session creation is
     firstSendInFlight: false,
     pendingAttachments: [],
     pendingFileMentions: [],
+    commands: [{ name: "review", source: "command", description: "Review changes" }],
     commandMenu: { open: false, query: "", index: 0 },
     fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
     loading: false,
@@ -928,6 +1204,886 @@ test("sendPrompt ignores concurrent first-send submits while session creation is
     assert.deepEqual(state.sessionsByProject.proj_1.map((session) => session.id), ["sess_new"])
     assert.equal(state.threads.has("sess_new"), true)
     assert.equal(state.firstSendInFlight, false)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt dispatches a leading raw slash command through sendCommand", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      },
+      async sendCommand(payload) {
+        calls.push(["command", payload])
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commands: [{ name: "review", source: "command", description: "Review changes" }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    resetOptimisticUserCalls()
+    await sendPrompt("/review for this diff")
+
+    assert.deepEqual(calls, [[
+      "command",
+      {
+        sessionId: "sess_existing",
+        command: "review",
+        arguments: "for this diff",
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }
+    ]])
+    assert.equal(optimisticUserCalls.length, 1)
+    assert.equal(optimisticUserCalls[0].text, "/review for this diff")
+    assert.equal(optimisticUserCalls[0].options.signatureText, "/review for this diff")
+    assert.equal(optimisticUserCalls[0].options.selectedSkill, undefined)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt keeps a selected skill token on prompt flow", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      },
+      async sendCommand(payload) {
+        calls.push(["command", payload])
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commands: [{
+      name: "use-backlog",
+      source: "skill",
+      description: "Use backlog skill",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md"
+    }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    resetOptimisticUserCalls()
+    await sendPrompt("[use-backlog](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md) for this ticket")
+
+    assert.deepEqual(calls, [[
+      "prompt",
+      {
+        sessionId: "sess_existing",
+        prompt: "[use-backlog](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md) for this ticket",
+        attachmentIds: [],
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }
+    ]])
+    assert.equal(optimisticUserCalls.length, 1)
+    assert.deepEqual(optimisticUserCalls[0].options.selectedSkill, {
+      kind: "skill",
+      label: "use-backlog",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md",
+      raw: "[use-backlog](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md)",
+      args: "for this ticket"
+    })
+    assert.equal(optimisticUserCalls[0].options.selectedCommand, undefined)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt keeps a repo-local .agents selected skill token on prompt flow", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      },
+      async sendCommand(payload) {
+        calls.push(["command", payload])
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commands: [{
+      name: "review-skill",
+      source: "skill",
+      description: "Repo-local review skill",
+      path: "/tmp/project/.agents/skills/review-skill/SKILL.md"
+    }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    resetOptimisticUserCalls()
+    await sendPrompt("[review-skill](/tmp/project/.agents/skills/review-skill/SKILL.md) compare this flow")
+
+    assert.deepEqual(calls, [[
+      "prompt",
+      {
+        sessionId: "sess_existing",
+        prompt: "[review-skill](/tmp/project/.agents/skills/review-skill/SKILL.md) compare this flow",
+        attachmentIds: [],
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }
+    ]])
+    assert.deepEqual(optimisticUserCalls[0].options.selectedSkill, {
+      kind: "skill",
+      label: "review-skill",
+      path: "/tmp/project/.agents/skills/review-skill/SKILL.md",
+      raw: "[review-skill](/tmp/project/.agents/skills/review-skill/SKILL.md)",
+      args: "compare this flow"
+    })
+    assert.equal(optimisticUserCalls[0].options.selectedCommand, undefined)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt keeps a home .opencode selected skill token on prompt flow", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      },
+      async sendCommand(payload) {
+        calls.push(["command", payload])
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commands: [{
+      name: "home-opencode",
+      source: "skill",
+      description: "Home opencode skill",
+      path: "/Users/me/.opencode/skills/home-opencode/SKILL.md",
+      locationFamily: "home_opencode"
+    }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    resetOptimisticUserCalls()
+    await sendPrompt("[home-opencode](/Users/me/.opencode/skills/home-opencode/SKILL.md) compare this flow")
+
+    assert.deepEqual(calls, [[
+      "prompt",
+      {
+        sessionId: "sess_existing",
+        prompt: "[home-opencode](/Users/me/.opencode/skills/home-opencode/SKILL.md) compare this flow",
+        attachmentIds: [],
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }
+    ]])
+    assert.deepEqual(optimisticUserCalls[0].options.selectedSkill, {
+      kind: "skill",
+      label: "home-opencode",
+      path: "/Users/me/.opencode/skills/home-opencode/SKILL.md",
+      raw: "[home-opencode](/Users/me/.opencode/skills/home-opencode/SKILL.md)",
+      args: "compare this flow"
+    })
+    assert.equal(optimisticUserCalls[0].options.selectedCommand, undefined)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt creates a new session title from a skill token label instead of its path", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const createSessionCalls = []
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async createSession(payload) {
+        createSessionCalls.push(payload)
+        return { id: "sess_new", title: payload.title, directory: "/tmp/project" }
+      },
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      },
+      async sendCommand(payload) {
+        calls.push(["command", payload])
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: null,
+    sessionsByProject: {},
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    firstSendInFlight: false,
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commands: [{
+      name: "skill",
+      source: "skill",
+      description: "Skill",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/skill/SKILL.md"
+    }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    resetOptimisticUserCalls()
+    await sendPrompt("[skill](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/skill/SKILL.md) này ý nghĩa là gì?")
+
+    assert.deepEqual(createSessionCalls, [{ title: "skill này ý nghĩa là gì?" }])
+    assert.deepEqual(calls, [[
+      "prompt",
+      {
+        sessionId: "sess_new",
+        prompt: "[skill](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/skill/SKILL.md) này ý nghĩa là gì?",
+        attachmentIds: [],
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }
+    ]])
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt dispatches a selected command token through sendCommand", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      },
+      async sendCommand(payload) {
+        calls.push(["command", payload])
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commands: [{
+      name: "review",
+      source: "command",
+      description: "Review changes",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review"
+    }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    resetOptimisticUserCalls()
+    await sendPrompt("[review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review) for this diff")
+
+    assert.deepEqual(calls, [[
+      "command",
+      {
+        sessionId: "sess_existing",
+        command: "review",
+        arguments: "for this diff",
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }
+    ]])
+    assert.equal(optimisticUserCalls.length, 1)
+    assert.equal(optimisticUserCalls[0].text, "[review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review) for this diff")
+    assert.deepEqual(optimisticUserCalls[0].options.selectedCommand, {
+      kind: "command",
+      label: "review",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review",
+      raw: "[review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review)",
+      args: "for this diff"
+    })
+    assert.equal(optimisticUserCalls[0].options.selectedSkill, undefined)
+    assert.equal(
+      optimisticUserCalls[0].options.signatureText,
+      "[review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review) for this diff"
+    )
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt resolves canonical file tokens inside selected command arguments", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      },
+      async sendCommand(payload) {
+        calls.push(["command", payload])
+      }
+    },
+    attachments: {
+      async addProjectFile(filePath) {
+        calls.push(["attachment", filePath])
+        return { id: "att_zip", filename: "bundle.zip", mime: "application/octet-stream" }
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [{ id: "stale", filename: "bundle.zip", mime: "application/octet-stream" }],
+    pendingFileMentions: [],
+    commands: [{
+      name: "review",
+      source: "command",
+      description: "Review changes",
+      path: "/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review"
+    }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: {
+      open: false,
+      query: "",
+      index: 0,
+      files: ["/tmp/project/src/api.py", "/tmp/project/archive/bundle.zip"],
+      loading: false,
+      error: "",
+      projectId: "proj_1",
+      loadPromise: null
+    },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    resetOptimisticUserCalls()
+    await sendPrompt("[review](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/commands/review) inspect [api.py](/tmp/project/src/api.py) and [bundle.zip](/tmp/project/archive/bundle.zip)")
+
+    assert.deepEqual(calls, [
+      ["attachment", "/tmp/project/archive/bundle.zip"],
+      ["command", {
+        sessionId: "sess_existing",
+        command: "review",
+        arguments: "inspect `/tmp/project/src/api.py` and [bundle.zip](/tmp/project/archive/bundle.zip)",
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }]
+    ])
+    assert.equal(optimisticUserCalls.length, 1)
+    assert.equal(optimisticUserCalls[0].attachments.length, 1)
+    assert.deepEqual(optimisticUserCalls[0].options.fileRefs, [
+      { token: "[api.py](/tmp/project/src/api.py)", path: "/tmp/project/src/api.py", name: "api.py" },
+      { token: "[bundle.zip](/tmp/project/archive/bundle.zip)", path: "/tmp/project/archive/bundle.zip", name: "bundle.zip" }
+    ])
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt keeps unknown command-like markdown tokens as plain text", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      },
+      async sendCommand(payload) {
+        calls.push(["command", payload])
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commands: [{ name: "use-backlog", source: "skill", description: "Use backlog skill" }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    resetOptimisticUserCalls()
+    await sendPrompt("[unknown](commands/unknown) for this ticket")
+
+    assert.deepEqual(calls, [[
+      "prompt",
+      {
+        sessionId: "sess_existing",
+        prompt: "[unknown](commands/unknown) for this ticket",
+        attachmentIds: [],
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }
+    ]])
+    assert.equal(optimisticUserCalls[0].options.selectedSkill, undefined)
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt routes @zip file mentions through attachments instead of inline text", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    attachments: {
+      async addProjectFile(filePath) {
+        calls.push(["attach", filePath])
+        return { id: "att_zip", filename: "archive.zip", mime: "application/zip" }
+      },
+      async discard() {}
+    },
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(["prompt", payload])
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: {
+      open: false,
+      query: "",
+      index: 0,
+      files: ["docs/archive.zip"],
+      loading: false,
+      error: "",
+      projectId: "proj_1",
+      loadPromise: null
+    },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    await sendPrompt("Read @archive.zip")
+
+    assert.deepEqual(calls, [
+      ["attach", "docs/archive.zip"],
+      ["prompt", {
+        sessionId: "sess_existing",
+        prompt: "Read @archive.zip",
+        attachmentIds: ["att_zip"],
+        agent: "build",
+        model: { providerID: "mynavitechtus", modelID: "model-one" }
+      }]
+    ])
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("send button click uses the contenteditable draft instead of promptInput.value", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  const document = fakeDocument()
+  global.document = document
+  global.requestAnimationFrame = (callback) => {
+    callback()
+    return 1
+  }
+
+  const calls = []
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt(payload) {
+        calls.push(payload)
+      }
+    }
+  }
+
+  const { handleAction, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", title: "Existing" }] },
+    threads: new Map(),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    promptDraft: "Send from draft",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    await handleAction({
+      currentTarget: {
+        dataset: { action: "sendPrompt" }
+      }
+    })
+
+    assert.deepEqual(calls, [{
+      sessionId: "sess_existing",
+      prompt: "Send from draft",
+      attachmentIds: [],
+      agent: "build",
+      model: { providerID: "mynavitechtus", modelID: "model-one" }
+    }])
   } finally {
     state.toast = null
     global.document = previousDocument
@@ -1015,6 +2171,40 @@ test("sendPrompt clears the first-send guard after a session-creation failure", 
     state.toast = null
     global.document = previousDocument
     global.requestAnimationFrame = previousRequestAnimationFrame
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("handlePromptKeydown ignores Enter while IME composition is active", () => {
+  let prevented = false
+  const previousOpenworking = global.window.openworking
+  global.window.openworking = {
+    runtime: {
+      async sendPrompt() {
+        assert.fail("IME Enter should not submit the prompt")
+      }
+    }
+  }
+
+  const { handlePromptKeydown, state } = __test
+  Object.assign(state, {
+    promptDraft: "dang go tieng viet",
+    promptComposing: false,
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null }
+  })
+
+  try {
+    handlePromptKeydown({
+      key: "Enter",
+      shiftKey: false,
+      isComposing: true,
+      preventDefault() { prevented = true }
+    }, fakeElement())
+
+    assert.equal(prevented, false)
+  } finally {
+    state.promptComposing = false
     global.window.openworking = previousOpenworking
   }
 })
