@@ -7,6 +7,7 @@ const AdmZip = require("adm-zip")
 const {
   BROWSER_MCP_NAME,
   BUILT_IN_SKILLS,
+  applyModelReasoningMode,
   ensureBrowserMcpServer,
   ensureOpenworkingProfile,
   installCustomSkillArchive,
@@ -133,9 +134,7 @@ test("migrates managed model defaults without replacing explicit capabilities", 
   assert.equal(migratedModel.temperature, true)
   assert.equal(migratedModel.tool_call, true)
   assert.deepEqual(migratedModel.options, {
-    max_completion_tokens: 32000,
-    reasoning_effort: "high",
-    include_reasoning: true
+    max_completion_tokens: 32000
   })
 
   migratedModel.modalities = {
@@ -165,6 +164,8 @@ test("editable profile saves preserve locked provider and model fields", () => {
   model.name = "changed-model"
   model.modalities.input = ["text"]
   model.modalities.output = ["image"]
+  model.options.reasoningEffort = "xhigh"
+  model.options.include_reasoning = true
   edits.provider.injected = { npm: "malicious-package", options: {}, models: {} }
   edits.plugin = ["local-plugin"]
   edits.permission.skill["find-bugs"] = "deny"
@@ -181,9 +182,71 @@ test("editable profile saves preserve locked provider and model fields", () => {
     input: ["text"],
     output: ["text"]
   })
+  assert.deepEqual(saved.provider.gateway.models["gpt-4o-mini"].options, {
+    max_completion_tokens: 32000
+  })
   assert.equal(saved.provider.injected, undefined)
   assert.deepEqual(saved.plugin, ["local-plugin"])
   assert.equal(saved.permission.skill["find-bugs"], "deny")
+})
+
+test("runtime reasoning helper applies modes, clears none, and reports no-ops", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-profile-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const seeded = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  seeded.provider.gateway.models["gpt-4o-mini"].options = {
+    max_completion_tokens: 1024,
+    reasoning_effort: "medium",
+    includeReasoning: false
+  }
+  writeProfileConfig(profile, seeded)
+
+  const applied = applyModelReasoningMode(profile, {
+    providerID: "gateway",
+    modelID: "gpt-4o-mini",
+    mode: "xhigh"
+  })
+  assert.equal(applied.changed, true)
+
+  let saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  let savedOptions = saved.provider.gateway.models["gpt-4o-mini"].options
+  assert.deepEqual(savedOptions, {
+    max_completion_tokens: 32000,
+    reasoningEffort: "xhigh",
+    include_reasoning: true
+  })
+  assert.equal(Object.hasOwn(savedOptions, "reasoning_effort"), false)
+  assert.equal(Object.hasOwn(savedOptions, "includeReasoning"), false)
+
+  const repeated = applyModelReasoningMode(profile, {
+    providerID: "gateway",
+    modelID: "gpt-4o-mini",
+    mode: "xhigh"
+  })
+  assert.equal(repeated.changed, false)
+
+  assert.throws(() => applyModelReasoningMode(profile, {
+    providerID: "gateway",
+    modelID: "gpt-4o-mini",
+    mode: "low"
+  }), /Unsupported reasoning mode/)
+
+  const cleared = applyModelReasoningMode(profile, {
+    providerID: "gateway",
+    modelID: "gpt-4o-mini",
+    mode: "none"
+  })
+  assert.equal(cleared.changed, true)
+  saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  savedOptions = saved.provider.gateway.models["gpt-4o-mini"].options
+  assert.deepEqual(savedOptions, { max_completion_tokens: 32000 })
+
+  const clearedAgain = applyModelReasoningMode(profile, {
+    providerID: "gateway",
+    modelID: "gpt-4o-mini",
+    mode: "none"
+  })
+  assert.equal(clearedAgain.changed, false)
 })
 
 test("bootstraps default agent prompts and preserves them across a config-screen save", () => {
@@ -221,6 +284,34 @@ test("back-fills agent prompts into an existing profile on relaunch", () => {
   assert.ok(saved.agent.build.prompt.length > 0)
   assert.equal(typeof saved.agent.plan.prompt, "string")
   assert.ok(saved.agent.plan.prompt.length > 0)
+})
+
+test("normalizes reasoning option aliases for SDK and gateway wire fields", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-profile-"))
+  const profile = ensureOpenworkingProfile({ userDataPath: temp })
+  const config = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  const model = config.provider.gateway.models["gpt-4o-mini"]
+  model.options = {
+    max_completion_tokens: 32000,
+    reasoning_effort: "medium",
+    include_reasoning: false
+  }
+  fs.writeFileSync(profile.configPath, `${JSON.stringify(config, null, 2)}\n`)
+
+  ensureOpenworkingProfile({ userDataPath: temp })
+
+  const saved = JSON.parse(fs.readFileSync(profile.configPath, "utf8"))
+  const xdgSaved = JSON.parse(fs.readFileSync(profile.xdgConfigPath, "utf8"))
+  for (const migrated of [saved, xdgSaved]) {
+    const migratedOptions = migrated.provider.gateway.models["gpt-4o-mini"].options
+    assert.deepEqual(migratedOptions, {
+      max_completion_tokens: 32000,
+      reasoningEffort: "medium",
+      include_reasoning: false
+    })
+    assert.equal(Object.hasOwn(migratedOptions, "reasoning_effort"), false)
+    assert.equal(Object.hasOwn(migratedOptions, "includeReasoning"), false)
+  }
 })
 
 test("sync replaces changed resource trees, removes retired managed skills and preserves custom skills", () => {

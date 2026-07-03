@@ -86,7 +86,7 @@ sequenceDiagram
 
 - `ensureOpenworkingProfile` (chạy lúc launch + open-project) đồng bộ idempotent skills/tools từ `resources/opencode/` vào profile, dùng SHA-256 digest + manifest (`.openworking-skills.json`/`.openworking-tools.json`) để bỏ qua phần không đổi và xoá phần đã gỡ.
 - `opencode.json` được **validate offline** bằng Ajv với schema nhúng (`resources/opencode/schemas/`) trước khi ghi — input sai (vd modality lạ) bị từ chối mà không đổi file đã lưu.
-- Config screen chỉ sửa: provider `baseURL`/`apiKey`, model **input** modalities, optional plugins, skill toggles. Phần còn lại read-only. API key bị redact khỏi JSON preview.
+- Config screen chỉ sửa: provider `baseURL`/`apiKey`, model **input** modalities, optional plugins, skill toggles. Phần còn lại read-only. Reasoning effort là control theo session trong composer; trước khi gửi prompt app apply mode đó vào profile model options rồi reload runtime nếu cần, vì OpenCode 1.17.13 không nhận per-request reasoning options. API key bị redact khỏi JSON preview.
 
 ## 5. Provider Config Lane
 

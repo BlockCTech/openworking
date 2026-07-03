@@ -1137,6 +1137,7 @@ test("sendPrompt ignores concurrent first-send submits while session creation is
 
   let createSessionCalls = 0
   let sendPromptCalls = 0
+  let sentPromptPayload = null
   let resolveSession = null
   const sessionReady = new Promise((resolve) => {
     resolveSession = resolve
@@ -1148,8 +1149,9 @@ test("sendPrompt ignores concurrent first-send submits while session creation is
         await sessionReady
         return { id: "sess_new", title: "Please inspect this", directory: "/tmp/project" }
       },
-      async sendPrompt() {
+      async sendPrompt(payload) {
         sendPromptCalls += 1
+        sentPromptPayload = payload
       }
     }
   }
@@ -1176,6 +1178,8 @@ test("sendPrompt ignores concurrent first-send submits while session creation is
     providerId: "mynavitechtus",
     selectedModelKey: "mynavitechtus/model-one",
     mode: "agent",
+    reasoningBySession: new Map(),
+    newSessionReasoningMode: "xhigh",
     promptDraft: "",
     firstSendInFlight: false,
     pendingAttachments: [],
@@ -1203,6 +1207,9 @@ test("sendPrompt ignores concurrent first-send submits while session creation is
     assert.equal(state.activeSessionId, "sess_new")
     assert.deepEqual(state.sessionsByProject.proj_1.map((session) => session.id), ["sess_new"])
     assert.equal(state.threads.has("sess_new"), true)
+    assert.equal(state.reasoningBySession.get("sess_new"), "xhigh")
+    assert.equal(state.newSessionReasoningMode, "none")
+    assert.equal(sentPromptPayload.reasoningMode, "xhigh")
     assert.equal(state.firstSendInFlight, false)
   } finally {
     state.toast = null
@@ -1278,6 +1285,7 @@ test("sendPrompt dispatches a leading raw slash command through sendCommand", as
         command: "review",
         arguments: "for this diff",
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }
     ]])
@@ -1364,6 +1372,7 @@ test("sendPrompt keeps a selected skill token on prompt flow", async () => {
         prompt: "[use-backlog](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/use-backlog/SKILL.md) for this ticket",
         attachmentIds: [],
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }
     ]])
@@ -1455,6 +1464,7 @@ test("sendPrompt keeps a repo-local .agents selected skill token on prompt flow"
         prompt: "[review-skill](/tmp/project/.agents/skills/review-skill/SKILL.md) compare this flow",
         attachmentIds: [],
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }
     ]])
@@ -1546,6 +1556,7 @@ test("sendPrompt keeps a home .opencode selected skill token on prompt flow", as
         prompt: "[home-opencode](/Users/me/.opencode/skills/home-opencode/SKILL.md) compare this flow",
         attachmentIds: [],
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }
     ]])
@@ -1643,6 +1654,7 @@ test("sendPrompt creates a new session title from a skill token label instead of
         prompt: "[skill](/Users/me/Library/Application Support/TechTusCoWork/opencode-profile/skills/skill/SKILL.md) này ý nghĩa là gì?",
         attachmentIds: [],
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }
     ]])
@@ -1725,6 +1737,7 @@ test("sendPrompt dispatches a selected command token through sendCommand", async
         command: "review",
         arguments: "for this diff",
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }
     ]])
@@ -1836,6 +1849,7 @@ test("sendPrompt resolves canonical file tokens inside selected command argument
         command: "review",
         arguments: "inspect `/tmp/project/src/api.py` and [bundle.zip](/tmp/project/archive/bundle.zip)",
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }]
     ])
@@ -1919,6 +1933,7 @@ test("sendPrompt keeps unknown command-like markdown tokens as plain text", asyn
         prompt: "[unknown](commands/unknown) for this ticket",
         attachmentIds: [],
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }
     ]])
@@ -2008,6 +2023,7 @@ test("sendPrompt routes @zip file mentions through attachments instead of inline
         prompt: "Read @archive.zip",
         attachmentIds: ["att_zip"],
         agent: "build",
+        reasoningMode: "none",
         model: { providerID: "mynavitechtus", modelID: "model-one" }
       }]
     ])
@@ -2082,6 +2098,7 @@ test("send button click uses the contenteditable draft instead of promptInput.va
       prompt: "Send from draft",
       attachmentIds: [],
       agent: "build",
+      reasoningMode: "none",
       model: { providerID: "mynavitechtus", modelID: "model-one" }
     }])
   } finally {
@@ -2205,6 +2222,70 @@ test("handlePromptKeydown ignores Enter while IME composition is active", () => 
     assert.equal(prevented, false)
   } finally {
     state.promptComposing = false
+    global.window.openworking = previousOpenworking
+  }
+})
+
+test("sendPrompt includes session reasoning mode for slash commands", async () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  const previousOpenworking = global.window.openworking
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+
+  let sentCommandPayload = null
+  global.window.openworking = {
+    runtime: {
+      async sendCommand(payload) {
+        sentCommandPayload = payload
+      }
+    }
+  }
+
+  const { sendPrompt, state } = __test
+  Object.assign(state, {
+    nav: "session",
+    projects: [{ id: "proj_1", name: "Project", path: "/tmp/project" }],
+    activeProjectId: "proj_1",
+    activeSessionId: "sess_existing",
+    sessionsByProject: { proj_1: [{ id: "sess_existing", directory: "/tmp/project" }] },
+    threads: new Map([["sess_existing", { sessionId: "sess_existing", messages: [], pendingQuestions: [], pendingPermissions: [], status: { type: "idle" } }]]),
+    runtime: { status: "running", project: { id: "proj_1" }, sessionStatuses: {} },
+    auth: { saml2Enabled: false },
+    config: {
+      provider: {
+        mynavitechtus: {
+          name: "Provider",
+          options: { apiKey: "local-key" },
+          models: { "model-one": { name: "model-one", modalities: { input: ["text"], output: ["text"] } } }
+        }
+      }
+    },
+    providerId: "mynavitechtus",
+    selectedModelKey: "mynavitechtus/model-one",
+    mode: "agent",
+    reasoningBySession: new Map([["sess_existing", "high"]]),
+    newSessionReasoningMode: "none",
+    promptDraft: "",
+    pendingAttachments: [],
+    pendingFileMentions: [],
+    commands: [{ name: "init", source: "command", description: "" }],
+    commandMenu: { open: false, query: "", index: 0 },
+    fileMentionMenu: { open: false, query: "", index: 0, files: [], loading: false, error: "", projectId: null, loadPromise: null },
+    loading: false,
+    toast: null
+  })
+
+  try {
+    await sendPrompt("/init focus on setup")
+
+    assert.equal(sentCommandPayload.reasoningMode, "high")
+    assert.equal(sentCommandPayload.command, "init")
+    assert.equal(sentCommandPayload.arguments, "focus on setup")
+  } finally {
+    state.toast = null
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
     global.window.openworking = previousOpenworking
   }
 })
@@ -2636,6 +2717,81 @@ test("dispatchDelegated stops after the first matching entry (most-specific wins
   ]
   dispatchDelegated(fakeDelegatedEvent({ "data-session-menu": "ses_1", "data-session-id": "ses_1" }), table)
   assert.deepEqual(calls, ["menu"], "a kebab click must not also trigger the row's selectSession")
+})
+
+test("composer renders compact reasoning control and keeps reasoning per session", () => {
+  const previousDocument = global.document
+  const previousRequestAnimationFrame = global.requestAnimationFrame
+  global.document = fakeDocument()
+  global.requestAnimationFrame = (callback) => { callback(); return 1 }
+  const { currentReasoningMode, renderComposer, setCurrentReasoningMode, state } = __test
+  const previous = {
+    config: state.config,
+    activeSessionId: state.activeSessionId,
+    reasoningBySession: state.reasoningBySession,
+    newSessionReasoningMode: state.newSessionReasoningMode,
+    popover: state.popover,
+    providerId: state.providerId,
+    selectedModelKey: state.selectedModelKey
+  }
+  try {
+    state.providerId = "mynavitechtus"
+    state.selectedModelKey = "mynavitechtus/google/gemma-4-31B-it"
+    state.activeSessionId = null
+    state.reasoningBySession = new Map()
+    state.newSessionReasoningMode = "none"
+    state.popover = "reasoning"
+    state.config = {
+      provider: {
+        mynavitechtus: {
+          npm: "@ai-sdk/openai-compatible",
+          name: "Gemma 4-31B",
+          options: { baseURL: "http://127.0.0.1:1234/api/v1", apiKey: "" },
+          models: {
+            "google/gemma-4-31B-it": {
+              name: "google/gemma-4-31B-it",
+              modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+              options: { max_completion_tokens: 32000 }
+            }
+          }
+        }
+      }
+    }
+
+    const html = renderComposer({ id: "proj_1", name: "Project" })
+    assert.match(html, /data-popover="reasoning"/)
+    assert.match(html, /class="reasoning-control/)
+    assert.match(html, /None - let the model decide whether to use reasoning/)
+    assert.match(html, /None does not send reasoning settings/)
+    assert.match(html, /Extra High/)
+    assert.doesNotMatch(html, /data-model-reasoning/)
+
+    setCurrentReasoningMode("xhigh", { keepPopover: true })
+    assert.equal(state.popover, "reasoning")
+    assert.equal(state.newSessionReasoningMode, "xhigh")
+
+    setCurrentReasoningMode("xhigh")
+    assert.equal(state.newSessionReasoningMode, "xhigh")
+
+    state.activeSessionId = "sess_a"
+    setCurrentReasoningMode("xhigh")
+    state.activeSessionId = "sess_b"
+    assert.equal(currentReasoningMode(), "none")
+    setCurrentReasoningMode("medium")
+    assert.equal(state.reasoningBySession.get("sess_b"), "medium")
+    state.activeSessionId = "sess_a"
+    assert.equal(currentReasoningMode(), "xhigh")
+  } finally {
+    state.config = previous.config
+    state.activeSessionId = previous.activeSessionId
+    state.reasoningBySession = previous.reasoningBySession
+    state.newSessionReasoningMode = previous.newSessionReasoningMode
+    state.popover = previous.popover
+    state.providerId = previous.providerId
+    state.selectedModelKey = previous.selectedModelKey
+    global.document = previousDocument
+    global.requestAnimationFrame = previousRequestAnimationFrame
+  }
 })
 
 test("session menu state is scoped by project and session row", () => {

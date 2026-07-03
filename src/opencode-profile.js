@@ -4,6 +4,7 @@ const path = require("node:path")
 const AdmZip = require("adm-zip")
 const { defaultConfigPath, ensureDefaultAgentPrompt, ensureDefaultManagedModelConfig, ensureOpencodeConfig, readOpencodeConfig, writeOpencodeConfig } = require("./opencode-config")
 const { applyProjectInstruction, ensureGlobalMemory } = require("./memory-store")
+const REASONING_EFFORTS = new Set(["medium", "high", "xhigh"])
 const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MCP_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const MCP_SERVER_TYPES = ["remote", "local"]
@@ -610,6 +611,32 @@ function writeProfileConfig(profile, config) {
   return written
 }
 
+function clearReasoningOptions(options) {
+  delete options.reasoningEffort
+  delete options.reasoning_effort
+  delete options.include_reasoning
+  delete options.includeReasoning
+}
+
+function applyModelReasoningMode(profile, { providerID, modelID, mode = "none" } = {}) {
+  if (!providerID || !modelID) return { changed: false, ...readProfileConfig(profile) }
+  if (mode !== "none" && !REASONING_EFFORTS.has(mode)) throw new Error(`Unsupported reasoning mode: ${mode}`)
+  const current = readProfileConfig(profile)
+  const model = current.config.provider?.[providerID]?.models?.[modelID]
+  if (!model) return { changed: false, ...current }
+  model.options ||= {}
+  const before = JSON.stringify(model.options)
+  clearReasoningOptions(model.options)
+  if (mode !== "none") {
+    model.options.max_completion_tokens = 32000
+    model.options.reasoningEffort = mode
+    model.options.include_reasoning = true
+  }
+  if (JSON.stringify(model.options) === before) return { changed: false, ...current }
+  const written = writeProfileConfig(profile, current.config)
+  return { changed: true, ...written }
+}
+
 function writeEditableProfileConfig(profile, edits) {
   const config = readProfileConfig(profile).config
   const submittedProviders = edits?.provider || {}
@@ -673,6 +700,7 @@ module.exports = {
   bundledSkillsDir,
   defaultProfileDir,
   directoryDigest,
+  applyModelReasoningMode,
   ensureOpenworkingProfile,
   ensureSkillPermissions,
   installCustomSkillArchive,

@@ -13,9 +13,7 @@ const DEFAULT_MODEL_LIMIT = {
   output: 32000
 }
 const DEFAULT_MODEL_OPTIONS = {
-  max_completion_tokens: 32000,
-  reasoning_effort: "high",
-  include_reasoning: true
+  max_completion_tokens: 32000
 }
 const DEFAULT_MODEL_ID = "gpt-4o-mini"
 const DEFAULT_MODEL_CONFIG = {
@@ -171,12 +169,26 @@ function ensureDefaultManagedModelConfig(config) {
       if (model.temperature === undefined) model.temperature = true
       if (model.tool_call === undefined) model.tool_call = true
       model.options ||= {}
+      normalizeModelOptionAliases(model.options)
       for (const [key, value] of Object.entries(DEFAULT_MODEL_OPTIONS)) {
         if (model.options[key] === undefined) model.options[key] = value
       }
     }
   }
   return config
+}
+
+function normalizeModelOptionAliases(options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) return options
+  if (Object.hasOwn(options, "reasoning_effort")) {
+    if (options.reasoningEffort === undefined) options.reasoningEffort = options.reasoning_effort
+    delete options.reasoning_effort
+  }
+  if (Object.hasOwn(options, "includeReasoning")) {
+    if (options.include_reasoning === undefined) options.include_reasoning = options.includeReasoning
+    delete options.includeReasoning
+  }
+  return options
 }
 
 // Back-fill the default system prompts for the build/plan agents. Fills a prompt
@@ -237,6 +249,7 @@ module.exports = {
   ensureDefaultAgentPrompt,
   ensureDefaultManagedModelConfig,
   readOpencodeConfig,
+  normalizeModelOptionAliases,
   writeOpencodeConfig,
   ensureOpencodeConfig
 }

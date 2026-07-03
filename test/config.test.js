@@ -37,9 +37,7 @@ test("creates the default opencode config when the file is missing", () => {
   assert.equal(model.temperature, true)
   assert.equal(model.tool_call, true)
   assert.deepEqual(model.options, {
-    max_completion_tokens: 32000,
-    reasoning_effort: "high",
-    include_reasoning: true
+    max_completion_tokens: 32000
   })
   assert.deepEqual(result.config.plugin, [])
   assert.equal(typeof result.config.agent.build.prompt, "string")

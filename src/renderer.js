@@ -1,5 +1,12 @@
 const SUPERPOWERS_PLUGIN = "superpowers@git+https://github.com/obra/superpowers.git"
 const ALLOWED_MODEL_MODALITIES = ["text", "audio", "image", "video", "pdf"]
+const REASONING_EFFORTS = ["medium", "high", "xhigh"]
+const REASONING_OPTIONS = [
+  { id: "none", label: "None", shortLabel: "None", title: "None - let the model decide whether to use reasoning" },
+  { id: "medium", label: "Medium", shortLabel: "Medium", title: "Medium reasoning effort" },
+  { id: "high", label: "High", shortLabel: "High", title: "High reasoning effort" },
+  { id: "xhigh", label: "Extra High", shortLabel: "Extra High", title: "Extra High reasoning effort" }
+]
 const BUILT_IN_SKILLS = [
   { name: "explain-project", description: "Explain project structure and execution paths." },
   { name: "find-bugs", description: "Inspect code for likely defects and risky behavior." },
@@ -187,6 +194,8 @@ const state = {
   modalityErrors: {},
   providerId: "gateway",
   mode: "agent",
+  reasoningBySession: new Map(),
+  newSessionReasoningMode: "none",
   planAutoOpened: null,
   planAccepted: null,
   planProposal: null,
@@ -666,6 +675,36 @@ function selectedModel() {
     state.selectedModelKey = models[0]?.key || ""
   }
   return models.find((model) => model.key === state.selectedModelKey) || null
+}
+
+function normalizeReasoningMode(mode) {
+  return REASONING_EFFORTS.includes(mode) ? mode : "none"
+}
+
+function reasoningModeLabel(mode) {
+  return REASONING_OPTIONS.find((option) => option.id === normalizeReasoningMode(mode))?.label || "None"
+}
+
+function reasoningModeShortLabel(mode) {
+  return REASONING_OPTIONS.find((option) => option.id === normalizeReasoningMode(mode))?.shortLabel || "None"
+}
+
+function reasoningModeTitle(mode) {
+  return REASONING_OPTIONS.find((option) => option.id === normalizeReasoningMode(mode))?.title || REASONING_OPTIONS[0].title
+}
+
+function currentReasoningMode() {
+  if (state.activeSessionId) return normalizeReasoningMode(state.reasoningBySession.get(state.activeSessionId))
+  return normalizeReasoningMode(state.newSessionReasoningMode)
+}
+
+function setCurrentReasoningMode(mode, { keepPopover = false } = {}) {
+  const next = normalizeReasoningMode(mode)
+  if (state.activeSessionId) state.reasoningBySession.set(state.activeSessionId, next)
+  else state.newSessionReasoningMode = next
+  if (!keepPopover) state.popover = null
+  render()
+  document.getElementById("promptInput")?.focus()
 }
 
 function runtimeLabel() {
@@ -3415,9 +3454,35 @@ function renderFileMentionMenu() {
   return `<div class="pop pop-up prompt-pop cmd-pop"><div class="pop-label">Project files</div>${rows}</div>`
 }
 
+function renderReasoningMenu(selected) {
+  const rows = REASONING_OPTIONS.map((option) => `
+    <button class="reasoning-option ${option.id === selected ? "active" : ""}" data-reasoning-mode="${escapeHtml(option.id)}" title="${escapeHtml(option.title)}" aria-label="${escapeHtml(option.title)}">
+      <span class="reasoning-dot"></span>
+      <span>${escapeHtml(option.shortLabel)}</span>
+    </button>
+  `).join("")
+  return `
+    <div class="pop pop-up reasoning-pop">
+      <div class="reasoning-pop-head">
+        <span>Effort</span><strong>${escapeHtml(reasoningModeLabel(selected))}</strong>
+        <button class="reasoning-help" type="button" aria-label="About reasoning effort" title="About reasoning effort">
+          ${icon("ask")}
+          <span class="reasoning-help-tip" role="tooltip">
+            <strong>Effort</strong>
+            <span>None does not send reasoning settings; the model decides whether to use reasoning. Higher effort can produce more thorough responses, but takes longer and uses limits faster.</span>
+          </span>
+        </button>
+      </div>
+      <div class="reasoning-pop-scale-labels"><span>Faster</span><span>Smarter</span></div>
+      <div class="reasoning-scale">${rows}</div>
+    </div>
+  `
+}
+
 function renderComposer(project, dock = false) {
   const planOn = state.mode === "plan"
   const model = selectedModel()
+  const reasoningMode = currentReasoningMode()
   const abortable = threadAbortable()
   const placeholder = `${dock ? "Reply to" : "Describe a task for"} ${project.name}...`
   return `
@@ -3442,6 +3507,12 @@ function renderComposer(project, dock = false) {
         <span class="mode-label ${planOn ? "plan" : ""}">${planOn ? "Plan" : "Execution"}</span>
         <span class="spacer"></span>
         <span class="model-label">${escapeHtml(model?.name || "No model configured")}</span>
+        <div class="popover-anchor">
+          <button class="reasoning-control ${reasoningMode !== "none" ? "on" : ""}" data-popover="reasoning" title="${escapeHtml(reasoningModeTitle(reasoningMode))}" aria-label="${escapeHtml(reasoningModeTitle(reasoningMode))}">
+            <span>${escapeHtml(reasoningModeShortLabel(reasoningMode))}</span>${icon("chevDown")}
+          </button>
+          ${state.popover === "reasoning" ? renderReasoningMenu(reasoningMode) : ""}
+        </div>
         <button class="send ${abortable || state.promptDraft.trim() ? "" : "disabled"}" data-action="${abortable ? "abortSession" : "sendPrompt"}" title="${abortable ? "Stop response" : "Send"}" aria-label="${abortable ? "Stop response" : "Send"}">${icon(abortable ? "stop" : "arrowUp")}</button>
       </div>
     </div>
@@ -4367,6 +4438,7 @@ async function forkAssistantMessage(messageId) {
   if (!forked?.id) throw new Error("OpenCode did not return a forked session.")
 
   flushActiveStreamPacing()
+  state.reasoningBySession.set(forked.id, currentReasoningMode())
   state.activeProjectId = project.id
   state.activeSessionId = forked.id
   state.nav = "session"
@@ -4663,6 +4735,7 @@ function pruneThreads(keepSessionIds) {
       streamPacer.clearSession(sessionId)
       state.threads.delete(sessionId)
       state.forkMarkers.delete(sessionId)
+      state.reasoningBySession.delete(sessionId)
     }
   }
 }
@@ -4790,6 +4863,7 @@ async function deleteSession(target) {
   })
   state.threads.delete(sessionId)
   state.forkMarkers.delete(sessionId)
+  state.reasoningBySession.delete(sessionId)
   if (state.activeProjectId === projectId && state.activeSessionId === sessionId) {
     state.activeSessionId = null
     resetActiveThread()
@@ -4991,10 +5065,13 @@ async function sendPrompt(rawPrompt) {
       if (state.firstSendInFlight) return
       state.firstSendInFlight = true
       ownsFirstSendGuard = true
+      const draftReasoningMode = normalizeReasoningMode(state.newSessionReasoningMode)
       const titleText = promptTitleText(prompt) || prompt
       const title = titleText.length > 54 ? `${titleText.slice(0, 53).trim()}...` : titleText
       const session = await window.openworking.runtime.createSession({ title })
       state.activeSessionId = session.id
+      state.reasoningBySession.set(session.id, draftReasoningMode)
+      state.newSessionReasoningMode = "none"
       setProjectSessions(project.id, [session, ...projectSessions(project.id)], "active")
       // Discard the unsaved "new session" draft thread and start a clean thread under
       // the real session id, so subsequent stream events route to it by sessionID.
@@ -5028,12 +5105,14 @@ async function sendPrompt(rawPrompt) {
     state.pendingFileMentions = state.pendingFileMentions.filter((fileMention) => !fileMentions.some((sent) => sent.token === fileMention.token))
     render({ threadScroll: "latest" })
     const model = selectedModel()
+    const reasoningMode = currentReasoningMode()
     if (command) {
       await window.openworking.runtime.sendCommand({
         sessionId: state.activeSessionId,
         command,
         arguments: effectiveCommandArgs,
         agent: mode.agent,
+        reasoningMode,
         model: model ? { providerID: model.providerID, modelID: model.modelID } : undefined
       })
     } else {
@@ -5042,6 +5121,7 @@ async function sendPrompt(rawPrompt) {
         prompt: effectivePrompt,
         attachmentIds: attachments.map((attachment) => attachment.id),
         agent: mode.agent,
+        reasoningMode,
         model: model ? { providerID: model.providerID, modelID: model.modelID } : undefined
       })
     }
@@ -5598,11 +5678,14 @@ if (typeof module !== "undefined" && module.exports) {
       deleteSession,
       forkAssistantMessage,
       refreshSessionData,
+      currentReasoningMode,
+      renderComposer,
       renderMessageActions,
       renderThreadMessages,
       renderThreadMessage,
       selectSession,
       sendPrompt,
+      setCurrentReasoningMode,
       state,
       dispatchDelegated,
       delegationShim,
@@ -5740,6 +5823,7 @@ const DELEGATED_CLICK = [
     state.popover = null
     render()
   }],
+  ["data-reasoning-mode", (e) => setCurrentReasoningMode(e.currentTarget.dataset.reasoningMode, { keepPopover: true })],
   ["data-chip", (e) => sendPrompt(chips[Number(e.currentTarget.dataset.chip)].text)],
   ["data-provider", (e) => {
     state.providerId = e.currentTarget.dataset.provider

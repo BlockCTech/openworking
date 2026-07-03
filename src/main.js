@@ -3,7 +3,7 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { assertTranslationArtifact, assertProjectFile, listProjectDirectory, previewTranslationArtifact, readProjectFileContent } = require("./artifact-path")
 const { AttachmentRegistry } = require("./attachment-registry")
-const { ensureBrowserMcpServer, ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, setActiveProjectMemory, writeEditableProfileConfig } = require("./opencode-profile")
+const { applyModelReasoningMode, ensureBrowserMcpServer, ensureOpenworkingProfile, installCustomSkillArchive, listCustomSkills, readSkillMarkdown, uninstallCustomSkill, addMcpServer, updateMcpServer, listMcpServers, removeMcpServer, setMcpServerEnabled, readProfileConfig, setActiveProjectMemory, writeEditableProfileConfig } = require("./opencode-profile")
 const browserBridge = require("./browser-bridge")
 const { SCOPES, ensureProjectMemory, readMemory, writeMemory } = require("./memory-store")
 const { ProjectRegistry } = require("./project-registry")
@@ -65,6 +65,18 @@ let pinRegistry = null
 let runtimeManager = null
 let opencodeProfile = null
 const attachmentRegistry = new AttachmentRegistry()
+
+async function applyReasoningModeBeforeRuntimeSend(payload) {
+  if (!opencodeProfile || !runtimeManager || !Object.hasOwn(payload || {}, "reasoningMode")) return
+  const model = payload?.model
+  if (!model?.providerID || !model?.modelID) return
+  const result = applyModelReasoningMode(opencodeProfile, {
+    providerID: model.providerID,
+    modelID: model.modelID,
+    mode: payload.reasoningMode || "none"
+  })
+  if (result.changed) await runtimeManager.reload()
+}
 
 const APP_DISPLAY_NAME = "OpenWorking"
 
@@ -557,12 +569,16 @@ function registerIpc() {
   ipcMain.handle("runtime:sendPrompt", async (_event, payload) => {
     const attachmentIds = Array.isArray(payload?.attachmentIds) ? payload.attachmentIds : []
     const attachments = attachmentRegistry.resolve(attachmentIds)
+    await applyReasoningModeBeforeRuntimeSend(payload)
     const result = await runtimeManager.sendPrompt({ ...payload, attachments })
     attachmentRegistry.discard(attachmentIds)
     return result
   })
   ipcMain.handle("runtime:listMessages", (_event, payload) => runtimeManager.listMessages(payload))
-  ipcMain.handle("runtime:sendCommand", (_event, payload) => runtimeManager.sendCommand(payload))
+  ipcMain.handle("runtime:sendCommand", async (_event, payload) => {
+    await applyReasoningModeBeforeRuntimeSend(payload)
+    return runtimeManager.sendCommand(payload)
+  })
   ipcMain.handle("runtime:abortSession", (_event, payload) => runtimeManager.abortSession(payload))
   ipcMain.handle("runtime:deleteSession", (_event, payload) => runtimeManager.deleteSession(payload))
   ipcMain.handle("runtime:forkSession", (_event, payload) => runtimeManager.forkSession(payload))

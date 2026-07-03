@@ -10,6 +10,7 @@ OpenWorking is a **local-first desktop shell for [OpenCode](https://opencode.ai)
 - Add, open, rename and remove local project entries.
 - Open existing sessions or create a new session from the project accordion.
 - Choose Agent (`build`) or Plan (`plan`) mode and a configured model.
+- Choose reasoning effort per chat session from the composer.
 - Attach local files to a prompt through the native file picker.
 - Send prompts and read the live chat thread (streamed over SSE).
 - Human-in-the-loop approval cards for file edits and shell commands.
