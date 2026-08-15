@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: 🤔 Help & Questions
-    url: https://community.auth0.com
-    about: Ask general support or usage questions in the Auth0 Community forums
+    url: https://github.com/BlockCTech/openworking/issues
+    about: Search existing issues or ask a general OpenWorking question

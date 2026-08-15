@@ -1,21 +1,21 @@
 name: 🐞 Report a bug
-description: Have you found a bug or issue? Create a bug report for this library
+description: Report a reproducible problem in OpenWorking
 labels: ["bug"]
 
 body:
   - type: markdown
     attributes:
       value: |
-        **Please do not report security vulnerabilities here**. The [Responsible Disclosure Program](https://auth0.com/responsible-disclosure-policy) details the procedure for disclosing security issues.
+        **Please do not report security vulnerabilities in a public issue**. Follow the [security policy](https://github.com/BlockCTech/openworking/blob/main/SECURITY.md) to report security issues privately.
 
   - type: checkboxes
     id: checklist
     attributes:
       label: Checklist
       options:
-        - label: I have searched the [Auth0 Community](https://community.auth0.com) forums and have not found a suitable solution or answer.
+        - label: I have searched the existing [OpenWorking issues](https://github.com/BlockCTech/openworking/issues) and have not found a suitable solution or duplicate report.
           required: true
-        - label: I agree to the terms within the [Auth0 Code of Conduct](https://github.com/auth0/open-source-template/blob/master/CODE-OF-CONDUCT.md).
+        - label: I have read the [contributing guidelines](https://github.com/BlockCTech/openworking/blob/main/CONTRIBUTING.md) and will follow them.
           required: true
 
   - type: textarea
@@ -42,6 +42,6 @@ body:
     id: additional-context
     attributes:
       label: Additional context
-      description: Other libraries that might be involved, or any other relevant information you think would be useful.
+      description: Add logs, screenshots, environment details, or any other relevant information.
     validations:
       required: false
