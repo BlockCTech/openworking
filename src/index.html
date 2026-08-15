@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenWorking</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <!-- CSS imported by the Svelte islands (currently xterm.css, for the terminal dock). esbuild
+         always emits imported .css as a sibling file rather than inlining it into the JS bundle,
+         so it needs its own link — without it xterm's hidden input textarea loses its
+         `opacity:0; left:-9999em` rule and renders as a visible box above the prompt. -->
+    <link rel="stylesheet" href="./renderer/dist/svelte-islands.css" />
+    <script src="../node_modules/marked/lib/marked.umd.js"></script>
+    <script src="../node_modules/mermaid/dist/mermaid.min.js"></script>
+    <script src="../node_modules/@highlightjs/cdn-assets/highlight.min.js"></script>
+    <!-- Both hljs palettes are loaded; the renderer's applyResolvedTheme() enables the
+         one matching the active app theme by toggling the other's `disabled` attribute. -->
+    <link id="hljs-dark" rel="stylesheet" href="../node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css">
+    <link id="hljs-light" rel="stylesheet" href="../node_modules/@highlightjs/cdn-assets/styles/github.min.css" disabled>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="./error-hints.js"></script>
+    <script src="./renderer/util.js"></script>
+    <script src="./renderer/side-scrollbar.js"></script>
+    <script src="./thread-stream.js"></script>
+    <script src="./diff-view.js"></script>
+    <script src="./renderer/markup.js"></script>
+    <script src="./renderer/prompt-metadata.js"></script>
+    <script src="./renderer/attachment-capabilities.js"></script>
+    <script src="./renderer/memory-project.js"></script>
+    <script src="./renderer/onboarding.js"></script>
+    <!-- Required Svelte renderer bundle (built by scripts/build-renderer.js). It must load before
+         renderer.js; a missing bundle is treated as a build/package error and fails fast. -->
+    <script src="./renderer/dist/svelte-islands.js"></script>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

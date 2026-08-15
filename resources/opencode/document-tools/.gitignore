@@ -1,0 +1,4 @@
+runtime.cjs
+schema.cjs
+pdfium.wasm
+LICENSE.pdfium

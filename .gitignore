@@ -1,0 +1,23 @@
+node_modules/
+dist/
+src/renderer/dist/
+out/
+*.log
+.DS_Store
+tmp-diagnostics/
+.claude/
+.agents/
+.opencode/
+playwright-report/
+test-results/
+blob-report/
+playwright/.cache/
+/build/*
+!/build/entitlements.mac.plist
+/design/*
+/tmp/*
+
+.codegraph
+
+# Transient stash used by scripts/before-pack.js (same-device rename; see EXDEV note there)
+.opencode-stash-*/

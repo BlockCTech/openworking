@@ -1,0 +1,48 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  packaged-smoke:
+    name: ${{ matrix.arch }} packaged smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build and run unsigned packaged smoke
+        run: npm run smoke:packaged:win -- --arch=${{ matrix.arch }}
+
+      - name: Upload diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}-diagnostics
+          path: |
+            dist/builder-debug.yml
+            dist/builder-effective-config.yaml
+          if-no-files-found: ignore
+          retention-days: 7

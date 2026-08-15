@@ -1,0 +1,843 @@
+const crypto = require("node:crypto")
+const fs = require("node:fs")
+const path = require("node:path")
+const { pathToFileURL } = require("node:url")
+const AdmZip = require("adm-zip")
+const { DEFAULT_MODEL_CONFIG, assertValidOpencodeConfig, defaultConfigPath, ensureDefaultAgentPrompt, ensureDefaultManagedModelConfig, normalizeModelOptionAliases, readOpencodeConfig, recoverInvalidOpencodeConfig, writeOpencodeConfig } = require("./opencode-config")
+const { assertValidV2Config, toV2Config } = require("./opencode-config-v2")
+const { applyProjectInstruction, ensureGlobalMemory } = require("./memory-store")
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const MCP_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const MCP_SERVER_TYPES = ["remote", "local"]
+
+const BUILT_IN_SKILLS = [
+  { name: "explain-project", description: "Explain the structure and main execution paths of the current project." },
+  { name: "find-bugs", description: "Inspect the current project for likely defects and risky behavior." },
+  { name: "write-tests", description: "Add focused automated tests for the requested behavior." },
+  { name: "summarize-changes", description: "Summarize repository changes and their impact." },
+  { name: "code-review", description: "Review code changes for bugs, regressions and missing tests." },
+  { name: "docs-update", description: "Update project documentation to match implemented behavior." },
+  { name: "pdf", description: "Read, create, transform and validate PDF documents." },
+  { name: "pptx", description: "Read, create, edit and visually validate PowerPoint presentations." },
+  { name: "skill-creator", description: "Create and validate reusable OpenCode-native skills." },
+  { name: "xlsx", description: "Read, create, edit and validate spreadsheet workbooks." },
+  { name: "docx", description: "Read, create, edit and visually validate Word documents." },
+  { name: "webapp-testing", description: "Test local web applications with the project's existing tools or Playwright." },
+  { name: "cross-chat-memory", description: "Remember durable facts, preferences and decisions so they carry across separate chats." },
+  { name: "browser-use", description: "Drive the user's logged-in Chrome (navigate, read, click, type, screenshot) through the browser_* tools." },
+  { name: "backlog", description: "Query and manage Backlog issues, projects and PRs via the backlog_* tools; explains the numeric-array argument shapes those tools require." }
+]
+const BUILT_IN_TOOLS = []
+const RETIRED_BUILT_IN_SKILLS = ["translate-document", "translate-office-document"]
+const BUILT_IN_PLUGINS = [
+  {
+    id: "openworking.translate-document",
+    name: "translate_document",
+    description: "Translate PDF, DOCX and Markdown files into structure-preserving document artifacts.",
+    tools: ["translate_document"],
+    supportedFormats: ["PDF", "DOCX", "Markdown"],
+    filename: "translate_document.mjs"
+  },
+  {
+    id: "openworking.translate-office-document",
+    name: "translate_office_document",
+    description: "Translate PPTX and XLSX files, including safe new-file and in-place XLSX modes.",
+    tools: ["translate_office_document"],
+    supportedFormats: ["PPTX", "XLSX"],
+    filename: "translate_office_document.mjs"
+  },
+  {
+    id: "openworking.remember",
+    name: "remember",
+    description: "Persist durable global or project facts so they are available in future chats.",
+    tools: ["remember"],
+    supportedFormats: [],
+    filename: "remember.mjs"
+  }
+]
+const RESERVED_PERMISSION_KEYS = new Set(["__proto__", "prototype", ...Object.getOwnPropertyNames(Object.prototype)])
+
+function defaultProfileDir(userDataPath) {
+  if (process.env.OPENWORKING_OPENCODE_CONFIG_DIR) {
+    return path.resolve(process.env.OPENWORKING_OPENCODE_CONFIG_DIR)
+  }
+  return path.join(userDataPath, "opencode-profile")
+}
+
+function runtimeXdgConfigHome(profileDir) {
+  return path.join(profileDir, "xdg-config")
+}
+
+function runtimeXdgConfigPath(profileDir) {
+  return path.join(runtimeXdgConfigHome(profileDir), "opencode", "opencode.json")
+}
+
+function syncRuntimeXdgConfig(profile) {
+  const profileDir = profile.profileDir
+  const configPath = profile.configPath || defaultConfigPath(profileDir)
+  const xdgConfigHome = profile.xdgConfigHome || runtimeXdgConfigHome(profileDir)
+  const xdgConfigPath = path.join(xdgConfigHome, "opencode", "opencode.json")
+  fs.mkdirSync(path.dirname(xdgConfigPath), { recursive: true })
+  const runtimeConfig = toV2Config(JSON.parse(fs.readFileSync(configPath, "utf8")))
+  const managedPlugins = BUILT_IN_PLUGINS.map((plugin) => pathToFileURL(path.join(profileDir, "plugins", plugin.filename)).href)
+  runtimeConfig.plugins = [...new Set([...(runtimeConfig.plugins || []), ...managedPlugins])]
+  assertValidV2Config(runtimeConfig)
+  const serialized = Buffer.from(`${JSON.stringify(runtimeConfig, null, 2)}\n`)
+  if (!fs.existsSync(xdgConfigPath) || !fs.readFileSync(xdgConfigPath).equals(serialized)) {
+    fs.writeFileSync(xdgConfigPath, serialized)
+  }
+  return { xdgConfigHome, xdgConfigPath }
+}
+
+function bundledOpencodeDir() {
+  const packaged = process.resourcesPath && path.join(process.resourcesPath, "opencode")
+  if (packaged && fs.existsSync(packaged)) return packaged
+  return path.join(__dirname, "..", "resources", "opencode")
+}
+
+function bundledSkillsDir() {
+  return path.join(bundledOpencodeDir(), "skills")
+}
+
+function directoryFiles(directory, relativeDir = "") {
+  const files = []
+  for (const entry of fs.readdirSync(path.join(directory, relativeDir), { withFileTypes: true })) {
+    const relativePath = path.join(relativeDir, entry.name)
+    if (entry.isDirectory()) files.push(...directoryFiles(directory, relativePath))
+    if (entry.isFile()) files.push(relativePath)
+  }
+  return files.sort()
+}
+
+function directoryDigest(directory) {
+  const digest = crypto.createHash("sha256")
+  for (const relativePath of directoryFiles(directory)) {
+    const filePath = path.join(directory, relativePath)
+    const mode = fs.statSync(filePath).mode & 0o777
+    digest.update(relativePath)
+    digest.update("\0")
+    digest.update(mode.toString(8))
+    digest.update("\0")
+    digest.update(fs.readFileSync(filePath))
+    digest.update("\0")
+  }
+  return digest.digest("hex")
+}
+
+function readSkillsManifest(manifestPath) {
+  if (!fs.existsSync(manifestPath)) return { skills: {} }
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    if (manifest && manifest.skills && typeof manifest.skills === "object" && !Array.isArray(manifest.skills)) return manifest
+  } catch {}
+  return { skills: {} }
+}
+
+function readToolsManifest(manifestPath) {
+  if (!fs.existsSync(manifestPath)) return { tools: {} }
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    if (manifest && manifest.tools && typeof manifest.tools === "object" && !Array.isArray(manifest.tools)) return manifest
+  } catch {}
+  return { tools: {} }
+}
+
+function readPluginsManifest(manifestPath) {
+  if (!fs.existsSync(manifestPath)) return { plugins: {} }
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
+    if (manifest && manifest.plugins && typeof manifest.plugins === "object" && !Array.isArray(manifest.plugins)) return manifest
+  } catch {}
+  return { plugins: {} }
+}
+
+function fileDigest(filePath) {
+  const digest = crypto.createHash("sha256")
+  digest.update(fs.readFileSync(filePath))
+  return digest.digest("hex")
+}
+
+function syncBuiltInSkills(profileDir, sourceDir = bundledSkillsDir()) {
+  const skillsDir = path.join(profileDir, "skills")
+  fs.mkdirSync(skillsDir, { recursive: true })
+  const manifestPath = path.join(profileDir, ".openworking-skills.json")
+  const previous = readSkillsManifest(manifestPath)
+  const manifest = {}
+
+  // These names were always app-owned. Remove them even if an older or damaged profile no
+  // longer has the manifest entries that would otherwise identify them as managed skills.
+  for (const name of RETIRED_BUILT_IN_SKILLS) {
+    fs.rmSync(path.join(skillsDir, name), { force: true, recursive: true })
+  }
+
+  const bundledNames = new Set(BUILT_IN_SKILLS.map((skill) => skill.name))
+  for (const name of Object.keys(previous.skills)) {
+    if (!bundledNames.has(name)) fs.rmSync(path.join(skillsDir, name), { force: true, recursive: true })
+  }
+
+  for (const skill of BUILT_IN_SKILLS) {
+    const source = path.join(sourceDir, skill.name)
+    const targetDir = path.join(skillsDir, skill.name)
+    const digest = directoryDigest(source)
+    manifest[skill.name] = digest
+    if (fs.existsSync(targetDir) && directoryDigest(targetDir) === digest) continue
+    fs.rmSync(targetDir, { force: true, recursive: true })
+    fs.cpSync(source, targetDir, { recursive: true })
+  }
+
+  const serialized = `${JSON.stringify({ skills: manifest }, null, 2)}\n`
+  if (!fs.existsSync(manifestPath) || fs.readFileSync(manifestPath, "utf8") !== serialized) {
+    fs.writeFileSync(manifestPath, serialized)
+  }
+  return { sourceDir, skillsDir, manifestPath, skills: BUILT_IN_SKILLS }
+}
+
+function isZipSymlink(entry) {
+  return (((entry.header?.attr || 0) >>> 16) & 0o170000) === 0o120000
+}
+
+function normalizedZipPath(entryName) {
+  const name = String(entryName || "").replace(/\\/g, "/")
+  if (!name || path.posix.isAbsolute(name)) return null
+  const parts = name.split("/").filter(Boolean)
+  if (!parts.length || parts.some((part) => part === "." || part === "..")) return null
+  return parts.join("/")
+}
+
+function isIgnoredZipEntry(relativePath) {
+  return relativePath === ".DS_Store" || relativePath.startsWith("__MACOSX/")
+}
+
+function parseSkillFrontmatter(markdown) {
+  const lines = String(markdown || "").split(/\r?\n/)
+  if (lines[0] !== "---") throw new Error("SKILL.md must start with YAML frontmatter.")
+  const end = lines.findIndex((line, index) => index > 0 && line === "---")
+  if (end < 0) throw new Error("SKILL.md frontmatter must be closed with ---.")
+
+  const data = {}
+  for (const line of lines.slice(1, end)) {
+    const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
+    if (!match) continue
+    const value = match[2].trim().replace(/^(['"])(.*)\1$/, "$2")
+    data[match[1]] = value
+  }
+  return data
+}
+
+// A skill may opt into human-in-the-loop gating for specific tools by listing their tool ids in
+// a flat `askToolPermissions: a, b, c` frontmatter line. MCP tools are namespaced `<server>_<tool>`
+// (e.g. `backlog_update_issue`). We accept only safe tool-id characters so a malformed line can
+// never inject arbitrary config keys. Returns a de-duplicated list.
+function parseAskToolPermissions(frontmatter) {
+  const raw = frontmatter?.askToolPermissions
+  if (!raw || typeof raw !== "string") return []
+  const tools = raw
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => /^[A-Za-z0-9_*-]+$/.test(part))
+    .filter((part) => !RESERVED_PERMISSION_KEYS.has(part))
+  return [...new Set(tools)]
+}
+
+function assertValidSkillName(name) {
+  if (typeof name !== "string" || name.length < 1 || name.length > 64 || !SKILL_NAME_PATTERN.test(name)) {
+    throw new Error("Skill name must use lowercase ASCII letters, digits, and single hyphens only.")
+  }
+}
+
+function installCustomSkillArchive(profile, archivePath) {
+  if (!archivePath || !fs.existsSync(archivePath)) throw new Error("Choose a skill archive to upload.")
+  const extension = path.extname(archivePath).toLowerCase()
+  if (extension !== ".zip" && extension !== ".skill") throw new Error("Skill archive must be a .zip or .skill file.")
+
+  const zip = new AdmZip(archivePath)
+  const files = []
+  for (const entry of zip.getEntries()) {
+    const relativePath = normalizedZipPath(entry.entryName)
+    if (!relativePath) throw new Error(`Unsafe zip entry: ${entry.entryName}`)
+    if (isIgnoredZipEntry(relativePath)) continue
+    if (isZipSymlink(entry)) throw new Error(`Symlinks are not allowed in skill archives: ${relativePath}`)
+    if (!entry.isDirectory) files.push({ entry, relativePath })
+  }
+  if (!files.length) throw new Error("Skill archive is empty.")
+
+  const rootSkill = files.find((file) => file.relativePath === "SKILL.md")
+  const topLevelNames = new Set(files.map((file) => file.relativePath.split("/")[0]))
+  let rootPrefix = ""
+  let skillFile = rootSkill
+  if (!skillFile) {
+    if (topLevelNames.size !== 1) throw new Error("Skill archive must contain SKILL.md at the root or inside one top-level folder.")
+    rootPrefix = `${[...topLevelNames][0]}/`
+    skillFile = files.find((file) => file.relativePath === `${rootPrefix}SKILL.md`)
+  }
+  if (!skillFile) throw new Error("Skill archive must include a SKILL.md file.")
+
+  const frontmatter = parseSkillFrontmatter(skillFile.entry.getData().toString("utf8"))
+  const name = frontmatter.name
+  const description = frontmatter.description
+  assertValidSkillName(name)
+  if (!description) throw new Error("SKILL.md frontmatter must include a description.")
+  if (rootPrefix && rootPrefix.slice(0, -1) !== name) throw new Error("Skill folder name must match SKILL.md frontmatter name.")
+  if (BUILT_IN_SKILLS.some((skill) => skill.name === name)) throw new Error(`Skill "${name}" is built in and cannot be overwritten.`)
+  if (RETIRED_BUILT_IN_SKILLS.includes(name)) throw new Error(`Skill "${name}" is reserved by the app and cannot be overwritten.`)
+
+  const skillsDir = path.join(profile.profileDir, "skills")
+  const targetDir = path.join(skillsDir, name)
+  if (fs.existsSync(targetDir)) throw new Error(`Skill "${name}" already exists.`)
+
+  fs.mkdirSync(targetDir, { recursive: true })
+  try {
+    for (const file of files) {
+      if (rootPrefix && !file.relativePath.startsWith(rootPrefix)) throw new Error(`Unexpected file outside skill folder: ${file.relativePath}`)
+      const targetRelativePath = rootPrefix ? file.relativePath.slice(rootPrefix.length) : file.relativePath
+      if (!targetRelativePath) continue
+      const targetPath = path.join(targetDir, targetRelativePath)
+      const resolvedTarget = path.resolve(targetPath)
+      if (!resolvedTarget.startsWith(`${path.resolve(targetDir)}${path.sep}`) && resolvedTarget !== path.resolve(targetDir)) {
+        throw new Error(`Unsafe zip entry: ${file.relativePath}`)
+      }
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true })
+      fs.writeFileSync(targetPath, file.entry.getData())
+    }
+
+    const config = readProfileConfig(profile).config
+    config.permission ||= {}
+    config.permission.skill ||= {}
+    config.permission.skill[name] = "allow"
+    // Human-in-the-loop: gate the tools this skill declares so the runtime prompts the user
+    // (Allow / Reject) before running them. Only set keys the user has not already configured,
+    // so we never override a deliberate "allow"/"deny" the user picked earlier.
+    for (const tool of parseAskToolPermissions(frontmatter)) {
+      if (!Object.hasOwn(config.permission, tool)) config.permission[tool] = "ask"
+    }
+    writeProfileConfig(profile, config)
+    return { name, description, path: targetDir }
+  } catch (error) {
+    fs.rmSync(targetDir, { force: true, recursive: true })
+    throw error
+  }
+}
+
+function listCustomSkills(profile) {
+  const skillsDir = path.join(profile.profileDir, "skills")
+  if (!fs.existsSync(skillsDir)) return []
+  const builtInNames = new Set(BUILT_IN_SKILLS.map((skill) => skill.name))
+  return fs.readdirSync(skillsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !builtInNames.has(entry.name))
+    .map((entry) => {
+      const skillPath = path.join(skillsDir, entry.name, "SKILL.md")
+      if (!fs.existsSync(skillPath)) return null
+      try {
+        const frontmatter = parseSkillFrontmatter(fs.readFileSync(skillPath, "utf8"))
+        return {
+          name: frontmatter.name || entry.name,
+          description: frontmatter.description || "",
+          path: path.join(skillsDir, entry.name)
+        }
+      } catch {
+        return {
+          name: entry.name,
+          description: "",
+          path: path.join(skillsDir, entry.name)
+        }
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+function readSkillMarkdown(profile, skillName) {
+  const name = String(skillName || "")
+  assertValidSkillName(name)
+  const skillPath = path.join(profile.profileDir, "skills", name, "SKILL.md")
+  if (!fs.existsSync(skillPath)) throw new Error(`Skill "${name}" has no SKILL.md.`)
+  return { name, content: fs.readFileSync(skillPath, "utf8") }
+}
+
+function uninstallCustomSkill(profile, skillName) {
+  const name = String(skillName || "")
+  assertValidSkillName(name)
+  if (BUILT_IN_SKILLS.some((skill) => skill.name === name)) {
+    throw new Error(`Skill "${name}" is built in and cannot be uninstalled.`)
+  }
+  const targetDir = path.join(profile.profileDir, "skills", name)
+  if (!fs.existsSync(targetDir)) throw new Error(`Skill "${name}" is not installed.`)
+
+  // Read the skill's declared HITL tool gates before deleting the folder, so we can clean them up.
+  let askTools = []
+  const skillPath = path.join(targetDir, "SKILL.md")
+  if (fs.existsSync(skillPath)) {
+    try {
+      askTools = parseAskToolPermissions(parseSkillFrontmatter(fs.readFileSync(skillPath, "utf8")))
+    } catch {
+      askTools = []
+    }
+  }
+
+  fs.rmSync(targetDir, { force: true, recursive: true })
+
+  const config = readProfileConfig(profile).config
+  let changed = false
+  if (config.permission?.skill && name in config.permission.skill) {
+    delete config.permission.skill[name]
+    changed = true
+  }
+  // Remove the tool gates this skill added, but only if they are still "ask" — a user who
+  // deliberately changed one to "allow"/"deny" keeps their choice.
+  for (const tool of askTools) {
+    if (config.permission && config.permission[tool] === "ask") {
+      delete config.permission[tool]
+      changed = true
+    }
+  }
+  if (changed) writeProfileConfig(profile, config)
+  return { name }
+}
+
+function assertValidMcpName(name) {
+  if (typeof name !== "string" || name.length < 1 || name.length > 64 || !MCP_NAME_PATTERN.test(name)) {
+    throw new Error("MCP server name must use lowercase ASCII letters, digits, and single hyphens only.")
+  }
+}
+
+function mcpServerView(name, server) {
+  const view = { name, type: server.type, enabled: server.enabled !== false }
+  if (server.type === "remote") {
+    view.url = server.url || ""
+    view.headers = server.headers && typeof server.headers === "object" ? { ...server.headers } : {}
+    // Surface the OAuth config to the renderer with the client secret redacted — the
+    // raw secret must never cross the IPC boundary into renderer state or the JSON preview.
+    if (server.oauth === false) {
+      view.oauth = false
+    } else if (server.oauth && typeof server.oauth === "object") {
+      view.oauth = {
+        clientId: server.oauth.clientId || "",
+        scope: server.oauth.scope || "",
+        callbackPort: server.oauth.callbackPort,
+        redirectUri: server.oauth.redirectUri || "",
+        hasClientSecret: !!server.oauth.clientSecret
+      }
+    } else {
+      view.oauth = undefined
+    }
+  } else {
+    view.command = Array.isArray(server.command) ? [...server.command] : []
+    // Surface env vars so the Edit modal can repopulate them. Values are not redacted: unlike an
+    // OAuth client secret (which has a real-time auth flow), these are plain local-process env
+    // vars living in the app-managed userData profile and must round-trip for editing to work.
+    if (server.environment && typeof server.environment === "object") {
+      view.environment = { ...server.environment }
+    }
+  }
+  return view
+}
+
+function listMcpServers(profile) {
+  const config = readProfileConfig(profile).config
+  return Object.entries(config.mcp || {})
+    .map(([name, server]) => (server && typeof server === "object" ? mcpServerView(name, server) : null))
+    .filter(Boolean)
+    .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+// Trim+stringify a flat string→string map. Despite the name, this MUST NOT lowercase keys: it is
+// reused for process environment maps (local MCP env at buildMcpServer, browser MCP env at
+// ensureBrowserMcpServer), where keys are case-sensitive — lowercasing would turn ELECTRON_RUN_AS_NODE
+// / OPENWORKING_BROWSER_HOST_DIR into names Electron/Node never read, silently breaking the feature.
+function normalizeHeaders(headers) {
+  if (!headers || typeof headers !== "object" || Array.isArray(headers)) return {}
+  const result = {}
+  for (const [key, value] of Object.entries(headers)) {
+    const trimmedKey = String(key || "").trim()
+    if (trimmedKey) result[trimmedKey] = String(value ?? "")
+  }
+  return result
+}
+
+// Build the `oauth` value written to opencode.json from the renderer's input.
+//   - false        → disable OpenCode OAuth auto-detection.
+//   - object       → a pre-registered OAuth app (clientId/clientSecret/scope/…) for
+//                    servers that do not support dynamic client registration (e.g. Slack).
+//   - true/omitted → omit `oauth` so the runtime auto-negotiates (DCR + PKCE).
+// `existing` is the previously stored oauth object, used to preserve a secret the user
+// left blank while editing.
+function normalizeOauth(input, existing) {
+  if (input === false) return false
+  if (!input || typeof input !== "object") return undefined
+  const oauth = {}
+  const clientId = String(input.clientId || "").trim()
+  const scope = String(input.scope || "").trim()
+  const redirectUri = String(input.redirectUri || "").trim()
+  let clientSecret = String(input.clientSecret || "").trim()
+  // Preserve the stored secret when editing and the field was left blank.
+  if (!clientSecret && existing && typeof existing === "object" && existing.clientSecret) {
+    clientSecret = existing.clientSecret
+  }
+  if (clientId) oauth.clientId = clientId
+  if (clientSecret) oauth.clientSecret = clientSecret
+  if (scope) oauth.scope = scope
+  if (redirectUri) oauth.redirectUri = redirectUri
+  if (input.callbackPort !== undefined && input.callbackPort !== null && input.callbackPort !== "") {
+    const port = Number(input.callbackPort)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error("OAuth callback port must be an integer between 1 and 65535.")
+    }
+    oauth.callbackPort = port
+  }
+  return Object.keys(oauth).length ? oauth : undefined
+}
+
+function buildMcpServer(input, existing) {
+  const type = input?.type
+  if (!MCP_SERVER_TYPES.includes(type)) throw new Error('MCP server type must be "remote" or "local".')
+
+  if (type === "remote") {
+    const url = String(input.url || "").trim()
+    if (!url) throw new Error("Remote MCP server requires a server URL.")
+    const server = { type: "remote", url, enabled: true }
+    const headers = normalizeHeaders(input.headers)
+    if (Object.keys(headers).length) server.headers = headers
+    const oauth = normalizeOauth(input.oauth, existing && existing.type === "remote" ? existing.oauth : undefined)
+    if (oauth !== undefined) server.oauth = oauth
+    return server
+  }
+
+  const command = (Array.isArray(input.command)
+    ? input.command
+    : String(input.command || "").split(/\s+/))
+    .map((part) => String(part).trim())
+    .filter(Boolean)
+  if (!command.length) throw new Error("Local MCP server requires a command.")
+  const server = { type: "local", command, enabled: true }
+  const environment = normalizeHeaders(input.environment)
+  if (Object.keys(environment).length) server.environment = environment
+  return server
+}
+
+function addMcpServer(profile, input) {
+  const name = String(input?.name || "").trim()
+  assertValidMcpName(name)
+  const config = readProfileConfig(profile).config
+  config.mcp ||= {}
+  if (config.mcp[name]) throw new Error(`MCP server "${name}" already exists.`)
+  const server = buildMcpServer(input)
+  config.mcp[name] = server
+  writeProfileConfig(profile, config)
+  return mcpServerView(name, server)
+}
+
+function updateMcpServer(profile, name, input) {
+  const serverName = String(name || "").trim()
+  assertValidMcpName(serverName)
+  const config = readProfileConfig(profile).config
+  const existing = config.mcp && config.mcp[serverName]
+  if (!existing) throw new Error(`MCP server "${serverName}" does not exist.`)
+  // Rebuild from the new input, preserving the enabled flag and any stored secret the
+  // user left blank while editing.
+  const server = buildMcpServer({ ...input, type: input?.type || existing.type }, existing)
+  server.enabled = existing.enabled !== false
+  config.mcp[serverName] = server
+  writeProfileConfig(profile, config)
+  return mcpServerView(serverName, server)
+}
+
+function setMcpServerEnabled(profile, name, enabled) {
+  const serverName = String(name || "")
+  assertValidMcpName(serverName)
+  const config = readProfileConfig(profile).config
+  if (!config.mcp || !config.mcp[serverName]) throw new Error(`MCP server "${serverName}" does not exist.`)
+  config.mcp[serverName].enabled = !!enabled
+  writeProfileConfig(profile, config)
+  return mcpServerView(serverName, config.mcp[serverName])
+}
+
+function removeMcpServer(profile, name) {
+  const serverName = String(name || "")
+  assertValidMcpName(serverName)
+  const config = readProfileConfig(profile).config
+  if (!config.mcp || !config.mcp[serverName]) throw new Error(`MCP server "${serverName}" does not exist.`)
+  delete config.mcp[serverName]
+  writeProfileConfig(profile, config)
+  return { name: serverName }
+}
+
+function syncBuiltInTools(profileDir, sourceDir = bundledOpencodeDir()) {
+  const sourceToolsDir = path.join(sourceDir, "tools")
+  const toolsDir = path.join(profileDir, "tools")
+  fs.mkdirSync(toolsDir, { recursive: true })
+  const manifestPath = path.join(profileDir, ".openworking-tools.json")
+  const previous = readToolsManifest(manifestPath)
+  const manifest = {}
+
+  // These tools moved to managed v2 plugins. Both filenames were always app-owned, so remove
+  // them even when an old profile predates the tools manifest.
+  for (const retiredTool of ["translate_document.js", "remember.js"]) {
+    fs.rmSync(path.join(toolsDir, retiredTool), { force: true })
+  }
+
+  for (const name of Object.keys(previous.tools)) {
+    if (!BUILT_IN_TOOLS.includes(name)) fs.rmSync(path.join(toolsDir, name), { force: true })
+  }
+
+  for (const name of BUILT_IN_TOOLS) {
+    const source = path.join(sourceToolsDir, name)
+    const target = path.join(toolsDir, name)
+    const digest = fileDigest(source)
+    manifest[name] = digest
+    if (fs.existsSync(target) && fileDigest(target) === digest) continue
+    fs.copyFileSync(source, target)
+  }
+
+  const sourceRuntimeDir = path.join(sourceDir, "document-tools")
+  const runtimeDir = path.join(profileDir, "document-tools")
+  const runtimeDigest = directoryDigest(sourceRuntimeDir)
+  if (!fs.existsSync(runtimeDir) || directoryDigest(runtimeDir) !== runtimeDigest) {
+    fs.rmSync(runtimeDir, { force: true, recursive: true })
+    fs.cpSync(sourceRuntimeDir, runtimeDir, { recursive: true })
+  }
+
+  const serialized = `${JSON.stringify({ tools: manifest, documentTools: runtimeDigest }, null, 2)}\n`
+  if (!fs.existsSync(manifestPath) || fs.readFileSync(manifestPath, "utf8") !== serialized) {
+    fs.writeFileSync(manifestPath, serialized)
+  }
+  return { sourceDir, toolsDir, runtimeDir, manifestPath, tools: BUILT_IN_TOOLS }
+}
+
+function syncBuiltInPlugins(profileDir, sourceDir = bundledOpencodeDir()) {
+  const sourcePluginsDir = path.join(sourceDir, "plugins")
+  const pluginsDir = path.join(profileDir, "plugins")
+  fs.mkdirSync(pluginsDir, { recursive: true })
+  const manifestPath = path.join(profileDir, ".openworking-plugins.json")
+  const previous = readPluginsManifest(manifestPath)
+  const manifest = {}
+
+  const filenames = BUILT_IN_PLUGINS.map((plugin) => plugin.filename)
+  for (const name of Object.keys(previous.plugins)) {
+    if (!filenames.includes(name)) fs.rmSync(path.join(pluginsDir, name), { force: true })
+  }
+
+  for (const name of filenames) {
+    const source = path.join(sourcePluginsDir, name)
+    const target = path.join(pluginsDir, name)
+    const digest = fileDigest(source)
+    manifest[name] = digest
+    if (fs.existsSync(target) && fileDigest(target) === digest) continue
+    fs.copyFileSync(source, target)
+  }
+
+  const serialized = `${JSON.stringify({ plugins: manifest }, null, 2)}\n`
+  if (!fs.existsSync(manifestPath) || fs.readFileSync(manifestPath, "utf8") !== serialized) {
+    fs.writeFileSync(manifestPath, serialized)
+  }
+  return { sourceDir, pluginsDir, manifestPath, plugins: listManagedPlugins() }
+}
+
+function listManagedPlugins() {
+  return BUILT_IN_PLUGINS.map(({ filename: _filename, ...plugin }) => ({
+    ...plugin,
+    builtIn: true,
+    enabled: true
+  }))
+}
+
+// Read the HITL tool gates a built-in skill declares via its `askToolPermissions` frontmatter line,
+// reading from the bundled source of truth so this holds even mid-sync. Guarded: a missing or
+// malformed SKILL.md must never break profile bootstrap, so failures yield an empty list.
+function builtInSkillAskTools(skillName, sourceDir = bundledSkillsDir()) {
+  try {
+    const skillPath = path.join(sourceDir, skillName, "SKILL.md")
+    return parseAskToolPermissions(parseSkillFrontmatter(fs.readFileSync(skillPath, "utf8")))
+  } catch {
+    return []
+  }
+}
+
+function ensureSkillPermissions(config) {
+  config.permission ||= {}
+  config.permission.skill ||= {}
+  for (const name of RETIRED_BUILT_IN_SKILLS) delete config.permission.skill[name]
+  for (const skill of BUILT_IN_SKILLS) {
+    if (!config.permission.skill[skill.name]) config.permission.skill[skill.name] = "allow"
+    // Human-in-the-loop: gate the mutating tools the skill declares so the runtime prompts the user
+    // (Allow / Reject) before running them — mirroring installCustomSkillArchive for bundled skills.
+    // Only set keys the user has not already configured, so a deliberate "allow"/"deny" survives.
+    for (const tool of builtInSkillAskTools(skill.name)) {
+      if (!Object.hasOwn(config.permission, tool)) config.permission[tool] = "ask"
+    }
+  }
+  return config
+}
+
+function profileStage(stage, run) {
+  try {
+    return run()
+  } catch (error) {
+    const wrapped = new Error(`OpenWorking profile ${stage} failed: ${error.message}`, { cause: error })
+    wrapped.stage = stage
+    wrapped.code = error.code || error.cause?.code
+    throw wrapped
+  }
+}
+
+function ensureProfileConfig(configPath) {
+  let current
+  let recovery = null
+  try {
+    current = readOpencodeConfig(configPath)
+    if (current.exists) {
+      try {
+        assertValidOpencodeConfig(current.config)
+      } catch (error) {
+        error.invalidConfig = true
+        throw error
+      }
+    } else {
+      current = writeOpencodeConfig(current.config, configPath)
+    }
+  } catch (error) {
+    if (!error.invalidConfig) throw error
+    const recovered = recoverInvalidOpencodeConfig(configPath)
+    current = recovered
+    recovery = {
+      kind: "config-reset",
+      backupPath: recovered.backupPath,
+      message: "The OpenCode config was invalid and has been reset. The original file was preserved as a backup."
+    }
+  }
+  return { current, recovery }
+}
+
+function ensureOpenworkingProfile({ userDataPath }) {
+  const profileDir = defaultProfileDir(userDataPath)
+  const configPath = defaultConfigPath(profileDir)
+  const base = {
+    profileDir,
+    configPath,
+    xdgConfigHome: runtimeXdgConfigHome(profileDir),
+    xdgConfigPath: runtimeXdgConfigPath(profileDir)
+  }
+  profileStage("directory", () => fs.mkdirSync(profileDir, { recursive: true }))
+  const { skills, tools, plugins } = profileStage("resources", () => ({
+    skills: syncBuiltInSkills(profileDir),
+    tools: syncBuiltInTools(profileDir),
+    plugins: syncBuiltInPlugins(profileDir)
+  }))
+  // Cross-chat memory: the global AGENTS.md is loaded by OpenCode into every session automatically.
+  profileStage("memory", () => ensureGlobalMemory(profileDir))
+  const { recovery } = profileStage("config", () => {
+    const { current, recovery: configRecovery } = ensureProfileConfig(configPath)
+    const config = ensureDefaultAgentPrompt(ensureSkillPermissions(ensureDefaultManagedModelConfig(current.config)))
+    writeOpencodeConfig(config, configPath)
+    return { recovery: configRecovery }
+  })
+  const xdg = profileStage("xdg", () => syncRuntimeXdgConfig(base))
+  return { ...base, ...xdg, skills, tools, plugins, ...(recovery ? { recovery } : {}) }
+}
+
+function readProfileConfig(profile) {
+  return readOpencodeConfig(profile.configPath)
+}
+
+// Point OpenCode's `instructions` at the active project's memory file so its facts load into every
+// session for that project. Keeps exactly one managed entry (swapped per project), leaving any
+// user-authored `instructions` untouched. Pass projectId null to clear it (no project open).
+function setActiveProjectMemory(profile, projectId) {
+  const config = readProfileConfig(profile).config
+  applyProjectInstruction(config, profile.profileDir, projectId || null)
+  return writeProfileConfig(profile, config)
+}
+
+function writeProfileConfig(profile, config) {
+  const written = writeOpencodeConfig(ensureDefaultAgentPrompt(ensureSkillPermissions(ensureDefaultManagedModelConfig(config))), profile.configPath)
+  syncRuntimeXdgConfig(profile)
+  return written
+}
+
+
+function writeEditableProfileConfig(profile, edits) {
+  const config = readProfileConfig(profile).config
+  const submittedProviders = edits?.provider || {}
+  for (const [providerId, provider] of Object.entries(config.provider || {})) {
+    const submittedProvider = submittedProviders[providerId]
+    if (!submittedProvider) continue
+    provider.options ||= {}
+    if (Object.hasOwn(submittedProvider.options || {}, "baseURL")) provider.options.baseURL = submittedProvider.options.baseURL
+    if (Object.hasOwn(submittedProvider.options || {}, "apiKey")) provider.options.apiKey = submittedProvider.options.apiKey
+    for (const [modelId, model] of Object.entries(provider.models || {})) {
+      const submittedModel = submittedProvider.models?.[modelId]
+      if (Object.hasOwn(submittedModel?.modalities || {}, "input")) {
+        model.modalities ||= {}
+        model.modalities.input = submittedModel.modalities.input
+      }
+    }
+  }
+  if (Object.hasOwn(edits || {}, "plugin")) config.plugin = edits.plugin
+  config.permission ||= {}
+  config.permission.skill ||= {}
+  for (const skill of BUILT_IN_SKILLS) {
+    if (Object.hasOwn(edits?.permission?.skill || {}, skill.name)) {
+      config.permission.skill[skill.name] = edits.permission.skill[skill.name]
+    }
+  }
+  return writeProfileConfig(profile, config)
+}
+
+// Name of the managed, app-owned browser MCP entry in opencode.json. The app fully owns this entry
+// (command + environment are recomputed each launch), unlike user-added MCP servers.
+const BROWSER_MCP_NAME = "browser"
+
+// Declare (or refresh) the bundled browser MCP so `opencode serve` spawns it as a local stdio child.
+// main.js supplies the resolved command (Electron-as-node + the bundled index.js) and the environment
+// (the shared host dir). Idempotent: only writes when the managed entry actually changed. Pass
+// enabled:false to keep the entry but disable it. Returns true when the config was written.
+function ensureBrowserMcpServer(profile, { command, environment = {}, enabled = true } = {}) {
+  if (!Array.isArray(command) || !command.length) throw new Error("browser MCP requires a command array")
+  const config = readProfileConfig(profile).config
+  config.mcp ||= {}
+  const next = {
+    type: "local",
+    command: command.map((part) => String(part)),
+    enabled: enabled !== false
+  }
+  const env = normalizeHeaders(environment)
+  if (Object.keys(env).length) next.environment = env
+  const current = config.mcp[BROWSER_MCP_NAME]
+  if (current && JSON.stringify(current) === JSON.stringify(next)) return false
+  config.mcp[BROWSER_MCP_NAME] = next
+  writeProfileConfig(profile, config)
+  return true
+}
+
+module.exports = {
+  BROWSER_MCP_NAME,
+  BUILT_IN_PLUGINS,
+  BUILT_IN_SKILLS,
+  BUILT_IN_TOOLS,
+  ensureBrowserMcpServer,
+  bundledOpencodeDir,
+  bundledSkillsDir,
+  defaultProfileDir,
+  directoryDigest,
+  ensureOpenworkingProfile,
+  ensureSkillPermissions,
+  installCustomSkillArchive,
+  listCustomSkills,
+  listManagedPlugins,
+  readSkillMarkdown,
+  uninstallCustomSkill,
+  addMcpServer,
+  updateMcpServer,
+  listMcpServers,
+  removeMcpServer,
+  runtimeXdgConfigHome,
+  runtimeXdgConfigPath,
+  setMcpServerEnabled,
+  readProfileConfig,
+  setActiveProjectMemory,
+  syncRuntimeXdgConfig,
+  syncBuiltInSkills,
+  syncBuiltInPlugins,
+  syncBuiltInTools,
+  writeEditableProfileConfig,
+  writeProfileConfig
+}

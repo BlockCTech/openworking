@@ -1,0 +1,1002 @@
+const { spawn } = require("node:child_process")
+const fs = require("node:fs")
+const http = require("node:http")
+const net = require("node:net")
+const os = require("node:os")
+const path = require("node:path")
+const WebSocket = require("ws")
+
+function findFreePort(hostname = "127.0.0.1") {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer()
+    server.unref()
+    server.on("error", reject)
+    server.listen(0, hostname, () => {
+      const address = server.address()
+      server.close(() => resolve(address.port))
+    })
+  })
+}
+
+function getJson(url) {
+  return new Promise((resolve, reject) => {
+    http
+      .get(url, (res) => {
+        let raw = ""
+        res.setEncoding("utf8")
+        res.on("data", (chunk) => {
+          raw += chunk
+        })
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(raw))
+          } catch (error) {
+            reject(error)
+          }
+        })
+      })
+      .on("error", reject)
+  })
+}
+
+async function waitForTarget(port) {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < 15000) {
+    try {
+      const targets = await getJson(`http://127.0.0.1:${port}/json`)
+      const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl)
+      if (page) return page
+    } catch {
+      // Electron is still booting.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  throw new Error("Timed out waiting for Electron debugger target.")
+}
+
+function connectDebugger(webSocketDebuggerUrl) {
+  const ws = new WebSocket(webSocketDebuggerUrl)
+  let id = 0
+  const pending = new Map()
+
+  ws.on("message", (message) => {
+    const payload = JSON.parse(message.toString())
+    if (!payload.id || !pending.has(payload.id)) return
+    const { resolve, reject } = pending.get(payload.id)
+    pending.delete(payload.id)
+    if (payload.error) reject(new Error(payload.error.message))
+    else resolve(payload.result)
+  })
+
+  return new Promise((resolve, reject) => {
+    ws.once("open", () => {
+      resolve({
+        send(method, params = {}) {
+          const requestId = ++id
+          ws.send(JSON.stringify({ id: requestId, method, params }))
+          return new Promise((requestResolve, requestReject) => {
+            pending.set(requestId, { resolve: requestResolve, reject: requestReject })
+          })
+        },
+        close() {
+          ws.close()
+        }
+      })
+    })
+    ws.once("error", reject)
+  })
+}
+
+async function main() {
+  const packagedDesktopBin = process.env.OPENWORKING_DESKTOP_BIN
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "openworking-electron-"))
+  const userDataPath = path.join(temp, "user-data")
+  const projectPath = path.join(temp, "project")
+  fs.mkdirSync(userDataPath, { recursive: true })
+  fs.mkdirSync(projectPath)
+  const projectSrcPath = path.join(projectPath, "src")
+  const projectDocsPath = path.join(projectPath, "docs")
+  fs.mkdirSync(projectSrcPath)
+  fs.mkdirSync(projectDocsPath)
+  const projectCodePath = path.join(projectSrcPath, "renderer.js")
+  fs.writeFileSync(projectCodePath, "export const escaped = '<tag>'\n")
+  fs.writeFileSync(path.join(projectDocsPath, "diagram.md"), [
+    "# Diagram preview",
+    "",
+    "```mermaid",
+    "sequenceDiagram",
+    "    participant CP2",
+    "    participant DIP as データ連携基盤",
+    "    participant MIWS",
+    "",
+    "    CP2->>CP2: requestId を発行",
+    "    CP2->>DIP: 面接日程の変更依頼 requestId",
+    "    DIP->>MIWS: 面接日程の変更依頼 requestId",
+    "    MIWS->>MIWS: 依頼内容を検証",
+    "    MIWS->>MIWS: 面接日程が変更される",
+    "    MIWS->>MIWS: Outbox に変更イベントを保存 eventId",
+    "    MIWS->>DIP: APIレスポンス accepted / eventId",
+    "    DIP->>CP2: APIレスポンス accepted / eventId",
+    "    CP2->>CP2: 受付状態と eventId を記録",
+    "    MIWS->>DIP: 面接日程変更イベント eventId",
+    "    DIP->>CP2: 面接日程変更イベント eventId",
+    "    CP2->>CP2: eventId で重複確認",
+    "    CP2->>CP2: 面接日程の変更を反映",
+    "```",
+    "",
+    "```js",
+    "console.log('plain code')",
+    "```",
+    "",
+    "```mermaid",
+    "flowchart LR",
+    "  A -->",
+    "```",
+    ""
+  ].join("\n"))
+  const translatedMarkdownPath = path.join(projectDocsPath, "manual-translated-vietnamese.md")
+  fs.writeFileSync(translatedMarkdownPath, "# Translated markdown smoke\n\nThis artifact should preview in app.\n")
+  fs.writeFileSync(path.join(userDataPath, "projects.json"), `${JSON.stringify({
+    projects: [{
+      id: "proj_0123456789abcdef",
+      name: "Smoke Project",
+      path: projectPath,
+      addedAt: new Date().toISOString(),
+      lastOpenedAt: new Date().toISOString()
+    }]
+  }, null, 2)}\n`)
+
+  const debugPort = await findFreePort()
+  const electronBin = packagedDesktopBin || require("electron")
+  const child = spawn(electronBin, [`--remote-debugging-port=${debugPort}`, ...(packagedDesktopBin ? [] : ["."])], {
+    cwd: path.join(__dirname, ".."),
+    env: {
+      ...process.env,
+      OPENWORKING_USER_DATA_DIR: userDataPath,
+      OPENWORKING_OPENCODE_CONFIG_PATH: path.join(temp, "opencode.json"),
+      ...(packagedDesktopBin ? {} : { OPENWORKING_RUNTIME_BIN: "/does/not/exist" })
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  })
+
+  let stderr = ""
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk.toString()
+  })
+
+  let client
+  try {
+    const target = await waitForTarget(debugPort)
+    client = await connectDebugger(target.webSocketDebuggerUrl)
+    await client.send("Runtime.enable")
+
+    const expression = `
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1800))
+        let runtime = await window.openworking.runtime.get()
+        const nextPaint = () => Promise.race([
+          new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+          new Promise((resolve) => setTimeout(resolve, 250))
+        ])
+        const waitForImages = () => Promise.race([
+          Promise.all(Array.from(document.images).map((image) => {
+            if (image.complete) return Promise.resolve()
+            return new Promise((resolve) => {
+              image.addEventListener("load", resolve, { once: true })
+              image.addEventListener("error", resolve, { once: true })
+            })
+          })),
+          new Promise((resolve) => setTimeout(resolve, 3000))
+        ])
+        const atLatest = () => {
+          const thread = document.querySelector(".thread-scroll")
+          return thread && thread.scrollHeight - thread.scrollTop - thread.clientHeight <= 1
+        }
+        const latestDistance = () => {
+          const thread = document.querySelector(".thread-scroll")
+          return thread ? thread.scrollHeight - thread.scrollTop - thread.clientHeight : null
+        }
+        const waitUntil = async (callback, timeout = 3000) => {
+          const startedAt = Date.now()
+          while (Date.now() - startedAt < timeout) {
+            if (callback()) return true
+            await new Promise((resolve) => setTimeout(resolve, 100))
+          }
+          return false
+        }
+        // Svelte islands remount their host on repaint, so a querySelector can transiently miss an
+        // element that is about to exist (notably right after a resize). Wait instead of assuming.
+        const waitForElement = async (selector, timeout = 3000) => {
+          await waitUntil(() => Boolean(document.querySelector(selector)), timeout)
+          return document.querySelector(selector)
+        }
+        const hasCompactToolStepStatus = (step, statusSelector) => {
+          const label = step?.querySelector(".tool-copy strong")
+          const status = step?.querySelector(statusSelector)
+          const messageCard = step?.closest(".message-card")
+          if (!label || !status || !messageCard) return false
+          const labelRect = label.getBoundingClientRect()
+          const statusRect = status.getBoundingClientRect()
+          const messageRect = messageCard.getBoundingClientRect()
+           const labelStatusGap = statusRect.left - labelRect.right
+           const statusRightGutter = messageRect.right - statusRect.right
+           const isSameLine = Math.abs(statusRect.top - labelRect.top) < 10
+           return isSameLine && labelStatusGap >= 0 && statusRightGutter > 0
+        }
+
+        const smokeProject = { id: "proj_0123456789abcdef", name: "Smoke Project", path: ${JSON.stringify(projectPath)} }
+        const projectCodePath = ${JSON.stringify(projectCodePath)}
+        const translatedMarkdownPath = ${JSON.stringify(translatedMarkdownPath)}
+        state.projects = state.projects.some((project) => project.id === smokeProject.id) ? state.projects : [smokeProject, ...state.projects]
+        state.activeProjectId = "proj_0123456789abcdef"
+        state.expanded.add(state.activeProjectId)
+        state.activeSessionId = null
+        state.sessionsByProject[state.activeProjectId] = []
+        render()
+        await nextPaint()
+        await waitForImages()
+        globalThis.__openworkingSmokeCheckpoint = "initial render"
+        const bodyText = document.body.textContent
+
+        state.activeSessionId = "sess_scroll_smoke"
+        // The packaged run has a live opencode server whose project resolves to this same smoke
+        // directory, so refreshSessionData()/loadProjectSessions() run and call setProjectSessions()
+        // with the server's (empty) session list. That evicted this synthetic session mid-script and
+        // left the thread unrendered, which surfaced far later as a null-element TypeError. Pin the
+        // entry so the async reconciles cannot drop the fixture the UI assertions depend on.
+        const smokeSession = { id: state.activeSessionId, title: "Scroll smoke", directory: smokeProject.path }
+        Object.defineProperty(state.sessionsByProject, state.activeProjectId, {
+          configurable: true,
+          enumerable: true,
+          get() { return [smokeSession] },
+          set() {}
+        })
+        hydrateActiveThread(Array.from({ length: 24 }, (_, index) => ({
+          id: "msg_smoke_" + index,
+          role: index % 2 ? "assistant" : "user",
+          text: "Scroll smoke message " + index + "\\n" + "Long line ".repeat(20)
+        })))
+        render({ threadScroll: "latest" })
+        await nextPaint()
+        await waitForImages()
+        // Guard the precondition every later thread assertion depends on. Without this the thread
+        // silently staying empty surfaces as a TypeError deep in the script instead of a named failure.
+        const rendersThread = await waitUntil(() => Boolean(document.querySelector(".thread-scroll")))
+        state.popover = "plus"
+        render()
+        await nextPaint()
+        document.querySelector('[data-action="togglePlanMode"]').click()
+        await nextPaint()
+        const hidesPlanProposalOnToggle =
+          state.mode === "plan" &&
+          !document.querySelector(".plan-proposal") &&
+          !document.body.textContent.includes("Proposed a plan")
+        const planThread = activeThread()
+        planThread.messages.push({
+          id: "msg_plan_user",
+          role: "user",
+          parts: [{ id: "part_plan_user", messageID: "msg_plan_user", type: "text", text: "Plan the next fix" }]
+        })
+        state.planProposal = {
+          sessionId: state.activeSessionId,
+          afterMessageIndex: planThread.messages.length - 1
+        }
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_plan_reply",
+            messageID: "msg_plan_reply",
+            type: "text",
+            text: "Implementation plan\\n" + "Detailed step. ".repeat(30)
+          }
+        })
+        flushActiveStreamPacing()
+        const settledPlanMessage = activeThread().messages.find((message) => message.id === "msg_plan_reply")
+        if (settledPlanMessage) settledPlanMessage.stats = { ...(settledPlanMessage.stats || {}), completed: true }
+        planThread.status = { type: "idle" }
+        renderThreadContent({ threadScroll: "latest" })
+        await nextPaint()
+        const showsPlanProposalAfterPlanReply =
+          Boolean(document.querySelector(".plan-proposal")) &&
+          document.body.textContent.includes("Proposed a plan")
+        const inlinePlanRendersMarkdown =
+          Boolean(document.querySelector(".plan-card .assistant-text")) &&
+          !document.querySelector(".document-viewer")
+        const acceptedPlanPrompt = "The plan above is approved. Please execute it."
+        state.planAccepted = state.activeSessionId
+        state.planProposal = null
+        state.mode = "agent"
+        state.document = null
+        render()
+        await nextPaint()
+        const acceptPlanClosesViewer =
+          !document.querySelector(".document-viewer") &&
+          state.mode === "agent" &&
+          acceptedPlanPrompt.includes("approved")
+        globalThis.__openworkingSmokeCheckpoint = "plan flow"
+        state.mode = "agent"
+        state.planProposal = null
+        state.planAutoOpened = null
+        state.planAccepted = null
+        render({ threadScroll: "latest" })
+        await nextPaint()
+        const openedAtLatest = atLatest()
+        const openedLatestDistance = latestDistance()
+        const hasSidebarAccount = Boolean(document.querySelector(".side-user"))
+        const hasNoAssistantAvatars = !document.querySelector(".ai-av")
+        const threadInner = document.querySelector(".thread-inner")
+        const replyComposer = document.querySelector(".composer-dock .composer")
+        const replyEditor = document.querySelector(".composer-dock .prompt-editor")
+        const hasWideChat =
+          Boolean(threadInner && replyComposer) &&
+          getComputedStyle(threadInner).maxWidth === "1440px" &&
+          getComputedStyle(replyComposer).maxWidth === "1440px"
+        const replyComposerMinHeight = replyEditor ? parseFloat(getComputedStyle(replyEditor).minHeight) : 0
+        const hasCompactReplyComposer = replyComposerMinHeight >= 58 && replyComposerMinHeight < 88
+        window.resizeTo(980, 680)
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        await nextPaint()
+        const narrowMainElement = document.querySelector(".main")
+        const narrowComposerElement = document.querySelector(".composer-dock .composer")
+        const narrowThreadElement = document.querySelector(".thread-inner")
+        const narrowMain = narrowMainElement?.getBoundingClientRect()
+        const narrowComposer = narrowComposerElement?.getBoundingClientRect()
+        const narrowThreadStyle = narrowThreadElement ? getComputedStyle(narrowThreadElement) : null
+        const keepsNarrowGutters =
+          Boolean(narrowMain && narrowComposer && narrowThreadStyle) &&
+          window.outerWidth <= 1000 &&
+          parseFloat(narrowThreadStyle.paddingLeft) >= 32 &&
+          narrowComposer.left - narrowMain.left >= 31 &&
+          narrowMain.right - narrowComposer.right >= 31
+
+        let thread = await waitForElement(".thread-scroll")
+        thread.scrollTop = 0
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: { id: "part_stream", messageID: "msg_stream", type: "text", text: "Inbound while reading " }
+        })
+        handleRuntimeStream({
+          type: "message.part.delta",
+          sessionID: state.activeSessionId,
+          messageID: "msg_stream",
+          partID: "part_stream",
+          field: "text",
+          delta: "history"
+        })
+        flushActiveStreamPacing()
+        renderThreadContent({ threadScroll: "preserve" })
+        await nextPaint()
+        thread = await waitForElement(".thread-scroll")
+        const preservedHistoryPosition = thread.scrollTop === 0
+        const textStreamingBeforeIdle = document.body.textContent.includes("Inbound while reading history")
+
+        thread.scrollTop = thread.scrollHeight
+        handleRuntimeStream({
+          type: "message.part.delta",
+          sessionID: state.activeSessionId,
+          messageID: "msg_stream",
+          partID: "part_stream",
+          field: "text",
+          delta: " while following latest"
+        })
+        flushActiveStreamPacing()
+        await nextPaint()
+        const followedLatest = atLatest()
+        const followedLatestDistance = latestDistance()
+
+        activeThread().messages.push({
+          id: "msg_thinking_probe",
+          role: "user",
+          parts: [{ id: "part_thinking_probe", messageID: "msg_thinking_probe", type: "text", text: "Start another turn" }]
+        })
+        handleRuntimeStream({ type: "session.status", sessionID: state.activeSessionId, status: { type: "busy" } })
+        await nextPaint()
+        const hasThinkingFallback = document.body.textContent.includes("Thinking")
+        activeThread().messages.pop()
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_tool",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "read",
+            state: { status: "running", input: { filePath: "README.md" } }
+          }
+        })
+        await nextPaint()
+        let runningToolStep = document.querySelector(".tool-step.running")
+        const hasRunningTool = runningToolStep?.textContent.includes("Reading file")
+        const keepsRunningToolStatusCompact = hasCompactToolStepStatus(runningToolStep, ".tool-processing")
+        const runningStepStartsOpen = !runningToolStep?.hasAttribute("aria-expanded")
+        runningToolStep?.click()
+        await nextPaint()
+        runningToolStep = document.querySelector(".tool-step.running")
+        const runningStepCanClose = Boolean(runningToolStep)
+        runningToolStep?.click()
+        await nextPaint()
+        runningToolStep = document.querySelector(".tool-step.running")
+        const runningStepCanReopen = Boolean(runningToolStep)
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_tool",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "read",
+            state: {
+              status: "completed",
+              input: { filePath: "README.md" },
+              metadata: {
+                diff: "@@ -1 +1 @@\\n-old\\n+new",
+                filepath: "README.md"
+              }
+            }
+          }
+        })
+        await nextPaint()
+        let completedToolStep = document.querySelector(".tool-step.completed")
+        const keepsCompletedTool = completedToolStep?.textContent.includes("Read file")
+        const keepsCompletedToolStatusCompact = hasCompactToolStepStatus(completedToolStep, ".tool-state")
+        const completedStepStartsClosed = !completedToolStep?.hasAttribute("aria-expanded")
+        completedToolStep?.click()
+        await nextPaint()
+        completedToolStep = document.querySelector(".tool-step.completed")
+        const completedStepCanReopen = Boolean(completedToolStep)
+        const hidesReadFileRef = !document.querySelector(".file-ref-chip")
+        const hidesReadDiff = !document.querySelector(".changes-summary")
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_write_markdown",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "write",
+            state: {
+              status: "running",
+              input: { filePath: "_template_vi.md" }
+            }
+          }
+        })
+        await nextPaint()
+        const hidesRunningWriteFileRef =
+          ![...document.querySelectorAll(".file-ref-chip")]
+            .some((chip) => chip.textContent.includes("_template_vi.md"))
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_write_markdown",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "write",
+            state: {
+              status: "error",
+              input: { filePath: "_template_vi.md" },
+              error: "File does not exist"
+            }
+          }
+        })
+        await nextPaint()
+        const hidesErroredWriteFileRef =
+          ![...document.querySelectorAll(".file-ref-chip")]
+            .some((chip) => chip.textContent.includes("_template_vi.md"))
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_write_code",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "write",
+            state: {
+              status: "completed",
+              input: { filePath: projectCodePath },
+              metadata: {
+                diff: "@@ -1 +1 @@\\n-old\\n+export const escaped = '<tag>'",
+                filepath: projectCodePath
+              }
+            }
+          }
+        })
+        await nextPaint()
+        const codeFileChip = document.querySelector(".file-ref-chip")
+        const showsCodeFileRef = !codeFileChip
+        const showsWriteDiff =
+          document.querySelector(".changes-summary")?.textContent.includes("1 file") &&
+          document.querySelector(".changes-summary")?.textContent.includes("renderer.js")
+        await openDocument(projectCodePath, {
+          diff: "@@ -1 +1 @@\\n-old\\n+export const escaped = '<tag>'",
+          tab: "diff"
+        })
+        await waitUntil(() => Boolean(document.querySelector(".diff-view")))
+        await nextPaint()
+        // A file with a diff opens on the Diff tab: the unified diff view renders
+        // with the added line tinted, and the full-file Code view is not shown yet.
+        const rendersDiffViewer =
+          Boolean(document.querySelector(".diff-view .diff-line.add")) &&
+          document.querySelector(".diff-view")?.textContent.includes("export const escaped = '<tag>'") &&
+          !document.querySelector(".doc-code")
+        // Switching to the Code tab shows the full highlighted file (escaped, no injection).
+        document.querySelector('[data-doc-tab="code"]')?.click()
+        await nextPaint()
+        const rendersCodeViewer =
+          document.querySelector(".doc-code")?.textContent.includes("export const escaped = '<tag>'") &&
+          !document.querySelector(".doc-content")
+
+        await openDocument("docs/diagram.md")
+        await waitUntil(() => !document.querySelector(".mermaid-block[data-mermaid-pending='true']"))
+        await nextPaint()
+        const rendersMermaidDiagram =
+          Boolean(document.querySelector(".document-viewer .doc-content .mermaid-block.rendered svg")) &&
+          document.querySelector(".document-viewer .doc-content")?.textContent.includes("Diagram preview")
+        const mermaidSvgRect = document.querySelector(".document-viewer .doc-content .mermaid-block.rendered svg")?.getBoundingClientRect()
+        const rendersMermaidAtReadableSize =
+          mermaidSvgRect?.width > 300 &&
+          mermaidSvgRect?.height > 180
+        const mermaidSvgSize = mermaidSvgRect ? Math.round(mermaidSvgRect.width) + "x" + Math.round(mermaidSvgRect.height) : ""
+        const keepsNonMermaidCodeBlock =
+          [...document.querySelectorAll(".document-viewer .doc-content pre code")]
+            .some((code) => code.textContent.includes("console.log('plain code')"))
+        const showsMermaidFallback =
+          document.querySelector(".document-viewer .doc-content .mermaid-block.error .mermaid-source")?.textContent.includes("A -->")
+        globalThis.__openworkingSmokeCheckpoint = "document flow"
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_patch_code",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "apply_patch",
+            state: {
+              status: "completed",
+              input: { files: ["src/renderer.js"] },
+              metadata: {
+                diff: "@@ -1 +1 @@\\n-export const escaped = '<tag>'\\n+export const escaped = '<patch>'",
+                files: ["src/renderer.js"]
+              }
+            }
+          }
+        })
+        await nextPaint()
+        const showsApplyPatchDiff =
+          document.querySelector(".changes-summary")?.textContent.includes("renderer.js") &&
+          document.querySelector(".changes-summary")?.textContent.includes("+1")
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_translate_document",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "translate_document",
+            state: {
+              status: "completed",
+              input: { inputPath: translatedMarkdownPath },
+              metadata: {
+                artifacts: [{ path: translatedMarkdownPath, filename: "manual-translated-vietnamese.md", mime: "text/markdown" }],
+                quality: "warning",
+                warnings: ["Review translated layout"]
+              }
+            }
+          }
+        })
+        await nextPaint()
+        const artifactChip = document.querySelector("[data-open-artifact]")
+        const hasTranslationArtifact =
+          artifactChip?.textContent.includes("manual-translated-vietnamese.md") &&
+          document.querySelector(".artifact-warning")?.textContent.includes("Review translated layout")
+        const keepsArtifactOutsideCollapsedStep = Boolean(artifactChip) && !artifactChip.closest(".tool-step")
+        state.toast = null
+        renderToast()
+        artifactChip?.click()
+        const artifactClickOpensPreview = await waitUntil(() =>
+          document.querySelector(".document-viewer .doc-content")?.textContent.includes("Translated markdown smoke")
+        )
+        const externalArtifactButton = document.querySelector(".document-viewer [data-action='openExternalArtifact']")
+        const artifactPreviewHasExternalButton =
+          externalArtifactButton?.getAttribute("data-artifact-path")?.endsWith("manual-translated-vietnamese.md") === true
+        const artifactClickAvoidsExternalOpenToast =
+          !document.querySelector(".toast")?.textContent.includes("Artifact opened")
+
+        handleRuntimeStream({
+          type: "message.part.updated",
+          sessionID: state.activeSessionId,
+          part: {
+            id: "part_error",
+            messageID: "msg_stream",
+            type: "tool",
+            tool: "bash",
+            state: { status: "error", title: "Run npm test", input: { description: "npm test" }, error: "Command failed" }
+          }
+        })
+        await nextPaint()
+        const errorToolStep = document.querySelector(".tool-step.error")
+        const errorStepStartsOpen = Boolean(errorToolStep?.textContent.includes("failed"))
+
+        handleRuntimeStream({
+          type: "session.status",
+          sessionID: state.activeSessionId,
+          status: { type: "retry", attempt: 2, message: "Rate limited" }
+        })
+        await nextPaint()
+        const hasRetryRow = document.body.textContent.includes("Retrying attempt 2") && document.body.textContent.includes("Rate limited")
+
+        // The renderer intentionally hides assistant actions until the whole TURN is settled, not
+        // just the message: assistantMessageActionsSettled() also requires the thread to be idle
+        // with no running tool. This fixture deliberately left a busy status and a running tool
+        // behind from the checks above, so settle both here as well as marking the reply complete.
+        const streamedAssistant = activeThread().messages.find((message) => message.id === "msg_stream")
+        if (streamedAssistant) streamedAssistant.stats = { ...(streamedAssistant.stats || {}), completed: true }
+        activeThread().status = { type: "idle" }
+        for (const message of activeThread().messages) {
+          for (const part of message.parts || []) {
+            if (part.type === "tool" && (part.state?.status === "running" || part.state?.status === "pending")) {
+              part.state = { ...part.state, status: "completed" }
+            }
+          }
+        }
+        state.pendingAttachments = [{ id: "attachment_smoke", filename: "draft.pdf", mime: "application/pdf" }]
+        render()
+        await nextPaint()
+        const hasAttachmentChip = document.querySelector(".composer-attachments")?.textContent.includes("draft.pdf")
+        document.querySelector('[data-remove-attachment="attachment_smoke"]').click()
+        await nextPaint()
+        const removesAttachmentChip = !document.querySelector(".composer-attachments")
+        globalThis.__openworkingSmokeCheckpoint = "attachment flow"
+
+        activeThread().messages.push({
+          id: "msg_attachment_smoke",
+          role: "user",
+          parts: [
+            { id: "part_attachment_smoke", messageID: "msg_attachment_smoke", type: "file", filename: "history.pdf", mime: "application/pdf" },
+            { id: "part_attachment_text", messageID: "msg_attachment_smoke", type: "text", text: "Review this file" }
+          ]
+        })
+        renderThreadContent({ threadScroll: "latest" })
+        await nextPaint()
+        const keepsHistoryAttachment = document.querySelector(".message-attachments")?.textContent.includes("history.pdf")
+        const hasUserMessageCard = Boolean(document.querySelector(".msg-user .message-card"))
+        const hasAssistantMessageCard = Boolean(document.querySelector(".msg-ai .message-card"))
+        const attachmentCopyButton = document.querySelector('[data-copy-message="msg_attachment_smoke"]')
+        const assistantCopyButton = document.querySelector('[data-copy-message="msg_stream"]')
+        const copyActionOpacity = (button) => {
+          const actions = button?.closest(".message-actions")
+          return actions ? getComputedStyle(actions).opacity : null
+        }
+        const copyActionVisibleWithoutFocus = copyActionOpacity(attachmentCopyButton) === "1"
+        attachmentCopyButton?.focus()
+        const copyActionVisibleOnFocus = await waitUntil(() => copyActionOpacity(attachmentCopyButton) === "1")
+        attachmentCopyButton?.click()
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        const copiesMessageWithToast = document.querySelector(".toast")?.textContent.includes("Message copied")
+        const usesLocalRendererAssets = Array.from(document.querySelectorAll("script[src], link[href]"))
+          .every((element) => !String(element.getAttribute("src") || element.getAttribute("href")).startsWith("http"))
+
+        state.nav = "settings"
+        state.settingsSection = "provider"
+        render()
+        await nextPaint()
+        const apiKey = document.querySelector('[data-field="providerApiKey"]')
+        apiKey.value = "smoke-secret"
+        apiKey.dispatchEvent(new Event("input", { bubbles: true }))
+        render()
+        await nextPaint()
+        const providerSectionText = document.body.textContent
+        state.settingsSection = "advanced"
+        render()
+        await nextPaint()
+        const advancedSectionText = document.body.textContent
+        const effectiveConfig = document.querySelector(".config-json").value
+        const configText = providerSectionText + "\\n" + advancedSectionText
+        state.settingsSection = "provider"
+        render()
+        await nextPaint()
+        const inputModalities = document.querySelector('[data-model-modalities="input"]')
+        const originalInputModalities = inputModalities.value
+        inputModalities.value = originalInputModalities + ", docx"
+        inputModalities.dispatchEvent(new Event("input", { bubbles: true }))
+        await nextPaint()
+        const showsInvalidModality = document.querySelector("[data-model-error]")?.textContent.includes("docx")
+        let blocksInvalidModalitySave = false
+        try {
+          await saveConfig()
+        } catch (error) {
+          blocksInvalidModalitySave = error.message.includes("docx")
+        }
+        const persistedConfig = await window.openworking.config.get()
+        const keepsInvalidModalityOutOfProfile =
+          !persistedConfig.config.provider.gateway.models["gpt-4o-mini"].modalities.input.includes("docx")
+        inputModalities.value = originalInputModalities
+        inputModalities.dispatchEvent(new Event("input", { bubbles: true }))
+        const model = state.config.provider.gateway.models["gpt-4o-mini"]
+        const inputModalityDomList = document.querySelector('[data-model-modalities="input"]')?.value.split(",").map((item) => item.trim()) || []
+        const hasLockedConfigFields =
+          document.querySelectorAll(".form [readonly]").length >= 5 &&
+          !document.querySelector('[data-action="newProvider"]') &&
+          !document.querySelector('[data-model-modalities="output"]')
+        const protectsApiKey =
+          document.querySelector('[data-field="providerApiKey"]')?.type === "password" &&
+          effectiveConfig.includes("[redacted]") &&
+          !effectiveConfig.includes("smoke-secret")
+        globalThis.__openworkingSmokeCheckpoint = "config flow"
+
+        state.nav = "skills"
+        state.skillsTab = "skills"
+        render()
+        await nextPaint()
+        const skillsText = document.body.textContent
+        const builtInSkillCount = document.querySelectorAll('[data-skill-builtin="1"]').length
+        state.skillsTab = "plugins"
+        render()
+        await nextPaint()
+        const pluginsText = document.body.textContent
+        const managedPluginCount = document.querySelectorAll("[data-plugin-managed]").length
+        globalThis.__openworkingSmokeCheckpoint = "ready to return"
+        if (${Boolean(packagedDesktopBin)}) {
+          runtime = await window.openworking.runtime.openProject(smokeProject)
+          const runtimeDeadline = Date.now() + 12000
+          while (runtime.status !== "running" && Date.now() < runtimeDeadline) {
+            await new Promise((resolve) => setTimeout(resolve, 250))
+            runtime = await window.openworking.runtime.get()
+          }
+        }
+        return {
+          hasBrand: document.title.includes("OpenWorking"),
+          hasNewChat: bodyText.includes("New chat"),
+          hasPrompt: bodyText.includes("What should we do today?") && bodyText.includes("Smoke Project"),
+          hasAddProject: Boolean(document.querySelector('[data-action="addProject"]')),
+          // Settings is reached through the account control in the sidebar footer, not a nav item
+          // labelled "Settings" — assert the control itself rather than the old literal text.
+          hasConfigNav: Boolean(document.querySelector('[data-nav="config"]')),
+          rendersThread,
+          hidesPlanProposalOnToggle,
+          showsPlanProposalAfterPlanReply,
+          inlinePlanRendersMarkdown,
+          acceptPlanClosesViewer,
+          openedAtLatest,
+          openedLatestDistance,
+          preservedHistoryPosition,
+          followedLatest,
+          followedLatestDistance,
+          textStreamingBeforeIdle,
+          hasThinkingFallback,
+          hasRunningTool,
+          keepsRunningToolStatusCompact,
+          runningStepStartsOpen,
+          runningStepCanClose,
+          runningStepCanReopen,
+          keepsCompletedTool,
+          keepsCompletedToolStatusCompact,
+          completedStepStartsClosed,
+          completedStepCanReopen,
+          hidesReadFileRef,
+          hidesReadDiff,
+          hidesRunningWriteFileRef,
+          hidesErroredWriteFileRef,
+          showsCodeFileRef,
+          showsWriteDiff,
+          rendersDiffViewer,
+          rendersCodeViewer,
+          rendersMermaidDiagram,
+          rendersMermaidAtReadableSize,
+          mermaidSvgSize,
+          keepsNonMermaidCodeBlock,
+          showsMermaidFallback,
+          showsApplyPatchDiff,
+          hasTranslationArtifact,
+          keepsArtifactOutsideCollapsedStep,
+          artifactClickOpensPreview,
+          artifactPreviewHasExternalButton,
+          artifactClickAvoidsExternalOpenToast,
+          errorStepStartsOpen,
+          hasRetryRow,
+          hasAttachmentChip,
+          removesAttachmentChip,
+          keepsHistoryAttachment,
+          hasUserMessageCard,
+          hasAssistantMessageCard,
+          hasUserCopyAction: Boolean(attachmentCopyButton),
+          hasAssistantCopyAction: Boolean(assistantCopyButton),
+          copyActionVisibleWithoutFocus,
+          copyActionVisibleOnFocus,
+          copiesMessageWithToast,
+          usesLocalRendererAssets,
+          hasSidebarAccount,
+          hasNoAssistantAvatars,
+          hasWideChat,
+          hasCompactReplyComposer,
+          keepsNarrowGutters,
+          hasLockedConfigFields,
+          protectsApiKey,
+          showsInvalidModality,
+          blocksInvalidModalitySave,
+          keepsInvalidModalityOutOfProfile,
+          hasPdfModelModality:
+            inputModalityDomList.includes("pdf") &&
+            configText.includes("App profile JSON") &&
+            configText.includes('"pdf"') &&
+            model.modalities.input.includes("pdf"),
+          hasBuiltInSkills:
+            skillsText.includes("explain-project") &&
+            skillsText.includes("find-bugs") &&
+            skillsText.includes("write-tests") &&
+            skillsText.includes("summarize-changes") &&
+            skillsText.includes("code-review") &&
+            skillsText.includes("docs-update") &&
+            skillsText.includes("pdf") &&
+            skillsText.includes("pptx") &&
+            skillsText.includes("skill-creator") &&
+            skillsText.includes("xlsx") &&
+            skillsText.includes("docx") &&
+            !skillsText.includes("translate-document") &&
+            !skillsText.includes("translate-office-document") &&
+            skillsText.includes("webapp-testing") &&
+            skillsText.includes("cross-chat-memory") &&
+            skillsText.includes("browser-use") &&
+            skillsText.includes("backlog") &&
+            builtInSkillCount === 15,
+          hasManagedPlugins:
+            pluginsText.includes("Plugins") &&
+            pluginsText.includes("translate_document") &&
+            pluginsText.includes("translate_office_document") &&
+            pluginsText.includes("remember") &&
+            pluginsText.includes("always on") &&
+            managedPluginCount === 3,
+          runtimeStatus: runtime.status,
+          runtimeLastError: runtime.lastError,
+          runtimeCommand: runtime.runtime?.command,
+          runtimeArgs: runtime.runtime?.args,
+          runtimeLogs: runtime.logs?.slice(-5),
+          hasTeamCopy:
+            bodyText.includes("Acme Inc") ||
+            bodyText.includes("Team projects") ||
+            bodyText.includes("Invite") ||
+            bodyText.includes("Shared knowledge") ||
+            bodyText.includes("presence")
+        }
+      })()
+    `
+    let result
+    let evaluationTimer
+    try {
+      result = await Promise.race([
+        client.send("Runtime.evaluate", {
+          expression,
+          awaitPromise: true,
+          returnByValue: true
+        }),
+        new Promise((_, reject) => {
+          evaluationTimer = setTimeout(() => reject(new Error("Electron smoke evaluation timed out.")), 30000)
+        })
+      ])
+    } catch (error) {
+      const checkpoint = await client.send("Runtime.evaluate", {
+        expression: "globalThis.__openworkingSmokeCheckpoint || 'before initial render'",
+        returnByValue: true
+      }).catch(() => null)
+      throw new Error(`${error.message} Last checkpoint: ${checkpoint?.result?.value || "unknown"}`)
+    } finally {
+      clearTimeout(evaluationTimer)
+    }
+    if (result.exceptionDetails) {
+      console.error("SMOKE EVAL EXCEPTION:", JSON.stringify(result.exceptionDetails, null, 2))
+      const checkpoint = await client.send("Runtime.evaluate", {
+        expression: "globalThis.__openworkingSmokeCheckpoint || 'before initial render'",
+        returnByValue: true
+      }).catch(() => null)
+      console.error("SMOKE EVAL CHECKPOINT:", checkpoint?.result?.value)
+    }
+    const value = result.result.value
+    if (
+      !value?.hasBrand ||
+      !value.hasNewChat ||
+      !value.hasPrompt ||
+      !value.hasAddProject ||
+      !value.hasConfigNav ||
+      !value.rendersThread ||
+      !value.hidesPlanProposalOnToggle ||
+      !value.showsPlanProposalAfterPlanReply ||
+      !value.inlinePlanRendersMarkdown ||
+      !value.acceptPlanClosesViewer ||
+      !value.openedAtLatest ||
+      !value.preservedHistoryPosition ||
+      !value.followedLatest ||
+      !value.textStreamingBeforeIdle ||
+      !value.hasThinkingFallback ||
+      !value.hasRunningTool ||
+      !value.keepsRunningToolStatusCompact ||
+      !value.runningStepStartsOpen ||
+      !value.runningStepCanClose ||
+      !value.runningStepCanReopen ||
+      !value.keepsCompletedTool ||
+      !value.keepsCompletedToolStatusCompact ||
+      !value.completedStepStartsClosed ||
+      !value.completedStepCanReopen ||
+      !value.hidesReadFileRef ||
+      !value.hidesReadDiff ||
+      !value.hidesRunningWriteFileRef ||
+      !value.hidesErroredWriteFileRef ||
+      !value.showsCodeFileRef ||
+      !value.showsWriteDiff ||
+      !value.rendersDiffViewer ||
+      !value.rendersCodeViewer ||
+      !value.rendersMermaidDiagram ||
+      !value.rendersMermaidAtReadableSize ||
+      !value.keepsNonMermaidCodeBlock ||
+      !value.showsMermaidFallback ||
+      !value.showsApplyPatchDiff ||
+      !value.hasTranslationArtifact ||
+      !value.keepsArtifactOutsideCollapsedStep ||
+      !value.artifactClickOpensPreview ||
+      !value.artifactPreviewHasExternalButton ||
+      !value.artifactClickAvoidsExternalOpenToast ||
+      !value.errorStepStartsOpen ||
+      !value.hasRetryRow ||
+      !value.hasAttachmentChip ||
+      !value.removesAttachmentChip ||
+      !value.keepsHistoryAttachment ||
+      !value.hasUserMessageCard ||
+      !value.hasAssistantMessageCard ||
+      !value.hasUserCopyAction ||
+      !value.hasAssistantCopyAction ||
+      !value.copyActionVisibleWithoutFocus ||
+      !value.copyActionVisibleOnFocus ||
+      !value.copiesMessageWithToast ||
+      !value.usesLocalRendererAssets ||
+      !value.hasSidebarAccount ||
+      !value.hasNoAssistantAvatars ||
+      !value.hasWideChat ||
+      !value.hasCompactReplyComposer ||
+      !value.keepsNarrowGutters ||
+      !value.hasLockedConfigFields ||
+      !value.protectsApiKey ||
+      !value.showsInvalidModality ||
+      !value.blocksInvalidModalitySave ||
+      !value.keepsInvalidModalityOutOfProfile ||
+      !value.hasPdfModelModality ||
+      !value.hasBuiltInSkills ||
+      !value.hasManagedPlugins
+    ) {
+      const failedAssertions = value && typeof value === "object"
+        ? Object.keys(value).filter((key) => value[key] === false && key !== "hasTeamCopy")
+        : []
+      console.error("SMOKE FAILED ASSERTIONS:", JSON.stringify(failedAssertions))
+      throw new Error(`Expected local desktop shell, received ${JSON.stringify(value)}`)
+    }
+    if (value.hasTeamCopy) {
+      throw new Error(`Expected team/sharing copy to be removed, received ${JSON.stringify(value)}`)
+    }
+    if (packagedDesktopBin && value.runtimeStatus !== "running") {
+      throw new Error(`Expected packaged desktop to launch bundled opencode runtime, received ${JSON.stringify(value)}`)
+    }
+    console.log("electron smoke passed")
+  } finally {
+    if (client) client.close()
+    child.kill("SIGINT")
+    setTimeout(() => {
+      if (!child.killed) child.kill("SIGKILL")
+    }, 1000).unref()
+  }
+
+  if (stderr.includes("Uncaught")) {
+    throw new Error(stderr)
+  }
+}
+
+main().catch((error) => {
+  console.error(error.stack || error.message)
+  process.exit(1)
+})
